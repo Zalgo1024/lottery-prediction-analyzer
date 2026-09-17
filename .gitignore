@@ -1,0 +1,63 @@
+# ===== Python =====
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+
+# ===== 运行时生成物（不备份，可再生成） =====
+# 训练/预测/异常记录 + ML 模型（约 585MB，含 pkl 模型）
+training/
+# 统计缓存
+cache/
+# 日志（logs/logger.py 是运行时依赖的源码模块，必须入库；其余日志产物忽略）
+logs/*
+!logs/logger.py
+# 异步任务数据库
+tasks.db
+# pytest 临时目录（沙箱下需显式指定，避免 safe-delete 清理崩溃）
+.pytest_tmp/
+
+# ===== 操作系统 =====
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ===== IDE =====
+.idea/
+.vscode/
+*.swp
+
+# ===== WorkBuddy =====
+.workbuddy/
+.reasonix/
+# 含密钥的本地工具配置（api_key / Authorization），不进版本控制
+reasonix.toml
+
+# ===== 运行时锁文件 =====
+*.csv.lock
+
+# ===== 数据备份（替换前的旧 CSV，本地留档不入库） =====
+*.bak
+
+# ===== 历史开奖数据（约 3.3MB CSV，纳入版本做备份；锁文件与替换前的旧档忽略） =====
+lottery_data/_backup_*/
+
+# ===== 临时/缓存目录（PPT 工具与 pytest 产物，不入库） =====
+.pytest_cache/
+.cache/
+.slidep/
+docs/_backup/
+~$*
+
+# ===== 求职材料（个人用途，绝不入库/公开；2026-09-18 起显式屏蔽） =====
+docs/求职一页纸.*
+docs/求职项目简介/
+docs/_backup/求职*
+求职*
+
+# ===== 运行时状态（看门狗/调度器/worker 状态、重启标志，不入库） =====
+config/
+logs/flask_stdout.log
+logs/run_supervisor.log
