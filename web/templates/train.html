@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block content %}
+<h2><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 9v6M6 7v10M18 7v10M21 9v6M6 12h12"/></svg> 训练工作台</h2>
+<div class="grid-2">
+  <div class="card">
+    <h3>参数设置</h3>
+    <div class="form-group">
+      <label>彩票类型</label>
+      <select id="train-lottery"><option>双色球</option><option>大乐透</option><option>排列5</option><option>福彩3D</option><option>排列3</option><option>七星彩</option></select>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>迭代次数</label>
+        <input id="train-iterations" type="number" value="100" min="10" max="2000">
+      </div>
+      <div class="form-group">
+        <label>早停容忍</label>
+        <input id="train-patience" type="number" value="10" min="3" max="100">
+      </div>
+    </div>
+    <div class="form-group">
+      <label>模型类型</label>
+      <select id="train-model">
+        <option value="statistical">统计频率模型</option>
+        <option value="logistic">逻辑回归</option>
+        <option value="random_forest">随机森林</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>多窗口对比（逗号分隔）</label>
+      <input id="train-windows" type="text" value="30,50,100">
+    </div>
+    <button id="train-start" class="btn btn-primary" onclick="startTrain()"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 3c3 2 5 6 5 10l-3 3H10l-3-3c0-4 2-8 5-10z"/><circle cx="12" cy="9" r="1.5"/><path d="M9 19l-2 2M15 19l2 2"/></svg> 开始训练</button>
+
+    <div id="train-progress" class="hidden" style="margin-top:15px">
+      <div id="train-progress-text">启动中...</div>
+      <div class="progress-bar"><div id="train-progress-fill" class="fill" style="width:0%"></div></div>
+    </div>
+  </div>
+
+  <div>
+    <div id="train-result" class="hidden">
+      <div class="card">
+        <h3>训练结果</h3>
+        <div id="train-result-content"></div>
+      </div>
+    </div>
+    <div class="card">
+      <h3>说明</h3>
+      <ul style="font-size:13px;color:var(--gray);line-height:1.8;padding-left:20px">
+        <li><strong>统计模型</strong>：基于频率+遗漏加权，速度快</li>
+        <li><strong>逻辑回归 / 随机森林</strong>：sklearn 分类模型；报告以『选号命中 vs 随机基线』为准</li>
+        <li>训练完成后自动保存模型权重到 <code>model.pkl</code></li>
+        <li>早停/窗口选择已改用 out-of-sample 选号命中优势，而非旧版损失</li>
+        <li style="color:#c0392b"><strong>诚实提示</strong>：彩票开奖是独立随机事件，历史规律不保证未来结果</li>
+      </ul>
+    </div>
+  </div>
+</div>
+{% endblock %}

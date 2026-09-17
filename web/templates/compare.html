@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block content %}
+
+<h2><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.5" fill="currentColor"/></svg> 最近预测 vs 实际开奖</h2>
+
+<div class="card">
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:15px">
+        <select id="compare-lottery" style="padding:5px 10px;border:1px solid #ddd;border-radius:5px">
+            <option>双色球</option><option>大乐透</option><option>排列5</option><option>福彩3D</option><option>排列3</option><option>七星彩</option>
+        </select>
+        <button class="btn btn-info btn-sm" onclick="loadCompare(document.getElementById('compare-lottery').value)">加载对比</button>
+        <button class="btn btn-default btn-sm" onclick="loadCompareBoth()">全部彩种同轨显示</button>
+    </div>
+    <div id="compare-content"><div class="alert alert-info">点击「加载对比」查看预测命中情况</div></div>
+    <div id="compare-both-content"></div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    loadCompareBoth();
+});
+</script>
+
+{% endblock %}

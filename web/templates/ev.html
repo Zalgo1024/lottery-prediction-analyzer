@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block content %}
+<h2><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.5" fill="currentColor"/></svg>期望时机</h2>
+<p style="color:var(--gray);margin-bottom:15px">动态期望值：固定奖期望 + 当期真实浮动奖期望（奖池滚存驱动）。<strong>单注期望 ≥ 0 表示这一期从数学上"值得买"。</strong></p>
+
+<div style="margin:15px 0;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+  <select id="ev-lottery" style="padding:8px 15px;border:1px solid #ddd;border-radius:5px;font-size:14px">
+    <option value="全部彩种">全部彩种</option>
+    <option>双色球</option>
+    <option>大乐透</option>
+    <option>排列5</option>
+    <option>福彩3D</option>
+    <option>排列3</option>
+    <option>七星彩</option>
+  </select>
+  <select id="ev-limit" style="padding:8px 15px;border:1px solid #ddd;border-radius:5px;font-size:14px">
+    <option value="d120">近 120 天</option>
+    <option value="d90">近 90 天</option>
+    <option value="d180">近 180 天</option>
+    <option value="p50">近 50 期</option>
+    <option value="p100">近 100 期</option>
+    <option value="p200">近 200 期</option>
+  </select>
+  <button class="btn btn-primary" onclick="loadEv()"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.5" fill="currentColor"/></svg>查看</button>
+  <span style="font-size:12px;color:var(--gray)">提示：鼠标悬停曲线查看具体数值</span>
+</div>
+
+<!-- 当前期建议 -->
+<div id="ev-advice"></div>
+
+<!-- 关键指标卡 -->
+<div id="ev-metrics" class="grid-4" style="margin-top:15px"></div>
+
+<!-- 期望曲线 -->
+<div class="card" style="margin-top:15px;position:relative">
+  <h3><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 17l6-6 4 4 8-8"/><path d="M14 7h7v7"/></svg>期望值曲线 <span style="font-size:12px;color:var(--gray);font-weight:normal">（红色虚线 = 期望 0 盈亏平衡线 · 悬停查看明细）</span></h3>
+  <div id="ev-legend" style="display:flex;gap:15px;flex-wrap:wrap;margin:8px 0 12px;font-size:13px"></div>
+  <div style="position:relative">
+    <canvas id="ev-chart" width="900" height="360" style="width:100%;height:auto;display:block"></canvas>
+    <div id="ev-tooltip" style="position:absolute;display:none;background:rgba(255,255,255,0.98);border:1px solid #ddd;border-radius:6px;padding:10px 12px;box-shadow:0 4px 12px rgba(0,0,0,0.12);font-size:12px;pointer-events:none;z-index:10;min-width:160px"></div>
+  </div>
+  <!-- 点击后的固定详情卡 -->
+  <div id="ev-detail-card" class="hidden" style="margin-top:12px"></div>
+</div>
+
+<!-- 训练诚实化指标（期望值曲线下方） -->
+<div class="card" style="margin-top:15px">
+  <h3><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20V4M5 9l7-5 7 5"/></svg>训练诚实化：模型是否真比随机强 <span style="font-size:12px;color:var(--gray);font-weight:normal">（选号命中 vs 闭眼随机 · 与曲线「是否值得买」互补：彩票负EV，且模型优势极小/无差异）</span></h3>
+  <div id="ev-training-honesty"></div>
+</div>
+
+<!-- 待开奖推荐清单（期望值曲线下方） -->
+<div class="card" style="margin-top:15px">
+  <h3><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3 8-8"/><path d="M3 12h4M3 6h4M3 18h4"/></svg>待开奖推荐清单 <span style="font-size:12px;color:var(--gray);font-weight:normal">（按目标期号升序 · 标 ★推荐使用）</span></h3>
+  <div id="ev-pending"></div>
+</div>
+
+<!-- 数据表 -->
+<div class="card" style="margin-top:15px">
+  <h3><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="4" width="12" height="17" rx="2"/><path d="M9 4V3h6v1"/></svg>明细 <span id="ev-stats" style="font-size:12px;color:var(--gray);font-weight:normal"></span></h3>
+  <div id="ev-table-wrap" style="overflow-x:auto"></div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', () => setTimeout(() => loadEv(), 300));
+</script>
+{% endblock %}

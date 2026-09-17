@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block content %}
+<h2><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><circle cx="12" cy="7" r="3"/><path d="M5 21c0-4 3-6 7-6s7 2 7 6"/><path d="M9 13h6"/></svg> 异常检测</h2>
+
+<!-- 功能说明：异常是指什么 -->
+<div class="card" style="margin-bottom:15px;background:var(--color-background-info, #eef4fb);border-left:4px solid var(--info)">
+  <h3 style="margin-bottom:12px"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M9 3h6l-1 7 3 3H7l3-3-1-7z"/><path d="M12 13v8"/></svg> 这里的「异常」是什么意思？</h3>
+  <div style="font-size:13px;color:var(--dark);line-height:1.8">
+    <p style="margin-bottom:10px">
+      <strong>异常 ≠ 预测下期号码，也不代表开奖有问题。</strong><br>
+      它只表示：<strong>某段时间内，开奖号码的统计分布偏离了「完全随机、均匀分布」的理论预期。</strong>
+    </p>
+    <div class="grid-3" style="margin:12px 0">
+      <div style="padding:10px;background:rgba(255,255,255,0.7);border-radius:6px">
+        <strong style="color:#c62828">严重</strong><br>
+        <span style="color:var(--gray)">分布实质偏离，某些号码/区间明显过热或过冷</span>
+      </div>
+      <div style="padding:10px;background:rgba(255,255,255,0.7);border-radius:6px">
+        <strong style="color:#b8860b">可疑</strong><br>
+        <span style="color:var(--gray)">统计上显著，但偏离幅度中等，可作参考</span>
+      </div>
+      <div style="padding:10px;background:rgba(255,255,255,0.7);border-radius:6px">
+        <strong style="color:#5f5e5a">参考</strong><br>
+        <span style="color:var(--gray)">方法本身对彩票号码范围受限，仅作展示</span>
+      </div>
+    </div>
+    <p style="margin-top:10px">
+      <strong>检测方法：</strong>滑动窗口卡方检验 · Benford 首位数定律 · 号码区间偏离 · 冷热号突变 · <strong style="color:#c62828">连号检测</strong> · <strong style="color:#c62828">排序形态检测</strong> · <strong style="color:#c62828">周期性检测</strong>。<br>
+      <strong>怎么用：</strong>看到「严重」不等于知道下期开什么，它只是告诉你历史上某段时间号码分布确实偏了——配号时可以把这些信号当作历史参考。
+    </p>
+    <div class="grid-3" style="margin-top:12px">
+      <div style="padding:10px;background:rgba(255,255,255,0.7);border-radius:6px;font-size:12px">
+        <strong><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M10 14a4 4 0 0 0 6 .5l2-2a4 4 0 0 0-6-6l-1 1"/><path d="M14 10a4 4 0 0 0-6-.5l-2 2a4 4 0 0 0 6 6l1-1"/></svg> 连号检测</strong><br>
+        <span style="color:var(--gray)">单期是否出现 4+ 连号（罕见）；以及<strong>连续多期都出连号</strong>的"聚集期"——直接对应你提到的"连着好几期都是连号"</span>
+      </div>
+      <div style="padding:10px;background:rgba(255,255,255,0.7);border-radius:6px;font-size:12px">
+        <strong><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M4 20L20 4M7 17l-3 3M11 13l-3 3M15 9l-3 3M19 5l-3 3"/></svg> 排序形态</strong><br>
+        <span style="color:var(--gray)">每期号码升序后看"跨度/间距结构"：是否过度聚拢（挤在小区间）或过度发散，与冷热无关</span>
+      </div>
+      <div style="padding:10px;background:rgba(255,255,255,0.7);border-radius:6px;font-size:12px">
+        <strong><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg> 周期性</strong><br>
+        <span style="color:var(--gray)">连号特征的时间自相关 + 单号等间隔重复。彩票本质无周期，本项通常为"未检测到显著周期"的参考结论</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 控制栏 -->
+<div class="card" style="padding:15px 20px;margin-bottom:15px">
+  <div style="display:flex;flex-wrap:wrap;align-items:center;gap:12px">
+    <select id="ano-lottery" style="padding:8px 15px;border:1px solid #ddd;border-radius:5px;font-size:14px">
+      <option>双色球</option><option>大乐透</option>
+      <option>排列5</option><option>福彩3D</option><option>排列3</option><option>七星彩</option>
+    </select>
+    <select id="ano-threshold" style="padding:8px 15px;border:1px solid #ddd;border-radius:5px;font-size:14px">
+      <option value="normal">正常阈值</option>
+      <option value="strict">严格阈值</option>
+      <option value="loose">宽松阈值</option>
+      <option value="all">三档一键对比</option>
+    </select>
+    <button class="btn btn-primary" onclick="loadAnomaly()"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><circle cx="12" cy="7" r="3"/><path d="M5 21c0-4 3-6 7-6s7 2 7 6"/><path d="M9 13h6"/></svg> 执行检测</button>
+    <label style="font-size:13px;color:var(--gray);display:inline-flex;align-items:center;gap:4px;cursor:pointer" title="影响明细里的号码显示顺序（最热/最冷、周期号码保持原语义序；频率图不变）"><input type="checkbox" id="ano-sort-desc" checked onchange="_anoToggleSort(this.checked)"> 号码降序显示</label>
+    <span style="font-size:12px;color:var(--gray)">检测基于全部历史数据，耗时约 1-3 秒</span>
+  </div>
+</div>
+
+<!-- 结果区域 -->
+<div id="ano-summary"><div class="alert alert-info">选择参数后点击「执行检测」</div></div>
+<div id="ano-detail"></div>
+<div id="ano-chart"></div>
+
+{% endblock %}

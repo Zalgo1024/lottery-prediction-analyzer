@@ -1,0 +1,9 @@
+pandas>=2.0.0
+numpy>=1.24.0
+matplotlib>=3.7.0
+scipy>=1.10.0
+scikit-learn>=1.2.0
+optuna>=3.6.2
+lightgbm>=3.3.5
+chinese_calendar>=1.8.0
+flask>=3.0

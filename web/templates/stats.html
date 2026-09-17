@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block content %}
+<h2><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 17l6-6 4 4 8-8"/><path d="M14 7h7v7"/></svg>统计概览</h2>
+<div style="margin:15px 0">
+  <select id="stats-lottery" style="padding:8px 15px;border:1px solid #ddd;border-radius:5px;font-size:14px">
+    <option>双色球</option><option>大乐透</option>
+    <option>排列5</option><option>福彩3D</option><option>排列3</option><option>七星彩</option>
+  </select>
+  <button class="btn btn-primary" onclick="loadStats(document.getElementById('stats-lottery').value)"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><rect x="7" y="10" width="3" height="8"/><rect x="12" y="6" width="3" height="12"/><rect x="17" y="13" width="3" height="5"/></svg>加载统计</button>
+</div>
+<div id="stats-result"><div class="alert alert-info">选择彩票类型后点击「加载统计」</div></div>
+<script>document.addEventListener('DOMContentLoaded', () => setTimeout(() => loadStats('双色球'), 300));</script>
+{% endblock %}

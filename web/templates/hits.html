@@ -1,0 +1,166 @@
+{% extends "base.html" %}
+{% block content %}
+<style>
+.hits-accordion { display:flex; flex-direction:column; gap:10px; }
+.hit-item { background:white; border-radius:8px; box-shadow:0 1px 3px rgba(0,0,0,0.08); overflow:hidden; border-left:4px solid #ffb74d; transition:box-shadow .2s; }
+.hit-item:hover { box-shadow:0 2px 8px rgba(0,0,0,0.1); }
+.hit-item.train { border-left-style:dashed; border-left-color:#bbb; }
+.hit-header { display:flex; justify-content:space-between; align-items:center; padding:14px 16px; cursor:pointer; user-select:none; transition:background .15s; gap:12px; }
+.hit-header:hover { background:#fafafa; }
+.hit-title { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.hit-meta { display:flex; align-items:center; gap:16px; font-size:12px; color:var(--gray); white-space:nowrap; }
+.hit-hit { color:var(--dark); font-weight:600; }
+.hit-arrow { font-size:12px; color:#999; }
+.hit-body { padding:0 16px 16px; border-top:1px solid #f0f0f0; }
+.hit-row { margin-top:12px; display:flex; align-items:flex-start; gap:10px; flex-wrap:wrap; }
+.hit-label { font-size:12px; color:var(--gray); min-width:60px; margin-top:4px; }
+.hit-balls { flex:1; }
+.hit-detail { margin-top:12px; display:flex; flex-wrap:wrap; gap:12px 18px; font-size:12px; color:var(--gray); }
+.hit-detail span strong { color:var(--dark); }
+</style>
+
+<h2><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.5" fill="currentColor"/></svg> 命中历史记录</h2>
+<p style="color:var(--gray);margin-bottom:15px">这里只显示已评估且真正中奖的预测记录。命中等级来自实际开奖对比。点击条目可展开号码详情。</p>
+
+<div style="margin:15px 0;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+  <select id="hits-lottery" onchange="_onHitsLotteryChange()" style="padding:8px 15px;border:1px solid #ddd;border-radius:5px;font-size:14px">
+    <option value="全部" selected>全部彩票</option>
+    <option value="双色球">双色球</option>
+    <option value="大乐透">大乐透</option>
+    <option value="排列5">排列5</option>
+    <option value="福彩3D">福彩3D</option>
+    <option value="排列3">排列3</option>
+    <option value="七星彩">七星彩</option>
+  </select>
+  <select id="hits-prize" style="padding:8px 15px;border:1px solid #ddd;border-radius:5px;font-size:14px">
+    <option value="全部" selected>全部等级</option>
+    <option value="一等">一等奖及以上</option>
+    <option value="二等">二等奖及以上</option>
+    <option value="三等">三等奖及以上</option>
+    <option value="四等">四等奖及以上</option>
+    <option value="五等">五等奖及以上</option>
+    <option value="六等">六等奖及以上</option>
+    <option value="七等">七等奖及以上（大乐透）</option>
+    <option value="八等">八等奖及以上（大乐透）</option>
+    <option value="九等">九等奖（大乐透）</option>
+    <option value="直选">直选（数字型）</option>
+    <option value="组选3">组选3（数字型）</option>
+    <option value="组选6">组选6（数字型）</option>
+  </select>
+  <select id="hits-amount" style="padding:8px 15px;border:1px solid #ddd;border-radius:5px;font-size:14px" title="按「这一注能中多少钱」筛选；浮动奖级读不到当期奖金时不参与该筛选">
+    <option value="" selected>全部奖金</option>
+    <option value="10">奖金 ≥ 10 元</option>
+    <option value="30">奖金 ≥ 30 元</option>
+    <option value="100">奖金 ≥ 100 元</option>
+    <option value="200">奖金 ≥ 200 元</option>
+    <option value="500">奖金 ≥ 500 元</option>
+    <option value="1000">奖金 ≥ 1000 元</option>
+    <option value="10000">奖金 ≥ 1 万元</option>
+  </select>
+  <select id="hits-type" style="padding:8px 15px;border:1px solid #ddd;border-radius:5px;font-size:14px">
+    <option value="全部" selected>全部类型</option>
+    <option value="预测">真预测（开奖前生成）</option>
+    <option value="训练">开奖后回测（训练）</option>
+  </select>
+  <span id="hits-time-wrap" style="position:relative;display:inline-flex;align-items:center">
+    <button id="hits-time-btn" type="button" onclick="_toggleCalendar(event)" style="padding:8px 14px;border:1px solid #ddd;border-radius:5px;background:#fff;font-size:14px;cursor:pointer;display:inline-flex;align-items:center;gap:6px" title="点开日历选时间段，或用快捷预设">
+      <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+      <span id="hits-time-label">全部时间</span>
+      <span style="font-size:10px;color:#999">▾</span>
+    </button>
+    <input type="hidden" id="hits-date-from">
+    <input type="hidden" id="hits-date-to">
+    <div id="hits-calendar" style="display:none;position:absolute;top:calc(100% + 6px);left:0;z-index:60;background:#fff;border:1px solid #e3e6ea;border-radius:10px;box-shadow:0 10px 28px rgba(0,0,0,0.16);padding:12px;width:292px;user-select:none"></div>
+  </span>
+  <select id="hits-limit" style="padding:8px 15px;border:1px solid #ddd;border-radius:5px;font-size:14px" title="查询上限，防止数据过多">
+    <option value="5">5 条</option>
+    <option value="10">10 条</option>
+    <option value="20">20 条</option>
+    <option value="50">50 条</option>
+    <option value="100" selected>100 条</option>
+    <option value="200">200 条</option>
+    <option value="500">500 条</option>
+    <option value="0">全部</option>
+  </select>
+  <select id="hits-red" style="padding:8px 15px;border:1px solid #ddd;border-radius:5px;font-size:14px" title="仅对双色球/大乐透生效">
+    <option value="" selected>红球命中 ≥ 0</option>
+    <option value="1">红球命中 ≥ 1</option>
+    <option value="2">红球命中 ≥ 2</option>
+    <option value="3">红球命中 ≥ 3</option>
+    <option value="4">红球命中 ≥ 4</option>
+    <option value="5">红球命中 ≥ 5</option>
+    <option value="6">红球命中 ≥ 6</option>
+  </select>
+  <select id="hits-blue" style="padding:8px 15px;border:1px solid #ddd;border-radius:5px;font-size:14px" title="仅对双色球/大乐透生效">
+    <option value="" selected>蓝球命中 ≥ 0</option>
+    <option value="1">蓝球命中 ≥ 1</option>
+    <option value="2">蓝球命中 ≥ 2</option>
+  </select>
+  <select id="hits-total" style="padding:8px 15px;border:1px solid #ddd;border-radius:5px;font-size:14px;display:none" title="对所有彩种生效">
+    <option value="" selected>总命中 ≥ 0</option>
+    <option value="1">总命中 ≥ 1</option>
+    <option value="2">总命中 ≥ 2</option>
+    <option value="3">总命中 ≥ 3</option>
+    <option value="4">总命中 ≥ 4</option>
+    <option value="5">总命中 ≥ 5</option>
+    <option value="6">总命中 ≥ 6</option>
+    <option value="7">总命中 ≥ 7</option>
+  </select>
+  <select id="hits-sort" style="padding:8px 15px;border:1px solid #ddd;border-radius:5px;font-size:14px">
+    <option value="time" data-order="desc" selected>时间（新→旧）</option>
+    <option value="time" data-order="asc">时间（旧→新）</option>
+    <option value="prize" data-order="asc">中奖等级（高→低）</option>
+    <option value="amount" data-order="desc">单注奖金（高→低）</option>
+    <option value="total_hits" data-order="desc">总命中（高→低）</option>
+    <option value="red_hits" data-order="desc">红球命中（高→低）</option>
+    <option value="blue_hits" data-order="desc">蓝球命中（高→低）</option>
+  </select>
+  <span id="hits-count" title="筛出注数 / 全部中奖注数（不含任何筛选的总数）" style="padding:7px 14px;border:1px solid #f0d0d0;border-radius:5px;background:#fdf5f5;color:#8a2a24;font-size:14px;white-space:nowrap">筛出 <strong id="hits-count-match" style="font-size:17px">—</strong> 注 / <strong id="hits-count-total">—</strong> 注（总数）</span>
+  <button class="btn btn-primary" onclick="loadHits()"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg> 刷新</button>
+</div>
+
+<div id="hits-stat" style="margin:-5px 0 15px;font-size:13px;color:var(--gray)">统计中…</div>
+
+<div id="hits-result"><div class="alert alert-info">加载中...</div></div>
+
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    // 从 URL 参数恢复筛选
+    const params = new URLSearchParams(window.location.search);
+    const lottery = params.get('lottery');
+    const prize = params.get('min_prize');
+    const type = params.get('type');
+    const limit = params.get('limit');
+    const red = params.get('red_hits');
+    const blue = params.get('blue_hits');
+    const total = params.get('total_hits');
+    const amount = params.get('min_amount');
+    const sortBy = params.get('sort_by');
+    const sortOrder = params.get('sort_order');
+    const dateFrom = params.get('date_from');
+    const dateTo = params.get('date_to');
+    if (dateFrom || dateTo) {
+        // 带日期参数进来 → 回填区间并同步按钮文案
+        $('hits-date-from').value = dateFrom || '';
+        $('hits-date-to').value = dateTo || '';
+        _calSyncLabel();
+    }
+    if (lottery) $('hits-lottery').value = lottery;
+    if (prize) $('hits-prize').value = prize;
+    if (amount) $('hits-amount').value = amount;
+    if (type) $('hits-type').value = type;
+    if (limit) $('hits-limit').value = limit;
+    if (red) $('hits-red').value = red;
+    if (blue) $('hits-blue').value = blue;
+    if (total) $('hits-total').value = total;
+    if (sortBy && sortOrder) {
+        const opts = Array.from($('hits-sort').options);
+        const match = opts.find(o => o.value === sortBy && o.getAttribute('data-order') === sortOrder);
+        if (match) $('hits-sort').selectedIndex = match.index;
+    }
+    // 切换彩种时同步红/蓝/总命中筛选框的显隐
+    _onHitsLotteryChange();
+    loadHits();
+});
+</script>
+{% endblock %}

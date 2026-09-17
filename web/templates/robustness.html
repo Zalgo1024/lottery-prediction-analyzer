@@ -1,0 +1,171 @@
+{% extends "base.html" %}
+{% block content %}
+<h2><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v18M5 8l7-5 7 5M5 16l7 5 7-5"/></svg> 鲁棒性监控（第⑥支柱 · 过拟合与稳定性）</h2>
+<p style="color:var(--gray);margin-bottom:15px">实时监控选号流程的<b>稳定性与过拟合风险</b>——全部指标经置换零分布/噪声地板校准，带效应量门控。口径声明：这些指标度量「流程是否被少数窗口/参数主导」，<b>不代表号码中奖概率</b>（号码不可预测，L0 结论不变）。</p>
+
+<!-- 全彩种判定卡片 -->
+<div id="rb-cards" style="display:flex;gap:10px;flex-wrap:wrap;margin:10px 0 15px"></div>
+
+<!-- worker 心跳 -->
+<div id="rb-worker" style="margin:0 0 15px;padding:10px 14px;border:1px solid var(--color-border-secondary,#e5e7eb);border-radius:8px;background:var(--color-background-secondary,#f9fafb);font-size:13px;color:var(--gray)">worker 心跳加载中…</div>
+
+<div style="margin:0 0 15px;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+  <select id="rb-lottery" style="padding:8px 15px;border:1px solid #ddd;border-radius:5px;font-size:14px">
+    {% for l in all_lotteries %}<option value="{{ l }}">{{ l }}</option>{% endfor %}
+  </select>
+  <button class="btn btn-primary" onclick="loadDetail()">刷新</button>
+  <span style="color:var(--gray);font-size:13px" id="rb-meta"></span>
+  <span style="color:var(--gray);font-size:12px;margin-left:auto">页面每 30 秒自动刷新</span>
+</div>
+
+<!-- 告警 -->
+<div id="rb-alarms" style="margin:0 0 15px"></div>
+
+<!-- 最新指标明细 -->
+<div id="rb-detail" style="margin:0 0 15px"></div>
+
+<!-- 趋势图（本地 ECharts，无 CDN） -->
+<div style="margin:0 0 15px;padding:14px 16px;border:1px solid var(--color-border-secondary,#e5e7eb);border-radius:8px;background:var(--color-background-secondary,#f9fafb)">
+  <h3 style="margin:0 0 10px">指标趋势（最近 60 次计算）</h3>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+    <div><div style="font-size:13px;font-weight:600;margin-bottom:4px">train-test gap（虚线=置换零分布 P95，实线超虚线且 |gap|&gt;0.05 → 过拟合迹象）</div><div id="chart-gap" style="height:240px"></div></div>
+    <div><div style="font-size:13px;font-weight:600;margin-bottom:4px">窗口稳定性（噪声地板归一化，≈1 稳定 / →0 低稳定）</div><div id="chart-stab" style="height:240px"></div></div>
+    <div><div style="font-size:13px;font-weight:600;margin-bottom:4px">参数敏感度（1-(1+τ)/2，&gt;0.6 告警）</div><div id="chart-sens" style="height:240px"></div></div>
+    <div><div style="font-size:13px;font-weight:600;margin-bottom:4px">数字池分布漂移 max JS（近期 vs 基准）</div><div id="chart-drift" style="height:240px"></div></div>
+  </div>
+</div>
+
+<script src="/static/vendor/echarts.min.js"></script>
+<script>
+const RB_LOT = document.getElementById("rb-lottery");
+const RB_VERDICT = {
+  high_robust:  {label: "高鲁棒", color: "#27ae60"},
+  stable:       {label: "稳定",   color: "#2980b9"},
+  watch:        {label: "观察",   color: "#f39c12"},
+  overfit_risk: {label: "过拟合风险", color: "#c0392b"},
+  null_:        {label: "无数据", color: "#95a5a6"}
+};
+function rbV(v) { return RB_VERDICT[v] || RB_VERDICT.null_; }
+function esc(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+function num(x, d = 4) { return x == null ? "-" : (typeof x === "number" ? x.toFixed(d) : x); }
+const RB_CHARTS = {};
+function rbChart(id) {
+  if (!RB_CHARTS[id]) RB_CHARTS[id] = echarts.init(document.getElementById(id));
+  return RB_CHARTS[id];
+}
+window.addEventListener("resize", () => Object.values(RB_CHARTS).forEach(c => c.resize()));
+
+// ---------- 全彩种判定卡片 + worker 心跳 ----------
+let _summaryTimer = null;
+async function loadSummary() {
+  try {
+    const r = await fetch("/api/robustness/summary");
+    const d = await r.json();
+    const cards = (d.lotteries || []).map(x => {
+      const v = rbV(x.verdict);
+      return `<div title="${esc((x.alarms || []).join("\n"))}" onclick="RB_LOT.value='${esc(x.lottery)}';loadDetail();"
+        style="flex:1;min-width:150px;cursor:pointer;padding:12px 14px;border-radius:8px;border:1px solid ${v.color}44;border-left:4px solid ${v.color};background:#fff">
+        <div style="font-weight:600;font-size:14px">${esc(x.lottery)}</div>
+        <div style="font-size:20px;font-weight:700;color:${v.color};margin:4px 0">${v.label}</div>
+        <div style="font-size:11px;color:var(--gray)">${x.generated_at ? esc(x.generated_at.slice(0, 16)) + " · " + esc(x.mode || "") : "尚无报告（等 worker 触发或点刷新）"}</div>
+        ${x.alarms && x.alarms.length ? `<div style="font-size:11px;color:#c0392b;margin-top:4px">⚠ ${x.alarms.length} 条告警</div>` : ""}
+      </div>`;
+    }).join("");
+    document.getElementById("rb-cards").innerHTML = cards || '<div class="alert alert-info">无数据</div>';
+    const w = d.worker;
+    const el = document.getElementById("rb-worker");
+    if (!w) { el.innerHTML = "⚠ worker 心跳不存在（Web 进程内 worker 未启动？）"; return; }
+    let age = "?";
+    try { age = Math.max(0, Math.round((Date.now() - new Date(w.last_beat).getTime()) / 1000)) + " 秒前"; } catch (e) {}
+    const fresh = !isNaN(parseFloat(age)) && parseFloat(age) < 120;
+    const cur = w.current_task ? `${esc(w.current_task.type)} (${esc(w.current_task.id)})` : "空闲";
+    const st = w.stats || {};
+    el.innerHTML = `<b>持续计算核心</b>：<span style="color:${fresh ? "#27ae60" : "#c0392b"};font-weight:600">${fresh ? "● 在线" : "○ 心跳滞后"}</span>
+      · id ${esc(w.worker_id)} · 模式 ${esc(w.mode)} · 轮询 ${esc(w.poll_interval)}s
+      · 当前任务：${cur}
+      · 累计 认领 ${esc(st.claimed ?? 0)} / 完成 ${esc(st.done ?? 0)} / 失败 ${esc(st.failed ?? 0)} / 事件入队 ${esc(st.events_enqueued ?? 0)}
+      · 心跳 ${esc(w.last_beat || "-")}（${esc(age)}）`;
+  } catch (e) {
+    document.getElementById("rb-cards").innerHTML = `<div class="alert alert-warning">判定卡片加载失败：${esc(e.message)}</div>`;
+  }
+}
+
+// ---------- 单彩种详情 ----------
+let _detailTimer = null;
+async function loadDetail() {
+  const lot = RB_LOT.value;
+  try {
+    const r = await fetch(`/api/robustness?lottery=${encodeURIComponent(lot)}`);
+    const d = await r.json();
+    if (d.error) { document.getElementById("rb-meta").textContent = d.error; return; }
+    const rep = d.report;
+    document.getElementById("rb-meta").textContent = rep
+      ? `报告生成于 ${esc(rep.generated_at)} · 数据截至期号 ${esc(rep.data_upto_issue)} · 模式 ${esc(rep.mode)}`
+      : "尚无报告（等 worker 触发，或跑 cli.py robustness <彩种>）";
+
+    // 告警
+    const al = document.getElementById("rb-alarms");
+    if (rep && rep.alarms && rep.alarms.length) {
+      al.innerHTML = rep.alarms.map(a =>
+        `<div style="padding:8px 14px;border-radius:6px;background:#fdf0ef;border:1px solid #f5b7b1;color:#c0392b;margin-bottom:6px;font-size:13px">⚠ ${esc(a)}</div>`).join("");
+    } else if (rep) {
+      al.innerHTML = `<div style="padding:8px 14px;border-radius:6px;background:#eafaf1;border:1px solid #a9dfbf;color:#27ae60;font-size:13px">✓ 无告警</div>`;
+    } else { al.innerHTML = ""; }
+
+    // 指标明细
+    const det = document.getElementById("rb-detail");
+    if (rep && rep.metrics) {
+      const m = rep.metrics;
+      const g = m.train_test_gap, w = m.window_stability, p = m.param_sensitivity, dr = m.pool_drift;
+      const zoneRows = dr ? (dr.zones || []).map(z =>
+        `<tr><td>${esc(z["分区"])}</td><td>${num(z.js, 5)}</td><td>${num(z.null_p95, 5)}</td>
+         <td>${z.alarm ? '<span style="color:#c0392b;font-weight:600">超限</span>' : '<span style="color:#27ae60">正常</span>'}</td></tr>`).join("") : "";
+      det.innerHTML = `
+      <div style="display:flex;gap:24px;flex-wrap:wrap;padding:12px 16px;border:1px solid var(--color-border-secondary,#e5e7eb);border-radius:8px;background:#fff;font-size:13px">
+        <div><b>train-test gap</b><br>gap=<span style="font-weight:600">${num(g && g.gap)}</span>（零分布 P95=${num(g && g.null_p95)}，${g ? g.n_folds : "-"} 折）</div>
+        <div><b>窗口稳定性</b><br>stability=<span style="font-weight:600">${num(w && w.stability)}</span>（cross=${num(w && w.cross_jaccard)} ÷ noise=${num(w && w.noise_floor)}）</div>
+        <div><b>参数敏感度</b><br>sensitivity=<span style="font-weight:600">${num(p && p.sensitivity)}</span>（Kendall τ=${num(p && p.mean_kendall_tau)}）</div>
+        <div><b>分布漂移</b><br>maxJS=<span style="font-weight:600">${num(dr && dr.max_js, 5)}</span>（${dr ? esc((dr.alarm_zones || []).join(",") || "无超限分区") : "-"}）</div>
+      </div>
+      ${zoneRows ? `<table class="table" style="width:100%;border-collapse:collapse;font-size:13px;margin-top:8px">
+        <thead><tr><th>分区</th><th>JS 散度</th><th>随机重切 P95</th><th>判定</th></tr></thead><tbody>${zoneRows}</tbody></table>` : ""}`;
+    } else { det.innerHTML = ""; }
+
+    renderTrend(d.trend || []);
+  } catch (e) {
+    document.getElementById("rb-meta").textContent = "加载失败：" + e.message;
+  }
+}
+
+// ---------- 趋势图 ----------
+function renderTrend(trend) {
+  const x = trend.map(t => (t.time || "").slice(5, 16).replace("T", " "));
+  const mk = (key, refKey, unit, color) => ({
+    grid: {left: 46, right: 10, top: 26, bottom: 22},
+    xAxis: {type: "category", data: x, axisLabel: {fontSize: 10}},
+    yAxis: {type: "value", axisLabel: {fontSize: 10}},
+    tooltip: {trigger: "axis"},
+    legend: {top: 0, right: 0, textStyle: {fontSize: 10}},
+    series: [
+      {name: key, type: "line", data: trend.map(t => t[key]), connectNulls: false,
+       symbolSize: 4, lineStyle: {width: 2, color}, itemStyle: {color}},
+      ...(refKey ? [{name: refKey, type: "line", data: trend.map(t => t[refKey]),
+        connectNulls: false, symbol: "none", lineStyle: {width: 1.5, type: "dashed", color: "#c0392b"},
+        itemStyle: {color: "#c0392b"}}] : [])
+    ]
+  });
+  rbChart("chart-gap").setOption(mk("train_test_gap", "null_p95"));
+  rbChart("chart-stab").setOption(mk("window_stability", null));
+  rbChart("chart-sens").setOption(mk("param_sensitivity", null));
+  rbChart("chart-drift").setOption(mk("max_pool_drift_js", null));
+}
+
+RB_LOT.addEventListener("change", loadDetail);
+loadSummary();
+loadDetail();
+_summaryTimer = setInterval(loadSummary, 30000);
+_detailTimer = setInterval(loadDetail, 30000);
+</script>
+{% endblock %}

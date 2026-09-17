@@ -1,0 +1,183 @@
+{% extends "base.html" %}
+{% block content %}
+
+<h2><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><rect x="7" y="10" width="3" height="8"/><rect x="12" y="6" width="3" height="12"/><rect x="17" y="13" width="3" height="5"/></svg>数据看板</h2>
+
+<!-- 全局数据滞后告警横幅（无滞后时 display:none） -->
+<div id="data-lag-banner" style="display:none"></div>
+
+<!-- 今日自动化简报（主动通知） -->
+<div id="auto-brief"></div>
+
+<!-- 自动化运行状态 -->
+<div class="card" style="margin-bottom:15px">
+  <h3><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="8" width="14" height="11" rx="2"/><path d="M12 4v4M9 13h.01M15 13h.01M9 16h6"/><path d="M3 12v3M21 12v3"/></svg>自动化运行状态 <span id="auto-status-badge"></span></h3>
+  <div id="auto-status-content" style="font-size:13px"><div class="alert alert-info">加载中...</div></div>
+  <div style="margin-top:8px">
+    <button class="btn btn-sm btn-info" onclick="try{showAutoDetail();}catch(e){alert('页面脚本未加载，请刷新页面（Ctrl/Cmd+Shift+R）');}" title="查看自动流水线最近一次做了什么：抓到的开奖号、生成的预测、异常告警、命中情况、执行步骤"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="4" width="12" height="17" rx="2"/><path d="M9 4V3h6v1"/></svg>查看上次运行明细</button>
+    <span style="font-size:12px;color:var(--gray);margin-left:6px">自动流水线上次跑了什么？点这里看</span>
+  </div>
+  <div style="margin-top:10px;border-top:1px solid var(--color-border-tertiary,#eee);padding-top:10px">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <span style="font-size:13px;font-weight:600">自动调度（内置）</span>
+      <label style="font-size:13px;color:var(--gray);display:inline-flex;align-items:center;gap:4px;cursor:pointer">
+        <input type="checkbox" id="sched-enabled" onchange="toggleScheduler(this.checked)"> <span id="sched-enabled-label">启用中</span>
+      </label>
+      <button class="btn btn-sm btn-info" onclick="runSchedulerNow()">立即运行全部</button>
+      <span style="font-size:12px;color:var(--gray);margin-left:6px">由本程序内部调度，开奖日后自动跑流水线（不再依赖 Windows 定时任务）</span>
+    </div>
+    <div id="sched-status" style="margin-top:8px;font-size:13px"></div>
+  </div>
+  <div id="ev-ticker" style="margin-top:8px;font-size:13px"></div>
+</div>
+
+<!-- 运行明细展开区（showAutoDetail 注入） -->
+<div id="auto-detail" style="display:none"></div>
+
+<!-- 出号数量（固定 / 动态滑轨，2026-09-14） -->
+<div class="card" style="margin-bottom:15px">
+  <h3><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3"/><path d="M1 14h6M9 8h6M17 16h6"/></svg>出号数量
+    <span id="ticket-size-badge" class="badge" style="font-size:11px"></span>
+  </h3>
+  <p style="font-size:12px;color:var(--gray);margin:4px 0 10px">
+    每次出号几注，由你决定。<b>固定</b>=一直按这个数量出；<b>动态</b>=按情况系统自适应（可能变多、可能变少，冗余高时逐步走低）。
+    改注数只改变成本与规模，<b>不改变单注中奖概率</b>（期望线性性，整体 EV 仍为负）。
+  </p>
+  <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:10px">
+    <label style="font-size:13px;display:inline-flex;align-items:center;gap:5px;cursor:pointer">
+      <input type="radio" name="ts-mode" value="fixed" onchange="tsSetMode('fixed')"> 固定数量
+    </label>
+    <label style="font-size:13px;display:inline-flex;align-items:center;gap:5px;cursor:pointer">
+      <input type="radio" name="ts-mode" value="dynamic" onchange="tsSetMode('dynamic')"> 动态数量
+    </label>
+    <span id="ts-policy" style="font-size:12px;color:var(--gray)"></span>
+  </div>
+  <div id="ts-rows"></div>
+  <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
+    <button class="btn btn-primary btn-sm" onclick="tsSave()">保存</button>
+    <button class="btn btn-warning btn-sm" id="ts-apply-btn" onclick="tsApplyDynamic()" title="动态模式：立刻按策略算一次并应用（不用等下一期开奖）">立即按策略调整</button>
+    <button class="btn btn-sm" onclick="tsReset()">恢复默认</button>
+    <span id="ts-msg" style="font-size:12px;color:var(--gray);align-self:center"></span>
+  </div>
+</div>
+
+<!-- 自动流水线 -->
+<div class="card" style="margin-bottom:15px;background:var(--color-background-info, #eef4fb)">
+  <h3>自动流水线</h3>
+  <p style="font-size:13px;color:var(--gray)">一键完成：抓取最新开奖 → 评估上期预测 → 更新策略权重 → 生成下一期预测</p>
+  <div style="margin-top:8px">
+    <select id="auto-lottery" style="padding:5px 10px;border:1px solid #ddd;border-radius:5px">
+      <option>双色球</option><option>大乐透</option><option>排列5</option><option>福彩3D</option><option>排列3</option><option>七星彩</option>
+    </select>
+    <select id="auto-mode" style="padding:5px 10px;border:1px solid #ddd;border-radius:5px">
+      <option value="fresh">预测模式: 即时统计</option>
+      <option value="rule">预测模式: 规则优选</option>
+      <option value="trained">预测模式: 训练参数</option>
+    </select>
+    <label style="font-size:13px;color:var(--gray)"><input type="checkbox" id="auto-skip-predict"> 只更新不预测</label>
+    <button class="btn btn-success" id="auto-run-btn" onclick="runAutoPipeline()">一键流水线</button>
+    <span style="display:inline-block;width:8px"></span>
+    <button class="btn btn-primary btn-sm" id="auto-run-all-lotteries" onclick="runAutoPipeline({lottery:'__all__'})" title="用当前模式，跑全部彩种">▶ 全部彩种</button>
+    <button class="btn btn-primary btn-sm" id="auto-run-all-modes" onclick="runAutoPipeline({modes:'__all__'})" title="只跑当前彩种，但用 fresh/rule/trained 三种模式">▶▶ 全部模式</button>
+    <button class="btn btn-warning btn-sm" id="auto-run-all-both" onclick="runAutoPipeline({lottery:'__all__', modes:'__all__'})" title="全部彩种 × 全部模式，串行跑完（可能 5~15 分钟）">▶▶▶ 全部彩种 × 全部模式</button>
+  </div>
+  <div id="auto-result" style="margin-top:10px;font-size:13px"></div>
+</div>
+
+<!-- 微信推送（出号 + 中奖记录送上门，2026-09-16；企业微信群机器人 2026-09-17） -->
+<div class="card" style="margin-bottom:15px">
+  <h3><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>微信推送
+    <span id="pn-badge" class="badge" style="font-size:11px"></span>
+  </h3>
+  <p style="font-size:12px;color:var(--gray);margin:4px 0 10px">
+    自动流水线每跑完一个彩种，就把「本期出号（含注数与滑轨状态）+ 上期中奖结算」推到手机。
+    <b>推荐企业微信群机器人</b>：手机装「企业微信」→ 建一个只有自己的群 → 群设置 → 群机器人 → 添加 → 复制 <b>Webhook 地址</b>（免费、不限条数）。
+    也可用 <a href="https://www.pushplus.plus" target="_blank" rel="noopener">PushPlus</a> 或 <a href="https://sct.ftqq.com" target="_blank" rel="noopener">Server酱</a>（免费 5 条/天）发到个人微信。
+  </p>
+  <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:8px">
+    <label style="font-size:13px;display:inline-flex;align-items:center;gap:5px;cursor:pointer">
+      <input type="checkbox" id="pn-enabled" onchange="pnSave()"> 启用推送
+    </label>
+    <select id="pn-provider" onchange="pnHint()" style="padding:4px 8px;border:1px solid #ddd;border-radius:5px;font-size:13px">
+      <option value="wecom">企业微信群机器人（推荐，免费不限额）</option>
+      <option value="pushplus">PushPlus（个人微信）</option>
+      <option value="serverchan">Server酱（免费 5 条/天）</option>
+    </select>
+    <input type="text" id="pn-token" placeholder="粘贴 Webhook 地址（或 ?key= 后面那串）" autocomplete="off"
+           style="flex:1;min-width:200px;padding:5px 10px;border:1px solid #ddd;border-radius:5px;font-size:13px">
+  </div>
+  <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:8px">
+    <label style="font-size:13px;color:var(--gray);display:inline-flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" id="pn-nums" checked> 推出号</label>
+    <label style="font-size:13px;color:var(--gray);display:inline-flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" id="pn-settle" checked> 推中奖结算</label>
+    <label style="font-size:13px;color:var(--gray);display:inline-flex;align-items:center;gap:5px">看板地址
+      <input type="text" id="pn-board" placeholder="选填，如 http://100.64.0.5:5000" autocomplete="off"
+             style="width:190px;padding:4px 8px;border:1px solid #ddd;border-radius:5px;font-size:12px"></label>
+    <button class="btn btn-primary btn-sm" onclick="pnSave()">保存</button>
+    <button class="btn btn-info btn-sm" onclick="pnTest()">发测试消息</button>
+    <span id="pn-msg" style="font-size:12px;color:var(--gray);align-self:center"></span>
+  </div>
+  <div id="pn-status" style="font-size:12px;color:var(--gray)"></div>
+</div>
+
+<!-- 数据状态：主卡双/大，其他数字型彩种按发行机构折叠在下属 -->
+<div class="grid-2" style="margin-top:15px">
+  {% set main_lotteries = [
+    ('双色球', 'ssq', '#e74c3c', 'C(33,6)×C(16,1)'),
+    ('大乐透', 'dlt', '#3498db', 'C(35,5)×C(12,2)')
+  ] %}
+  {% for lottery, prefix, color, formula in main_lotteries %}
+  <div class="card">
+    <h3><svg width="14" height="14" viewBox="0 0 24 24" style="vertical-align:-2px;margin-right:4px"><circle cx="12" cy="12" r="9" fill="{{ color }}"/></svg>{{ lottery }} <span style="font-size:12px;color:var(--gray)">{{ formula }}</span></h3>
+    <div class="grid-2" style="margin:10px 0">
+      <div><div class="stat-value" id="{{ prefix }}-records">-</div><div class="stat-label">总记录数</div></div>
+      <div><div class="stat-value" id="{{ prefix }}-latest" style="flex-direction:column;align-items:flex-start;gap:2px"><span id="{{ prefix }}-latest-draw">-</span><span id="{{ prefix }}-latest-date" style="font-size:14px;font-weight:600;color:#0d6efd;background:#e8f4ff;padding:3px 10px;border-radius:14px">-</span></div><div class="stat-label">最新期号 / 开奖时间</div></div>
+      <div><div class="stat-value" id="{{ prefix }}-next">-</div><div class="stat-label">下一期预测</div></div>
+      <div><div class="stat-value" id="{{ prefix }}-size">-</div><div class="stat-label">数据文件</div></div>
+    </div>
+    <p class="stat-hint" id="{{ prefix }}-fresh-hint">最新期号决定预测准不准——开奖后记得点「<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M6 13l6 6 6-6"/></svg> 更新开奖数据」</p>
+    <button class="btn btn-primary btn-sm" onclick="refreshData('{{ lottery }}', this)"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/></svg>刷新数据</button>
+    <button class="btn btn-success btn-sm" id="{{ prefix }}-update-btn" onclick="updateLotteryData('{{ lottery }}')"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M6 13l6 6 6-6"/></svg>更新开奖数据</button>
+    <div id="{{ prefix }}-dependents" style="margin-top:16px;padding-top:14px;border-top:2px solid var(--color-border-tertiary,#eee)"></div>
+  </div>
+  {% endfor %}
+</div>
+
+<!-- 预测 vs 实际对比 -->
+<div class="card">
+  <h3><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.5" fill="currentColor"/></svg>最近预测 vs 实际开奖</h3>
+  <div style="margin-bottom:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+    <select id="compare-lottery" style="padding:5px 10px;border:1px solid #ddd;border-radius:5px">
+      <option>双色球</option><option>大乐透</option><option>排列5</option><option>福彩3D</option><option>排列3</option><option>七星彩</option>
+    </select>
+    <button class="btn btn-info btn-sm" onclick="loadCompare(document.getElementById('compare-lottery').value)">加载对比</button>
+    <button class="btn btn-default btn-sm" onclick="loadCompareBothInline()">双色球 + 大乐透 同轨显示</button>
+    <a href="/compare" class="btn btn-default btn-sm">全屏对比页 →</a>
+  </div>
+  <div id="compare-content"><div class="alert alert-info">点击「加载对比」查看预测命中情况</div></div>
+  <div id="compare-both-content" style="margin-top:10px"></div>
+</div>
+
+<script>
+// 页面加载时自动加载数据状态和对比
+document.addEventListener('DOMContentLoaded', function() {
+    loadDataStatus();
+    loadAutomationStatus();
+    loadSchedulerStatus();
+    setTimeout(() => loadCompare('双色球'), 500);
+    // 每 30 秒自动刷新数据状态，避免首页数据卡变成静态
+    setInterval(loadDataStatus, 30000);
+});
+
+// 在首页内联显示双色球+大乐透对比
+function loadCompareBothInline() {
+    const bothBox = document.getElementById('compare-both-content');
+    const singleBox = document.getElementById('compare-content');
+    if (singleBox) singleBox.innerHTML = '';
+    if (bothBox) {
+        bothBox.innerHTML = '<div class="alert alert-info"><span class="spinner"></span> 正在加载双色球 + 大乐透同轨对比...</div>';
+        loadCompareBoth();
+    }
+}
+</script>
+
+{% endblock %}

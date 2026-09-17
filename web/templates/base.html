@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>彩票预测分析系统</title>
+    <link rel="stylesheet" href="/static/css/style.css?v={{ asset_ver('css/style.css') }}">
+</head>
+<body>
+
+<!-- 顶部导航 -->
+<div class="navbar">
+    <div class="brand" title="双色球 · 大乐透 · 排列5 · 福彩3D · 排列3 · 七星彩"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-4px;margin-right:6px"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg> Lottery Analyzer</div>
+    <nav>
+        <a href="/">看板</a>
+        <a href="/stats">统计</a>
+        <a href="/pipeline">全流程</a>
+        <a href="/train">训练</a>
+        <a href="/rolling">滚动训练</a>
+        <a href="/predict">预测</a>
+        <a href="/compare">对比</a>
+        <a href="/anomaly">异常</a>
+        <a href="/history">历史</a>
+        <a href="/records">战绩</a>
+        <a href="/ev">期望</a>
+        <a href="/feedback">反馈</a>
+        <a href="/robustness">鲁棒性</a>
+        <button id="btn-restart" class="nav-restart" onclick="restartService()" title="加载磁盘上的最新代码并重启 Web 服务（约 1~2 秒）">
+            <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg> 重启服务
+        </button>
+        <span id="sys-status-badge" class="sys-status-badge" title="当前服务进程实时信息"></span>
+    </nav>
+</div>
+
+<!-- 侧栏 -->
+<div class="sidebar">
+    <div class="section-title">分析工具</div>
+    <a href="/"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:6px"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>数据看板</a>
+    <a href="/stats"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:6px"><path d="M18 20V10M12 20V4M6 20v-6"/></svg>统计概览</a>
+    <a href="/pipeline"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:6px"><circle cx="5" cy="6" r="2"/><circle cx="19" cy="6" r="2"/><circle cx="12" cy="18" r="2"/><path d="M7 6h10M6 7.5l4.5 8.5M18 7.5l-4.5 8.5"/></svg>全流程报告</a>
+    <div class="section-title">建模预测</div>
+    <a href="/train"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:6px"><path d="M12 3v18M5 8l7-5 7 5M5 16l7 5 7-5"/></svg>训练工作台</a>
+    <a href="/rolling"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:6px"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/></svg>滚动预测训练</a>
+    <a href="/predict"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:6px"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3M11 8v6M8 11h6"/></svg>号码预测</a>
+    <div class="section-title">检测 & 记录</div>
+    <a href="/anomaly"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:6px"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>异常检测</a>
+    <a href="/history"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:6px"><path d="M12 8v4l3 3"/><circle cx="12" cy="12" r="9"/></svg>历史记录</a>
+    <a href="/hits"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:6px"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>命中历史</a>
+    <a href="/records"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:6px"><path d="M8 21h8M12 17v4M7 4h10v6a5 5 0 0 1-10 0z"/></svg>策略战绩</a>
+    <a href="/ev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:6px"><path d="M3 17l6-6 4 4 8-8"/><path d="M14 7h7v7"/></svg>期望时机</a>
+    <a href="/feedback"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:6px"><path d="M21 11.5a8.4 8.4 0 0 1-9 8.4 8.6 8.6 0 0 1-3.8-.8L3 21l1.9-5.2a8.4 8.4 0 1 1 16.1-4.3z"/></svg>反馈闭环</a>
+    <a href="/honest" style="color:#c0392b"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:6px"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>诚实看板</a>
+</div>
+
+<!-- 主内容 -->
+<div class="main">
+    <div id="alert-container"></div>
+    {% block content %}{% endblock %}
+</div>
+
+<!-- 模态框 -->
+<div id="modal" class="hidden" style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:999;display:flex;align-items:center;justify-content:center">
+    <div style="background:white;border-radius:8px;max-width:900px;max-height:85vh;overflow:auto;margin:20px;padding:25px;position:relative">
+        <button onclick="closeModal()" style="position:absolute;top:10px;right:15px;border:none;background:none;font-size:24px;cursor:pointer">&times;</button>
+        <div id="modal-body"></div>
+    </div>
+</div>
+
+<script src="/static/js/main.js?v={{ asset_ver('js/main.js') }}"></script>
+</body>
+</html>

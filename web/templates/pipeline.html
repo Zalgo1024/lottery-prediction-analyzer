@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block content %}
+<h2><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg> 全流程报告</h2>
+<p style="color:var(--gray);margin-bottom:15px">5 步计算：基础概率 → 收益期望 → 统计分布 → 风险度量 → 风控投注</p>
+<div style="margin:15px 0">
+  <select id="pipe-lottery" style="padding:8px 15px;border:1px solid #ddd;border-radius:5px;font-size:14px">
+    <option>双色球</option><option>大乐透</option><option>排列5</option><option>福彩3D</option><option>排列3</option><option>七星彩</option>
+  </select>
+  <button class="btn btn-primary" onclick="loadPipeline(document.getElementById('pipe-lottery').value)"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 3c3 2 5 6 5 10l-3 3H10l-3-3c0-4 2-8 5-10z"/><circle cx="12" cy="9" r="1.5"/><path d="M9 19l-2 2M15 19l2 2"/></svg> 执行全流程</button>
+</div>
+<div id="pipeline-result"><div class="alert alert-info">点击「执行全流程」运行 5 步计算</div></div>
+<script>document.addEventListener('DOMContentLoaded', () => setTimeout(() => loadPipeline('双色球'), 300));</script>
+{% endblock %}

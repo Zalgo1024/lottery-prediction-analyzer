@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block content %}
+<h2><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l2 7 7 2-7 2-2 7-2-7-7-2 7-2z"/><path d="M19 13l1.5 4.5L25 19l-4.5 1.5L19 25l-1.5-4.5L13 19l4.5-1.5z" transform="scale(0.5) translate(19 7)"/></svg>号码预测</h2>
+<div class="grid-2">
+  <div class="card">
+    <h3>预测参数</h3>
+    <div class="form-group">
+      <label>彩票类型</label>
+      <select id="pred-lottery" onchange="loadPredRecords()"><option>双色球</option><option>大乐透</option><option>排列5</option><option>福彩3D</option><option>排列3</option><option>七星彩</option></select>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>号码组数</label>
+        <select id="pred-groups">
+          <option value="1">1 组</option>
+          <option value="3">3 组</option>
+          <option value="5" selected>5 组（推荐）</option>
+          <option value="10">10 组</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>预测模式</label>
+        <select id="pred-mode">
+          <option value="fresh">即时统计（3种策略循环）</option>
+          <option value="high_freq">高频策略</option>
+          <option value="missing">遗漏值策略</option>
+          <option value="balanced">区间均衡策略</option>
+          <option value="trained">加载训练参数（ML模型）</option>
+          <option value="rule">规则优选（严格规则筛选）</option>
+        </select>
+      </div>
+    </div>
+    <button class="btn btn-primary" onclick="doPredict()"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l2 7 7 2-7 2-2 7-2-7-7-2 7-2z"/></svg>生成预测</button>
+    <div id="pred-loading" style="margin-top:10px"></div>
+  </div>
+  <div class="card">
+    <h3>说明</h3>
+    <ul style="font-size:13px;color:var(--gray);line-height:1.8;padding-left:20px">
+      <li><strong>即时统计（3种策略循环）</strong>：高频/遗漏/均衡策略自动轮转分配</li>
+      <li><strong>高频策略</strong>：从历史出现频率最高的号码中抽取</li>
+      <li><strong>遗漏值策略</strong>：从当前遗漏值（未出现期数）最高的号码中抽取</li>
+      <li><strong>区间均衡策略</strong>：按号码区间均衡分配，覆盖大小号段</li>
+      <li><strong>加载训练参数（ML模型）</strong>：加载训练好的 ML 模型进行概率预测</li>
+      <li><strong>规则优选（严格规则筛选）</strong>：按固定规则筛选（奇偶4:2、AC值≥6、三区均衡、冷热配比、禁三连号），带选号备注</li>
+      <li>置信度评分含 4 个维度：冷热号/遗漏偏差/分布拟合/历史命中</li>
+      <li>每组号码强制去重（红球重叠 ≥4 自动替换）</li>
+      <li>预测结果自动保存到 <code>training/</code> 目录</li>
+    </ul>
+  </div>
+</div>
+<div class="card" style="margin-top:15px">
+  <h3><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><rect x="7" y="10" width="3" height="8"/><rect x="12" y="6" width="3" height="12"/><rect x="17" y="13" width="3" height="5"/></svg>策略战绩速览 <span style="font-size:12px;color:var(--gray);font-weight:normal">（实盘命中表现，随开奖自动更新）</span></h3>
+  <div id="pred-records"><div class="alert alert-info">选择彩票后自动加载</div></div>
+</div>
+<div id="pred-result" class="hidden" style="margin-top:15px">
+  <div id="pred-info"></div>
+  <div class="card">
+    <h3>预测号码</h3>
+    <div id="pred-numbers"></div>
+  </div>
+</div>
+{% endblock %}

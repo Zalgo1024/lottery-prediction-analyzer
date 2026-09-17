@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block content %}
+<h2><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M8 4h8v4a4 4 0 0 1-8 0V4z"/><path d="M8 5H5v2a3 3 0 0 0 3 3M16 5h3v2a3 3 0 0 1-3 3"/><path d="M12 12v4M9 20h6M10 16h4l-1 4h-2z"/></svg> 策略战绩榜</h2>
+<p style="color:var(--gray);margin-bottom:15px">所有策略公开比命中：实盘战绩（开奖后真实对比） + 回测战绩（历史滚动预测）</p>
+
+<div style="margin:15px 0">
+  <select id="rec-lottery" style="padding:8px 15px;border:1px solid #ddd;border-radius:5px;font-size:14px">
+    <option>双色球</option><option>大乐透</option><option>排列5</option><option>福彩3D</option><option>排列3</option><option>七星彩</option>
+  </select>
+  <button class="btn btn-primary" onclick="loadRecords(document.getElementById('rec-lottery').value)"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M8 4h8v4a4 4 0 0 1-8 0V4z"/><path d="M8 5H5v2a3 3 0 0 0 3 3M16 5h3v2a3 3 0 0 1-3 3"/><path d="M12 12v4M9 20h6M10 16h4l-1 4h-2z"/></svg> 查看战绩</button>
+</div>
+
+<div id="records-result"><div class="alert alert-info">选择彩票类型后点击「查看战绩」</div></div>
+
+<script>
+document.addEventListener('DOMContentLoaded', () => setTimeout(() => loadRecords('双色球'), 300));
+</script>
+{% endblock %}
