@@ -182,12 +182,18 @@ def run_startup_recovery():
         # 稍微等待，让 scheduler 和缓存预热先启动
         import time
         time.sleep(2)
-        recover_all_lotteries(force=False)
+        results = recover_all_lotteries(force=False)
         # 再兜一层：数据已同步但流水线没跑过（简报停在旧期）→ 补跑
         try:
             ensure_pipelines_fresh()
         except Exception as e:
             logger.warning(f"启动检查简报新鲜度异常: {e}")
+        # 启动自检推送（2026-09-18）：补数据结果推一次；未启用/失败一律降级。
+        try:
+            from data.push_notify import push_recovery_summary
+            push_recovery_summary(results)
+        except Exception as e:
+            logger.warning(f"启动自检推送失败(降级): {e}")
 
     t = threading.Thread(target=_run, name="startup-recovery", daemon=True)
     t.start()

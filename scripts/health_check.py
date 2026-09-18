@@ -271,6 +271,14 @@ def main():
     md = BASE / "logs" / f"项目体检_{stamp}.md"
     md.write_text("\n".join(L), encoding="utf-8")
 
+    # 自检推送（2026-09-18）：体检跑完把「真实待处理问题 N 项」摘要推给企业微信群。
+    # 未启用/失败一律降级，绝不影响体检本身。
+    try:
+        from data.push_notify import push_health_summary
+        push_health_summary(real_problems, report_path=str(md))
+    except Exception as e:  # pragma: no cover
+        print(f"  体检推送失败(降级): {e}")
+
     print(f"体检完成：真实待处理问题 {len(real_problems)} 项")
     for n, d in real_problems:
         print(f"  - {n}: {d}")

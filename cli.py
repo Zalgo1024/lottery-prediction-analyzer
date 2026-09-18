@@ -740,6 +740,8 @@ def _cmd_auto(args):
         steps = []
         draw_numbers = {}
         predictions = []
+        pred_info = ""
+        fresh_prediction = False
         hit_summary = ""
         anomaly_flags = []
         retrain = None
@@ -826,7 +828,8 @@ def _cmd_auto(args):
         else:
             hit_summary = "本期无新增预测命中反馈"
 
-        # 结构化命中记录（含真预测/训练回测标识，供前端区分展示）
+        # 结构化命中记录（含真预测/训练回测标识，供前端/推送区分展示）
+        from data.push_notify import _fmt_feedback_ticket, _fmt_match
         hit_records = []
         for r in new_recs_all:
             prize = r.get('中奖等级', '未中')
@@ -834,6 +837,8 @@ def _cmd_auto(args):
                 continue
             hit_records.append({
                 "prize": prize,
+                "num": _fmt_feedback_ticket(r),
+                "match": _fmt_match(r),
                 "count": 1,
                 "valid": bool(r.get('valid_prediction', True)),
                 "type": r.get('记录类型', '训练' if not r.get('valid_prediction', True) else '预测'),
@@ -881,6 +886,7 @@ def _cmd_auto(args):
                 steps.append(f"跳过预测(下期{target_issue}已预测)")
                 log_lines.append(f"[{name}] 跳过预测(下期{target_issue}已预测)")
                 predictions = (existing[0].get('预测号码') or [])[:groups_eff]
+                pred_info = f"复用下一期 {target_issue} 已有预测 {len(predictions)}组"
             else:
                 print(f"[4/6] 生成下一期预测 (mode={args.mode}, groups={groups_eff})...")
                 try:
@@ -891,6 +897,8 @@ def _cmd_auto(args):
                     )
                     path = save_prediction_record(pred)
                     predictions = (pred.get('预测号码') or [])[:groups_eff]
+                    fresh_prediction = True
+                    pred_info = f"目标期号 {target_issue} · 新生成 {pred['号码组数']}组"
                     print(f"  预测日期 {pred['预测日期']}，{pred['号码组数']} 组，已保存 {path}")
                     steps.append(f"预测: {pred['预测日期']} {pred['号码组数']}组")
                     log_lines.append(f"[{name}] 预测: {pred['预测日期']} {pred['号码组数']}组 ({args.mode})")
@@ -975,6 +983,24 @@ def _cmd_auto(args):
         # 不补这一步，看板/内置调度器会误以为该彩种还停留在旧日期（如 8-17）。
         _update_scheduler_state(name, success, message)
         last_message = message
+
+        # ⑦ 微信推送（图片：出号 + 中奖记录送上门；2026-09-18 补上 CLI 这条链路）
+        #    此前只有 Flask 内部流水线会推送，Windows 计划任务走 cli.py auto 时**完全没有推送**。
+        #    未启用/无内容/失败一律静默跳过，绝不影响主流水线。
+        try:
+            from data.push_notify import push_pipeline_result
+            push_pipeline_result(
+                name,
+                predictions=predictions,
+                eval_result=eval_result,
+                hit_summary=hit_summary,
+                hit_records=hit_records,
+                draw_numbers=draw_numbers,
+                pred_info=pred_info,
+                fresh_prediction=fresh_prediction,
+            )
+        except Exception as e:
+            logger.warning(f"微信推送失败(降级): {e}")
 
     # 写流水线日志
     from config import BASE_DIR

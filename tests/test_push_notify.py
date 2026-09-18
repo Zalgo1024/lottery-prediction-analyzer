@@ -11,6 +11,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from data import feedback as pn_fb
+from data import push_image as pi
 from data import push_notify as pn
 
 
@@ -46,7 +48,9 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg["token"], "")
         self.assertTrue(cfg["推号码"])
         self.assertTrue(cfg["推结算"])
-        self.assertEqual(cfg["每日上限"], 10)
+        self.assertTrue(cfg["图片推送"])          # 2026-09-18：默认走图片
+        self.assertEqual(cfg["每日上限"], 0)       # 0 = 不限制
+        self.assertGreater(cfg["推送间隔秒"], 0)
 
     def test_invalid_provider_falls_to_off(self):
         cfg = pn.sanitize({"provider": "weixin", "token": "abc"})
@@ -60,10 +64,18 @@ class ConfigTests(unittest.TestCase):
         self.assertFalse(cfg2["enabled"])
 
     def test_daily_limit_clamped(self):
-        cfg = pn.sanitize({"每日上限": 999})
-        self.assertEqual(cfg["每日上限"], 50)
+        # 2026-09-18：取消每日上限 → 0 合法（= 不限制），不再钳成 1
+        cfg = pn.sanitize({"每日上限": 100001})
+        self.assertEqual(cfg["每日上限"], 100000)
         cfg2 = pn.sanitize({"每日上限": 0})
-        self.assertEqual(cfg2["每日上限"], 1)
+        self.assertEqual(cfg2["每日上限"], 0)
+        cfg3 = pn.sanitize({"每日上限": -5})
+        self.assertEqual(cfg3["每日上限"], 0)
+
+    def test_pace_interval_clamped(self):
+        self.assertEqual(pn.sanitize({"推送间隔秒": -1})["推送间隔秒"], 0.0)
+        self.assertEqual(pn.sanitize({"推送间隔秒": 999})["推送间隔秒"], 60.0)
+        self.assertEqual(pn.sanitize({"推送间隔秒": "x"})["推送间隔秒"], pn.DEFAULTS["推送间隔秒"])
 
     def test_ready_check(self):
         self.assertFalse(pn.effective_ready(pn.sanitize({"provider": "pushplus", "token": "", "enabled": True})))
@@ -185,9 +197,17 @@ class SendTests(unittest.TestCase):
 
 
 class QuotaTests(unittest.TestCase):
+    def test_unlimited_by_default(self):
+        """每日上限默认 0 = 不限制（2026-09-18 用户确认取消）。"""
+        cfg = pn.sanitize({"provider": "pushplus", "token": "t", "enabled": True})
+        from datetime import date
+        cfg["stats"] = {"日期": date.today().isoformat(), "今日已推": 99999}
+        self.assertTrue(pn._quota_ok(cfg))
+
     def test_quota_blocks_when_exhausted(self):
         with _TmpStore():
-            cfg = pn.save_config({"provider": "pushplus", "token": "t", "enabled": True})
+            cfg = pn.save_config({"provider": "pushplus", "token": "t", "enabled": True,
+                                  "每日上限": 10})
             from datetime import date
             cfg["stats"] = {"日期": date.today().isoformat(), "今日已推": 10}
             pn.save_config(cfg)
@@ -198,7 +218,8 @@ class QuotaTests(unittest.TestCase):
                 m.assert_not_called()
 
     def test_quota_resets_next_day(self):
-        cfg = pn.sanitize({"provider": "pushplus", "token": "t", "enabled": True})
+        cfg = pn.sanitize({"provider": "pushplus", "token": "t", "enabled": True,
+                           "每日上限": 10})
         cfg["stats"] = {"日期": "2000-01-01", "今日已推": 99}
         self.assertTrue(pn._quota_ok(cfg))
 
@@ -243,8 +264,12 @@ class PipelineHookTests(unittest.TestCase):
 class WecomTests(unittest.TestCase):
     """企业微信群机器人渠道（2026-09-17 新增）。"""
 
+    def setUp(self):
+        pn._reset_pace()          # 关掉节流，避免测试互相拖慢
+
     def _ready_cfg(self, token="abc-key-123"):
-        return pn.sanitize({"provider": "wecom", "token": token, "enabled": True})
+        return pn.sanitize({"provider": "wecom", "token": token, "enabled": True,
+                            "推送间隔秒": 0})
 
     def test_webhook_url_from_bare_key(self):
         self.assertEqual(pn._wecom_webhook_url("my-key"),
@@ -353,14 +378,19 @@ class MessageContentTests(unittest.TestCase):
 
 
 class WecomPipelineTests(unittest.TestCase):
+    def setUp(self):
+        pn._reset_pace()
+
     def test_end_to_end_wecom(self):
+        """端到端（图片模式）：短文字 markdown + 号码图，全部走通。"""
         with _TmpStore():
             pn.save_config({"provider": "wecom", "token": "k1", "enabled": True,
+                            "推送间隔秒": 0,
                             "看板地址": "http://100.64.0.5:5000"})
-            seen = {}
+            bodies = []
 
             def _capture(req, timeout=None):
-                seen["body"] = json.loads(req.data.decode("utf-8"))
+                bodies.append(json.loads(req.data.decode("utf-8")))
                 return _fake_urlopen({"errcode": 0, "errmsg": "ok"})(req, timeout)
 
             with patch.object(pn.urllib.request, "urlopen", _capture):
@@ -369,17 +399,449 @@ class WecomPipelineTests(unittest.TestCase):
                     predictions=[{"号码": {"红球": [1, 2, 3, 4, 5, 6], "蓝球": [7]}}],
                     eval_result={"new_feedback_count": 1},
                     hit_summary="命中 六等奖×1",
-                    hit_records=[{"issue": "2026104", "prize": "六等奖", "valid": True}],
+                    hit_records=[{"issue": "2026104", "prize": "六等奖", "valid": True,
+                                  "num": "01 02 03 04 05 06 + 07", "match": "红中2 蓝中1"}],
                     draw_numbers={"期号": "2026104", "红球": [1, 2, 3, 4, 5, 6], "蓝球": [7]},
+                    pred_info="目标期号 2026105",
                     fresh_prediction=True)
         self.assertIsNotNone(r)
         self.assertTrue(r["ok"])
-        content = seen["body"]["markdown"]["content"]
-        self.assertIn("彩票助手｜双色球", content)   # 标题并入正文
-        self.assertIn("本期出号", content)           # ① 号码
-        self.assertIn("共 1 注", content)            # ② 数量
-        self.assertIn("六等奖", content)             # ③ 中奖记录
-        self.assertIn("100.64.0.5", content)         # 看板深链
+        # ① 出号文字 ② 号码图 ③ 结算文字 ④ 中奖图
+        texts = [b["markdown"]["content"] for b in bodies if b.get("msgtype") == "markdown"]
+        images = [b for b in bodies if b.get("msgtype") == "image"]
+        self.assertEqual(len(images), 2)
+        joined = "\n".join(texts)
+        self.assertIn("彩票助手｜双色球", joined)     # 标题并入正文
+        self.assertIn("本期出号", joined)             # ① 号码
+        self.assertIn("共 1 注", joined)              # ② 数量
+        self.assertIn("六等奖", joined)               # ③ 中奖记录
+        self.assertIn("100.64.0.5", joined)           # 看板深链
+
+    def test_image_payload_has_base64_and_md5(self):
+        with _TmpStore():
+            cfg = pn.save_config({"provider": "wecom", "token": "k1", "enabled": True,
+                                  "推送间隔秒": 0})
+            png = b"\x89PNG\r\n\x1a\n" + b"payload"
+            seen = {}
+
+            def _capture(req, timeout=None):
+                seen["body"] = json.loads(req.data.decode("utf-8"))
+                return _fake_urlopen({"errcode": 0, "errmsg": "ok"})(req, timeout)
+
+            with patch.object(pn.urllib.request, "urlopen", _capture):
+                r = pn.send_image(png, pn.sanitize(cfg))
+        self.assertTrue(r["ok"])
+        self.assertEqual(seen["body"]["msgtype"], "image")
+        import base64 as _b64
+        import hashlib as _hl
+        self.assertEqual(_b64.b64decode(seen["body"]["image"]["base64"]), png)
+        self.assertEqual(seen["body"]["image"]["md5"], _hl.md5(png).hexdigest())
+
+    def test_no_new_content_skips(self):
+        """既无号码又无结算 → 不发空消息（唯一保留的门槛）。"""
+        with _TmpStore():
+            pn.save_config({"provider": "wecom", "token": "k", "enabled": True,
+                            "推送间隔秒": 0})
+            with patch.object(pn.urllib.request, "urlopen") as m:
+                r = pn.push_pipeline_result("双色球", eval_result={"new_feedback_count": 0})
+                self.assertIsNone(r)
+                m.assert_not_called()
+
+    def test_strict_mode_pushes_reused_numbers(self):
+        """严格模式：复用 pending（fresh_prediction=False）也要推（2026-09-18）。"""
+        with _TmpStore():
+            pn.save_config({"provider": "wecom", "token": "k", "enabled": True,
+                            "推送间隔秒": 0})
+            with patch.object(pn.urllib.request, "urlopen",
+                              _fake_urlopen({"errcode": 0, "errmsg": "ok"})):
+                r = pn.push_pipeline_result(
+                    "双色球", eval_result={"new_feedback_count": 0},
+                    predictions=[{"号码": {"红球": [1, 2, 3, 4, 5, 6], "蓝球": [7]}}],
+                    fresh_prediction=False)
+        self.assertIsNotNone(r)
+        self.assertTrue(r["ok"])
+
+
+class ImageRenderTests(unittest.TestCase):
+    """图片渲染（data/push_image.py）：合法 PNG、乐透/数字型通吃、空输入报错。"""
+
+    def test_numbers_png_for_lotto(self):
+        lines = [f"{i:02d} {i+1:02d} {i+2:02d} {i+3:02d} {i+4:02d} {i+5:02d} + {i % 16 + 1:02d}"
+                 for i in range(1, 51)]
+        png = pi.render_numbers_image(lines, title="双色球 本期出号", subtitle="共 50 注")
+        self.assertTrue(png.startswith(b"\x89PNG"))
+        self.assertGreater(len(png), 2000)
+
+    def test_numbers_png_for_digital(self):
+        png = pi.render_numbers_image(["1 2 3", "4 5 6"], title="排列三 本期出号")
+        self.assertTrue(png.startswith(b"\x89PNG"))
+
+    def test_numbers_many_rows_still_valid(self):
+        png = pi.render_numbers_image([f"{i:03d}" for i in range(120)], title="t")
+        self.assertTrue(png.startswith(b"\x89PNG"))
+
+    def test_wins_png(self):
+        recs = [{"issue": "26104", "num": "01 02 03 04 05 06 + 07",
+                 "match": "红中5 蓝中0", "prize": "四等奖"}]
+        png = pi.render_wins_image(recs, title="双色球 开奖结算", subtitle="命中 四等×1")
+        self.assertTrue(png.startswith(b"\x89PNG"))
+
+    def test_wins_row_max_note(self):
+        recs = [{"issue": f"26{i:03d}", "num": "1 2 3", "match": "", "prize": "九等奖"}
+                for i in range(10)]
+        png = pi.render_wins_image(recs, title="大乐透 开奖结算", row_max=3)
+        self.assertTrue(png.startswith(b"\x89PNG"))
+
+    def test_empty_raises(self):
+        with self.assertRaises(ValueError):
+            pi.render_numbers_image([], title="t")
+        with self.assertRaises(ValueError):
+            pi.render_wins_image([], title="t")
+
+    def test_disclaimer_constant_present(self):
+        self.assertIn("期望为负", pi.DISCLAIMER)
+
+    def test_emoji_stripped(self):
+        """中文字体没有 emoji 字形，画进去会变豆腐块 → 渲染前剔除。"""
+        self.assertEqual(pi._clean("🎉 命中 六等×14"), "命中 六等×14")
+        self.assertEqual(pi._clean("✅ A  ✅ B"), "A B")
+        self.assertEqual(pi._clean("纯中文标题"), "纯中文标题")
+
+    def test_emoji_subtitle_renders_without_missing_glyph(self):
+        import warnings
+        recs = [{"issue": "26104", "num": "01 02 03", "match": "红中1", "prize": "六等奖"}]
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            png = pi.render_wins_image(recs, title="双色球 开奖结算",
+                                       subtitle="🎉 命中 六等×1")
+        self.assertTrue(png.startswith(b"\x89PNG"))
+        self.assertFalse([x for x in caught if "Glyph" in str(x.message)])
+
+
+class PaceTests(unittest.TestCase):
+    """企微「每机器人 20 条/分钟」节流（2026-09-18）。"""
+
+    def setUp(self):
+        pn._reset_pace()
+
+    def tearDown(self):
+        pn._reset_pace()
+
+    def test_pace_sleeps_remaining_interval(self):
+        cfg = pn.sanitize({"provider": "wecom", "token": "k", "enabled": True,
+                           "推送间隔秒": 3.2})
+        clock = {"t": 1000.0}
+        slept = []
+
+        def _mono():
+            return clock["t"]
+
+        def _sleep(sec):
+            slept.append(sec)
+            clock["t"] += sec
+
+        with patch.object(pn.time, "monotonic", _mono), \
+                patch.object(pn.time, "sleep", _sleep):
+            pn._pace(cfg)                      # 首次：无历史 → 不睡
+            self.assertEqual(slept, [])
+            pn._pace(cfg)                      # 紧接一次 → 补足 3.2s
+        self.assertEqual(len(slept), 1)
+        self.assertAlmostEqual(slept[0], 3.2, places=4)
+
+    def test_pace_disabled_when_zero(self):
+        cfg = pn.sanitize({"推送间隔秒": 0})
+        with patch.object(pn.time, "sleep") as m:
+            pn._pace(cfg)
+            pn._pace(cfg)
+            m.assert_not_called()
+
+    def test_send_applies_pace_for_wecom_only(self):
+        cfg = pn.sanitize({"provider": "wecom", "token": "k", "enabled": True})
+        with patch.object(pn, "_pace") as mp, patch.object(
+                pn.urllib.request, "urlopen", _fake_urlopen({"errcode": 0, "errmsg": "ok"})):
+            pn.send("t", "c", cfg)
+        mp.assert_called_once()
+
+        cfg2 = pn.sanitize({"provider": "pushplus", "token": "k", "enabled": True})
+        with patch.object(pn, "_pace") as mp2, patch.object(
+                pn.urllib.request, "urlopen", _fake_urlopen({"code": 200, "msg": "ok"})):
+            pn.send("t", "c", cfg2)
+        mp2.assert_not_called()
+
+    def test_send_image_applies_pace(self):
+        cfg = pn.sanitize({"provider": "wecom", "token": "k", "enabled": True})
+        with patch.object(pn, "_pace") as mp, patch.object(
+                pn.urllib.request, "urlopen", _fake_urlopen({"errcode": 0, "errmsg": "ok"})):
+            r = pn.send_image(b"\x89PNG-fake", cfg)
+        self.assertTrue(r["ok"])
+        mp.assert_called_once()
+
+    def test_image_too_large_rejected(self):
+        cfg = pn.sanitize({"provider": "wecom", "token": "k", "enabled": True})
+        with patch.object(pn.urllib.request, "urlopen") as m:
+            r = pn.send_image(b"x" * (pn.WECOM_MAX_IMAGE_BYTES + 1), cfg)
+        self.assertFalse(r["ok"])
+        m.assert_not_called()
+
+
+class DegradeTests(unittest.TestCase):
+    """图片失败 → 回退文本；推送异常绝不抛出（2026-09-18）。"""
+
+    _ONE = {"号码": {"红球": [1, 2, 3, 4, 5, 6], "蓝球": [7]}}
+
+    def setUp(self):
+        pn._reset_pace()
+
+    def _wecom_cfg(self):
+        return pn.sanitize({"provider": "wecom", "token": "k", "enabled": True,
+                            "推送间隔秒": 0})
+
+    def test_render_failure_falls_back_to_text(self):
+        sent = []
+
+        def _boom(*a, **kw):
+            raise RuntimeError("font missing")
+
+        def _capture(req, timeout=None):
+            sent.append(json.loads(req.data.decode("utf-8")))
+            return _fake_urlopen({"errcode": 0, "errmsg": "ok"})(req, timeout)
+
+        with patch.object(pi, "render_numbers_image", _boom), \
+                patch.object(pn.urllib.request, "urlopen", _capture):
+            res = pn.push_lottery_images("双色球", predictions=[dict(self._ONE)],
+                                        cfg=self._wecom_cfg())
+        self.assertTrue(any(r.get("ok") for r in res))
+        kinds = [b.get("msgtype") for b in sent]
+        self.assertIn("markdown", kinds)
+        self.assertNotIn("image", kinds)
+        text = "\n".join(b["markdown"]["content"] for b in sent
+                         if b.get("msgtype") == "markdown")
+        self.assertIn("本期出号", text)
+
+    def test_unsupported_provider_falls_back_to_text(self):
+        """pushplus / serverchan 不支持图片消息 → 自动回退 markdown。"""
+        cfg = pn.sanitize({"provider": "pushplus", "token": "k", "enabled": True})
+        with patch.object(pn.urllib.request, "urlopen",
+                          _fake_urlopen({"code": 200, "msg": "ok"})):
+            res = pn.push_lottery_images("双色球", predictions=[dict(self._ONE)], cfg=cfg)
+        self.assertTrue(any(r.get("ok") for r in res))
+
+    def test_images_disabled_by_config(self):
+        cfg = pn.sanitize({"provider": "wecom", "token": "k", "enabled": True,
+                           "推送间隔秒": 0, "图片推送": False})
+        seen = []
+
+        def _capture(req, timeout=None):
+            seen.append(json.loads(req.data.decode("utf-8")))
+            return _fake_urlopen({"errcode": 0, "errmsg": "ok"})(req, timeout)
+
+        with patch.object(pn.urllib.request, "urlopen", _capture):
+            res = pn.push_lottery_images("双色球", predictions=[dict(self._ONE)], cfg=cfg)
+        self.assertTrue(any(r.get("ok") for r in res))
+        self.assertTrue(all(b.get("msgtype") == "markdown" for b in seen))
+
+    def test_push_exception_never_raises(self):
+        with _TmpStore():
+            pn.save_config({"provider": "wecom", "token": "k", "enabled": True})
+            with patch.object(pn, "push_lottery_images", side_effect=RuntimeError("boom")):
+                r = pn.push_pipeline_result("双色球", predictions=[dict(self._ONE)])
+        self.assertFalse(r["ok"])
+        self.assertIn("boom", r["detail"])
+
+
+class SelfCheckPushTests(unittest.TestCase):
+    """项目体检 / 启动自检推送（2026-09-18 新增）。
+
+    ⚠️ 这些入口推送成功后会在真身路径 `save_config()`（记 stats），
+       所以**必须**在 `_TmpStore()` 里跑，否则会覆盖 config/push_notify.json。
+       （2026-09-18 真的把用户的 webhook token 覆盖成 "k" 过一次。）
+    """
+
+    def setUp(self):
+        pn._reset_pace()
+
+    def _cfg(self):
+        return pn.sanitize({"provider": "wecom", "token": "k", "enabled": True,
+                            "推送间隔秒": 0})
+
+    def _capture(self, seen):
+        def _fn(req, timeout=None):
+            seen.append(json.loads(req.data.decode("utf-8")))
+            return _fake_urlopen({"errcode": 0, "errmsg": "ok"})(req, timeout)
+        return _fn
+
+    def test_health_summary_lists_problems(self):
+        seen = []
+        with _TmpStore():
+            with patch.object(pn.urllib.request, "urlopen", self._capture(seen)):
+                r = pn.push_health_summary(
+                    [("双色球", "真缺期 26100"), ("系统", "写保护不可用")],
+                    report_path="E:/707/logs/项目体检_20260918.md", cfg=self._cfg())
+        self.assertTrue(r["ok"])
+        text = seen[0]["markdown"]["content"]
+        self.assertIn("真实待处理问题", text)
+        self.assertIn("2 项", text)
+        self.assertIn("真缺期 26100", text)
+        self.assertIn("项目体检_20260918", text)
+
+    def test_health_summary_all_clear(self):
+        seen = []
+        with _TmpStore():
+            with patch.object(pn.urllib.request, "urlopen", self._capture(seen)):
+                r = pn.push_health_summary([], cfg=self._cfg())
+        self.assertTrue(r["ok"])
+        self.assertIn("0 项", seen[0]["markdown"]["content"])
+
+    def test_recovery_summary_reports_fetched_and_errors(self):
+        seen = []
+        results = {"双色球": {"fetched": 2, "latest_before": "26106", "latest_after": "26108"},
+                   "大乐透": {"fetched": 0},
+                   "七星彩": {"error": "timeout"}}
+        with _TmpStore():
+            with patch.object(pn.urllib.request, "urlopen", self._capture(seen)):
+                r = pn.push_recovery_summary(results, cfg=self._cfg())
+        self.assertTrue(r["ok"])
+        text = seen[0]["markdown"]["content"]
+        self.assertIn("双色球", text)
+        self.assertIn("26108", text)
+        self.assertIn("失败 1 个", text)
+
+    def test_recovery_summary_no_change_still_pushes(self):
+        """严格模式：无变化也推（用户要求「每个自检跑完都推一次」）。"""
+        seen = []
+        with _TmpStore():
+            with patch.object(pn.urllib.request, "urlopen", self._capture(seen)):
+                r = pn.push_recovery_summary({"双色球": {"fetched": 0}}, cfg=self._cfg())
+        self.assertTrue(r["ok"])
+        self.assertIn("无彩种滞后", seen[0]["markdown"]["content"])
+
+    def test_not_ready_returns_none(self):
+        with _TmpStore():
+            self.assertIsNone(pn.push_health_summary([], cfg=pn.sanitize(None)))
+            self.assertIsNone(pn.push_recovery_summary({}, cfg=pn.sanitize(None)))
+
+    def test_stats_written_to_store(self):
+        """统计确实落盘（用的是临时 store，不是真身）。"""
+        with _TmpStore():
+            with patch.object(pn.urllib.request, "urlopen",
+                              self._capture([])):
+                pn.push_health_summary([], cfg=self._cfg())
+            self.assertEqual(pn.load_config()["stats"]["最近推送"]["结果"], "成功")
+
+
+def _src_of(path_rel: str, marker: str) -> str:
+    """取项目内某文件 marker 之后的源码片段（用于接线自检，避免导入重模块）。"""
+    p = Path(__file__).resolve().parent.parent / path_rel
+    text = p.read_text(encoding="utf-8-sig")
+    self_assert = text.find(marker)
+    assert self_assert >= 0, f"{path_rel} 里找不到 {marker}"
+    return text[self_assert:]
+
+
+class WiringTests(unittest.TestCase):
+    """接线自检：所有自动化/自检入口都必须调用推送。
+
+    2026-09-18 的缺口：Windows 计划任务走 `cli.py auto` 那条路**完全没有推送**
+    （只有 Flask 内部流水线有），以及 `health_check.py` 从无自动调用者。
+    """
+
+    def test_cli_auto_pushes(self):
+        src = _src_of("cli.py", "def _cmd_auto(")
+        self.assertIn("push_pipeline_result", src)
+        self.assertIn("fresh_prediction", src)
+
+    def test_cli_auto_hit_records_carry_num_and_match(self):
+        src = _src_of("cli.py", "def _cmd_auto(")
+        self.assertIn("_fmt_feedback_ticket", src)
+        self.assertIn("_fmt_match", src)
+
+    def test_health_check_pushes(self):
+        src = _src_of("scripts/health_check.py", "def main(")
+        self.assertIn("push_health_summary", src)
+        self.assertIn("real_problems", src)
+
+    def test_startup_recovery_pushes(self):
+        src = _src_of("web/startup_recovery.py", "def run_startup_recovery(")
+        self.assertIn("push_recovery_summary", src)
+        self.assertIn("recover_all_lotteries", src)
+
+    def test_ps1_runs_health_check_in_nightly(self):
+        src = _src_of("scripts/auto_scheduled.ps1", "if ($Daytime) {")
+        full = (Path(__file__).resolve().parent.parent / "scripts" / "auto_scheduled.ps1"
+                ).read_text(encoding="utf-8-sig")
+        self.assertIn("health_check.py", full)
+        self.assertIn("-not $Daytime", full)
+        self.assertIn("PYTHONUTF8", full)
+        self.assertTrue(src)
+
+
+class LotteryNameTests(unittest.TestCase):
+    """彩种规范名（2026-09-18 修）。
+
+    曾误把 ALL_LOTTERIES 写成「排列三 / 排列五 / 3D」，而全项目规范名是
+    「排列3 / 排列5 / 福彩3D」。名字对不上 → load_pending/load_feedback_history
+    按名取文件全部落空（返回 0），这 3 个彩种在全彩种简报里被**静默跳过**且不报错。
+    """
+
+    def test_all_lotteries_match_config_canonical_names(self):
+        import config
+        for name in pn.ALL_LOTTERIES:
+            self.assertIn(name, config.LOTTERY_CONFIG, f"{name!r} 不是 config 的规范彩种名")
+        self.assertEqual(len(pn.ALL_LOTTERIES), len(set(pn.ALL_LOTTERIES)))
+
+    def test_canonical_lottery_aliases(self):
+        cases = {"排列三": "排列3", "排列五": "排列5", "3D": "福彩3D",
+                 "福彩3d": "福彩3D", "双色球": "双色球", "大乐透": "大乐透"}
+        for alias, canon in cases.items():
+            self.assertEqual(pn.canonical_lottery(alias), canon)
+        self.assertEqual(pn.canonical_lottery("  排列三  "), "排列3")
+        self.assertEqual(pn.canonical_lottery(""), "")
+        self.assertEqual(pn.canonical_lottery(None), "")
+
+    def test_fmt_match_lotto_prefers_red_blue(self):
+        self.assertEqual(pn._fmt_match({"红球命中": 5, "蓝球命中": 1}), "红中5 蓝中1")
+        # 有红/蓝时不应退回「总命中」（否则会变成"命中6位"）
+        self.assertEqual(pn._fmt_match({"红球命中": 5, "总命中": 6}), "红中5")
+
+    def test_fmt_match_numeric_falls_back_to_total_hit(self):
+        self.assertEqual(pn._fmt_match({"总命中": 3}), "命中3位")
+        self.assertEqual(pn._fmt_match({}), "")
+
+    def test_grade_of_dual_keys(self):
+        self.assertEqual(pn._grade_of({"中奖等级": "六等"}), "六等")
+        self.assertEqual(pn._grade_of({"中奖玩法": "直选"}), "直选")
+        self.assertEqual(pn._grade_of({"中奖等级": "六等", "中奖玩法": "直选"}), "六等")
+        self.assertEqual(pn._grade_of({}), "")
+
+    def test_digest_payload_normalizes_alias_before_reading(self):
+        seen = {}
+
+        def _pending(name):
+            seen["pending"] = name
+            return []
+
+        def _hist(name, lookback=None):
+            seen["hist"] = name
+            return []
+
+        with patch.object(pn_fb, "load_pending", _pending), \
+                patch.object(pn_fb, "load_feedback_history", _hist):
+            payload = pn.digest_payload("排列三")
+        self.assertIsNone(payload)                     # 无 pending 也无中奖 → None
+        self.assertEqual(seen["pending"], "排列3")      # 别名已归一，能落到正确文件
+        self.assertEqual(seen["hist"], "排列3")
+
+    def test_digest_payload_counts_numeric_wins(self):
+        rec = {"期号": 26236, "预测号码": {"第1位": [1], "第2位": [7], "第3位": [3]},
+               "总命中": 3, "中奖等级": "直选", "中奖玩法": "直选", "valid_prediction": True}
+        with patch.object(pn_fb, "load_pending", lambda n: []), \
+                patch.object(pn_fb, "load_feedback_history", lambda n, lookback=None: [rec]):
+            payload = pn.digest_payload("排列3")
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload["eval_result"]["new_feedback_count"], 1)
+        self.assertIn("直选", payload["hit_summary"])
+        self.assertEqual(payload["hit_records"][0]["prize"], "直选")
+        self.assertEqual(payload["hit_records"][0]["match"], "命中3位")
 
 
 if __name__ == "__main__":

@@ -133,6 +133,8 @@ def _push_snapshot():
     out["token"] = (token[:2] + "****" + token[-4:]) if len(token) > 8 else ("已配置" if token else "")
     out["token_set"] = bool(token)
     out["ready"] = pn.effective_ready(cfg)
+    out["image_supported"] = cfg.get("provider") == pn.PROVIDER_WECOM
+    out["webhook_base"] = pn.WECOM_WEBHOOK_BASE   # 供前端提示（公开域名，非密钥）
     return out
 
 
@@ -160,12 +162,19 @@ def api_push_set():
             cfg["token"] = token
     if "enabled" in data:
         cfg["enabled"] = bool(data["enabled"])
-    for k in ("推号码", "推结算"):
+    for k in ("推号码", "推结算", "图片推送"):
         if k in data:
             cfg[k] = bool(data[k])
     if "每日上限" in data:
         try:
-            cfg["每日上限"] = max(1, min(50, int(data["每日上限"])))
+            # 0 = 不限制（2026-09-18 用户确认取消上限；>0 才启用保护）
+            cfg["每日上限"] = max(0, min(100000, int(data["每日上限"])))
+        except (TypeError, ValueError):
+            pass
+    if "推送间隔秒" in data:
+        try:
+            # 企微每机器人 20 条/分钟；间隔越大越稳
+            cfg["推送间隔秒"] = max(0.0, min(60.0, float(data["推送间隔秒"])))
         except (TypeError, ValueError):
             pass
     if "看板地址" in data:
@@ -180,7 +189,11 @@ def api_push_set():
 @bp.route("/api/settings/push-notify/test", methods=["POST"])
 @api_error_handler
 def api_push_test():
-    """发一条测试消息验证渠道连通性（不占每日额度语义，但计入统计）。"""
+    """发测试消息验证渠道连通性（计入统计）。
+
+    2026-09-18 起：若开启了「图片推送」且渠道是企业微信，**同时发一张示例号码图**，
+    这样在看板上点一下就能验证图片通道，而不用等到晚上自动化跑。
+    """
     from data import push_notify as pn
     cfg = pn.sanitize(pn.load_config())
     if not pn.effective_ready(cfg):
@@ -189,4 +202,18 @@ def api_push_test():
                      "配置成功！此后自动流水线跑完会把**出号**、**出号数量**与**中奖记录**推到这里。\n\n"
                      "> 仅供研究记录；单注中奖概率恒定，整体期望为负。", cfg)
     pn._mark_pushed(cfg, result.get("ok", False), "测试：" + result.get("detail", ""))
-    return jsonify(result)
+    out = dict(result)
+    if cfg.get("图片推送") and cfg.get("provider") == pn.PROVIDER_WECOM:
+        try:
+            from data import push_image as pi
+            demo = [{"号码": {"红球": [3, 11, 21, 23, 29, 32], "蓝球": [5]}},
+                    {"号码": {"红球": [4, 10, 13, 18, 28, 29], "蓝球": [13]}}]
+            png = pi.render_numbers_image(
+                [pn.format_ticket_line(t) for t in demo],
+                title="测试 · 号码图（示例）", subtitle="以上为随机示例，不是本期出号")
+            img = pn.send_image(png, cfg)
+            pn._mark_pushed(cfg, img.get("ok", False), "测试图片：" + img.get("detail", ""))
+            out["image"] = img
+        except Exception as e:      # 图片通道失败不影响文本测试结果
+            out["image"] = {"ok": False, "detail": str(e)[:200]}
+    return jsonify(out)

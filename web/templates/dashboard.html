@@ -84,24 +84,24 @@
   <div id="auto-result" style="margin-top:10px;font-size:13px"></div>
 </div>
 
-<!-- 微信推送（出号 + 中奖记录送上门，2026-09-16；企业微信群机器人 2026-09-17） -->
+<!-- 微信推送（出号 + 中奖记录送上门，2026-09-16；企业微信群机器人 2026-09-17；图片推送 2026-09-18） -->
 <div class="card" style="margin-bottom:15px">
   <h3><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>微信推送
     <span id="pn-badge" class="badge" style="font-size:11px"></span>
   </h3>
   <p style="font-size:12px;color:var(--gray);margin:4px 0 10px">
-    自动流水线每跑完一个彩种，就把「本期出号（含注数与滑轨状态）+ 上期中奖结算」推到手机。
-    <b>推荐企业微信群机器人</b>：手机装「企业微信」→ 建一个只有自己的群 → 群设置 → 群机器人 → 添加 → 复制 <b>Webhook 地址</b>（免费、不限条数）。
-    也可用 <a href="https://www.pushplus.plus" target="_blank" rel="noopener">PushPlus</a> 或 <a href="https://sct.ftqq.com" target="_blank" rel="noopener">Server酱</a>（免费 5 条/天）发到个人微信。
+    <b>每个自动化/自检入口跑完都会推一次</b>：每个彩种一张<b>号码图</b>（全部注数、不截断）+ 一张<b>中奖图</b>，图前各附一行短文字。
+    <b>推荐企业微信群机器人</b>：手机装「企业微信」→ 建一个只有自己的群 → 群设置 → 群机器人 → 添加 → 复制 <b>Webhook 地址</b>（免费、不限条数，<b>只有它支持图片</b>）。
+    也可用 <a href="https://www.pushplus.plus" target="_blank" rel="noopener">PushPlus</a> 或 <a href="https://sct.ftqq.com" target="_blank" rel="noopener">Server酱</a>（免费 5 条/天，不支持图片 → 自动降级为文字）。
   </p>
   <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:8px">
     <label style="font-size:13px;display:inline-flex;align-items:center;gap:5px;cursor:pointer">
       <input type="checkbox" id="pn-enabled" onchange="pnSave()"> 启用推送
     </label>
     <select id="pn-provider" onchange="pnHint()" style="padding:4px 8px;border:1px solid #ddd;border-radius:5px;font-size:13px">
-      <option value="wecom">企业微信群机器人（推荐，免费不限额）</option>
-      <option value="pushplus">PushPlus（个人微信）</option>
-      <option value="serverchan">Server酱（免费 5 条/天）</option>
+      <option value="wecom">企业微信群机器人（推荐，免费不限额，支持图片）</option>
+      <option value="pushplus">PushPlus（个人微信，仅文字）</option>
+      <option value="serverchan">Server酱（免费 5 条/天，仅文字）</option>
     </select>
     <input type="text" id="pn-token" placeholder="粘贴 Webhook 地址（或 ?key= 后面那串）" autocomplete="off"
            style="flex:1;min-width:200px;padding:5px 10px;border:1px solid #ddd;border-radius:5px;font-size:13px">
@@ -109,6 +109,13 @@
   <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:8px">
     <label style="font-size:13px;color:var(--gray);display:inline-flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" id="pn-nums" checked> 推出号</label>
     <label style="font-size:13px;color:var(--gray);display:inline-flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" id="pn-settle" checked> 推中奖结算</label>
+    <label style="font-size:13px;color:var(--gray);display:inline-flex;align-items:center;gap:4px;cursor:pointer" title="关闭后全部改为文字推送（受 4096 字节限制，号码会被截断）"><input type="checkbox" id="pn-image" checked> 图片推送（号码不截断）</label>
+    <label style="font-size:13px;color:var(--gray);display:inline-flex;align-items:center;gap:5px">每日上限
+      <input type="number" id="pn-limit" min="0" max="100000" step="1" value="0" autocomplete="off"
+             style="width:76px;padding:4px 8px;border:1px solid #ddd;border-radius:5px;font-size:12px">（0 = 不限）</label>
+    <label style="font-size:13px;color:var(--gray);display:inline-flex;align-items:center;gap:5px">发送间隔
+      <input type="number" id="pn-gap" min="0" max="60" step="0.2" value="3.2" autocomplete="off"
+             style="width:66px;padding:4px 8px;border:1px solid #ddd;border-radius:5px;font-size:12px">秒</label>
     <label style="font-size:13px;color:var(--gray);display:inline-flex;align-items:center;gap:5px">看板地址
       <input type="text" id="pn-board" placeholder="选填，如 http://100.64.0.5:5000" autocomplete="off"
              style="width:190px;padding:4px 8px;border:1px solid #ddd;border-radius:5px;font-size:12px"></label>

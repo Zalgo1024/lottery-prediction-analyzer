@@ -917,6 +917,16 @@ async function pnLoad() {
     }
     const nums = $('pn-nums'); if (nums) nums.checked = !!d['推号码'];
     const settle = $('pn-settle'); if (settle) settle.checked = !!d['推结算'];
+    const img = $('pn-image'); if (img) img.checked = d['图片推送'] !== false;
+    const lim = $('pn-limit'); if (lim) lim.value = (d['每日上限'] === undefined ? 0 : d['每日上限']);
+    const gap = $('pn-gap'); if (gap) gap.value = (d['推送间隔秒'] === undefined ? 3.2 : d['推送间隔秒']);
+    // 图片只有企业微信支持；其他渠道给个直观提示
+    const imgWrap = $('pn-image') ? $('pn-image').parentElement : null;
+    if (imgWrap) {
+        const okImg = (d.provider === 'wecom');
+        imgWrap.style.opacity = okImg ? '1' : '0.5';
+        imgWrap.title = okImg ? '' : '当前渠道不支持图片消息，将自动降级为文字推送';
+    }
     const board = $('pn-board'); if (board) board.value = d['看板地址'] || '';
     const badge = $('pn-badge');
     if (badge) {
@@ -929,19 +939,31 @@ async function pnLoad() {
     if (box) {
         const st = (d.stats && d.stats['最近推送']) || null;
         const today = (d.stats && d.stats['今日已推']) || 0;
+        const limit = d['每日上限'] || 0;
         box.innerHTML = (st
             ? `最近推送：${escSched(st['时间'] || '')} · ${escSched(st['结果'] || '')}（${escSched(st['说明'] || '')}）`
             : '尚未推送过')
-            + ` · 今日已推 ${today} 条`;
+            + ` · 今日已推 ${today} 条`
+            + ` · 每日上限 ${limit > 0 ? limit : '不限'}`
+            + ` · 图片推送 ${d['图片推送'] === false ? '关' : (d.provider === 'wecom' ? '开' : '开（渠道不支持，降级文字）')}`;
     }
 }
 
 async function pnSave() {
+    const numOr = (id, dv) => {
+        const el = $(id);
+        if (!el) return dv;
+        const v = parseFloat(el.value);
+        return isNaN(v) ? dv : v;
+    };
     const body = {
         enabled: !!($('pn-enabled') && $('pn-enabled').checked),
         provider: $('pn-provider') ? $('pn-provider').value : 'wecom',
         '推号码': !!($('pn-nums') && $('pn-nums').checked),
         '推结算': !!($('pn-settle') && $('pn-settle').checked),
+        '图片推送': !!($('pn-image') && $('pn-image').checked),
+        '每日上限': Math.max(0, Math.round(numOr('pn-limit', 0))),
+        '推送间隔秒': numOr('pn-gap', 3.2),
         '看板地址': $('pn-board') ? $('pn-board').value.trim() : '',
     };
     const tok = $('pn-token');
@@ -960,7 +982,8 @@ async function pnTest() {
     try {
         const d = await api('/api/settings/push-notify/test', { method: 'POST', body: JSON.stringify({}) });
         pnLoad();
-        pnMsg(d.ok ? '测试消息已发出，请查看群消息' : ('发送失败：' + (d.detail || d.error || '')));
+        const img = d.image ? (d.image.ok ? '，图片通道正常' : '，但图片失败：' + (d.image.detail || '')) : '';
+        pnMsg(d.ok ? ('测试消息已发出' + img + '，请查看群消息') : ('发送失败：' + (d.detail || d.error || '')));
         if (!d.ok) alert('测试失败：' + (d.detail || d.error || '未知错误'));
     } catch (e) {
         alert('测试失败：' + e);

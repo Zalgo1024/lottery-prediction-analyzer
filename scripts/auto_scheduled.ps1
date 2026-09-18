@@ -105,6 +105,17 @@ try {
     if ($LASTEXITCODE -eq 0) { Write-Log '<<< 七星彩 每日补抓完成' }
     else { Write-Log "<<< 七星彩 每日补抓失败 exit=$LASTEXITCODE - 详情见 auto_scheduled_run.log" }
 
+    # ---------- 5. 项目自检（仅晚间主任务；跑完自动推体检摘要） ----------
+    # 2026-09-18：health_check.py 此前从没有任何自动调用者，现在并入晚间流水线收尾。
+    # 白天兜底模式不跑，避免一天多份重复体检推送。
+    if (-not $Daytime) {
+        Write-Log '>>> 项目自检 health_check'
+        $env:PYTHONUTF8 = '1'
+        & 'E:\Python\python.exe' 'E:\707\scripts\health_check.py' *>> $runLog 2>&1
+        if ($LASTEXITCODE -eq 0) { Write-Log '<<< 项目自检完成（已推送体检摘要）' }
+        else { Write-Log "<<< 项目自检失败 exit=$LASTEXITCODE - 详情见 auto_scheduled_run.log" }
+    }
+
     Write-Log '==== 全部完成 ===='
 } finally {
     Remove-Item $lockFile -Force -ErrorAction SilentlyContinue
