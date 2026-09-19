@@ -17,6 +17,7 @@ import pytest
 _TARGETS = (
     ("data.push_notify", "STORE_PATH", "push_notify.json"),
     ("data.ticket_size", "STORE_PATH", "ticket_size.json"),
+    ("web.training_loop", "STORE_PATH", "training_loop.json"),
 )
 
 

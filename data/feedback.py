@@ -298,6 +298,11 @@ def record_pending_prediction(lottery_name: str, prediction: dict):
 
     # 批次规模：本批出号注数（压缩后的最终登记口径）
     prediction["批次规模"] = len(prediction.get("预测号码") or [])
+    # ★ 号码组数同步（2026-09-20 修）：引擎在压缩前写入 len(预测号码)（如 88），
+    #   压缩后票面只剩 36 注但字段没跟着更新 → 审计「号码组数不符」每晚误报。
+    #   契约：号码组数 == len(预测号码)（见 ev/coverage.py 模块注释）。
+    if prediction.get("预测号码") is not None:
+        prediction["号码组数"] = len(prediction["预测号码"])
 
     # —— 去重：同一 (目标期号, 档位) 只保留最新一条预测 ——
     # auto 流水线每次运行都会写入一组新预测，若开奖前不清理，

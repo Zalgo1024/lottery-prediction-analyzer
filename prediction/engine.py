@@ -1068,6 +1068,10 @@ def _predict_generic(lottery_name: str, data: LotteryData, cfg: dict, schema, gr
         "预测日期": str(target_day) if target_day else str(next_draw_date(lottery_name)),
         "预测模式": mode if mode in ("fresh", "rule", "high_freq", "missing", "balanced", "trained") else "fresh",
         "号码组数": len(predicted_sets),
+        # 目标注数 = 本次请求的出号数量（生成时刻的动态配置快照）。体检用它与实际注数
+        # 对比判断「生成端短缺」；不能拿体检时刻的实时配置对比——结算后动态滑轨会调值，
+        # 会把正常的旧批次误报成「出号 N 注（期望 M）」。
+        "目标注数": groups,
         "预测号码": [ps.to_dict() for ps in predicted_sets],
         "历史命中率(近50期)": round(historical_hit_rate, 4),
         "生成时间": datetime.now().isoformat(),
@@ -1246,8 +1250,11 @@ def predict(
     cfg = LOTTERY_CONFIG[lottery_name]
     schema = schema_from_cfg(cfg)
     # 阶段2：非红/蓝彩种（数字型/乐透型）走泛型预测；红/蓝彩种走下方原逻辑（零回归）
+    # ★ record_pending 必须透传（2026-09-20 修）：此前遗漏 → record_pending=False 的
+    #   验证/诊断出号也会写生产 pending（rule 分支同类 bug 的泛型版）。
     if not (schema.red_zone and schema.blue_zone):
-        return _predict_generic(lottery_name, data, cfg, schema, groups, mode)
+        return _predict_generic(lottery_name, data, cfg, schema, groups, mode,
+                                record_pending=record_pending)
     red_zone = schema.red_zone
     blue_zone = schema.blue_zone
     r_min, r_max = red_zone.range_tuple()

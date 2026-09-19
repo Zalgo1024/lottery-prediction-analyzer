@@ -518,6 +518,56 @@ class ImageRenderTests(unittest.TestCase):
         self.assertFalse([x for x in caught if "Glyph" in str(x.message)])
 
 
+class TicketImageTests(unittest.TestCase):
+    """票面图（render_tickets_image，2026-09-18）：看板弹窗同款排版。
+
+    核心：球珠+分组渲染合法 PNG；分组/排序逻辑与看板 _bundleIntoGroups 同口径
+    （每组5注、组内置信度降序、组间按最高置信度降序、Top1 组 recommended）；
+    票面缺 `号码` 结构 → ValueError（push_notify 回退旧行式渲染）。
+    """
+
+    @staticmethod
+    def _ticket(zone: str, nums, strat="高频策略", conf=0.35):
+        return {"号码": {zone: list(nums)}, "策略": strat, "置信度": conf,
+                "类型": "single"}
+
+    def test_lotto_and_digital_render(self):
+        lotto = [self._ticket("红球", [1, 2, 3, 4, 5, 6], conf=0.3 + i * 0.001)
+                 for i in range(12)]
+        for t in lotto:
+            t["号码"]["蓝球"] = [7]
+        png = pi.render_tickets_image(lotto, title="双色球 · 本期出号",
+                                      subtitle="共 12 注",
+                                      meta_lines=["第 26109 期 · 目标开奖 2026-09-22"])
+        self.assertTrue(png.startswith(b"\x89PNG"))
+        digital = [self._ticket("第1位", [d % 10], conf=0.3) for d in range(7)]
+        png2 = pi.render_tickets_image(digital, title="七星彩 · 本期出号")
+        self.assertTrue(png2.startswith(b"\x89PNG"))
+
+    def test_bundle_semantics_match_board(self):
+        ts = [self._ticket("第1位", [1], conf=0.30 + i * 0.01) for i in range(7)]
+        ts += [self._ticket("第1位", [2], conf=0.99)]      # 最高置信度票在第3组
+        groups = pi._bundle_tickets(ts, 5)
+        self.assertEqual(len(groups), 2)
+        self.assertTrue(groups[0]["recommended"])
+        self.assertFalse(groups[1]["recommended"])
+        # Top1 组 = 含 0.99 置信度票的组（第2组），其组内按置信度降序
+        self.assertEqual(float(groups[0]["tickets"][0]["置信度"]), 0.99)
+        self.assertEqual(len(groups[0]["tickets"]), 3)     # 8 注 → 5+3，Top组 3 张
+        self.assertEqual(len(groups[1]["tickets"]), 5)
+
+    def test_missing_zone_raises(self):
+        with self.assertRaises(ValueError):
+            pi.render_tickets_image([{"策略": "x"}], title="t")
+        with self.assertRaises(ValueError):
+            pi.render_tickets_image([], title="t")
+
+    def test_star_survives_clean(self):
+        """★/◎ 是排版必需符号，白名单保留；emoji 仍剔除。"""
+        self.assertEqual(pi._clean("★ 推荐使用"), "★ 推荐使用")
+        self.assertEqual(pi._clean("🎉 命中"), "命中")
+
+
 class PaceTests(unittest.TestCase):
     """企微「每机器人 20 条/分钟」节流（2026-09-18）。"""
 
@@ -606,7 +656,8 @@ class DegradeTests(unittest.TestCase):
             sent.append(json.loads(req.data.decode("utf-8")))
             return _fake_urlopen({"errcode": 0, "errmsg": "ok"})(req, timeout)
 
-        with patch.object(pi, "render_numbers_image", _boom), \
+        with patch.object(pi, "render_tickets_image", _boom), \
+                patch.object(pi, "render_numbers_image", _boom), \
                 patch.object(pn.urllib.request, "urlopen", _capture):
             res = pn.push_lottery_images("双色球", predictions=[dict(self._ONE)],
                                         cfg=self._wecom_cfg())

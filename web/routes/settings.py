@@ -206,11 +206,18 @@ def api_push_test():
     if cfg.get("图片推送") and cfg.get("provider") == pn.PROVIDER_WECOM:
         try:
             from data import push_image as pi
-            demo = [{"号码": {"红球": [3, 11, 21, 23, 29, 32], "蓝球": [5]}},
-                    {"号码": {"红球": [4, 10, 13, 18, 28, 29], "蓝球": [13]}}]
-            png = pi.render_numbers_image(
-                [pn.format_ticket_line(t) for t in demo],
-                title="测试 · 号码图（示例）", subtitle="以上为随机示例，不是本期出号")
+            demo = [{"号码": {"红球": [3, 11, 21, 23, 29, 32], "蓝球": [5]},
+                     "策略": "ML策略", "置信度": 0.38},
+                    {"号码": {"红球": [4, 10, 13, 18, 28, 29], "蓝球": [13]},
+                     "策略": "区间均衡策略", "置信度": 0.37}]
+            try:    # 优先看板弹窗同款票面图
+                png = pi.render_tickets_image(
+                    demo, title="测试 · 号码图（示例）",
+                    subtitle="以上为随机示例，不是本期出号")
+            except Exception:
+                png = pi.render_numbers_image(
+                    [pn.format_ticket_line(t) for t in demo],
+                    title="测试 · 号码图（示例）", subtitle="以上为随机示例，不是本期出号")
             img = pn.send_image(png, cfg)
             pn._mark_pushed(cfg, img.get("ok", False), "测试图片：" + img.get("detail", ""))
             out["image"] = img

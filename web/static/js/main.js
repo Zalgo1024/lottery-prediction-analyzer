@@ -4347,3 +4347,191 @@ async function loadSystemStatus() {
         }
     } catch (e) { /* 忽略：状态非关键 */ }
 }
+
+// ============================================================
+// 持续训练中心（随机锚点走前验证 + 常驻循环，2026-09-18）
+// ============================================================
+
+let _atTaskId = null;
+let _atPollTimer = null;
+let _atCfgLoaded = false;   // 配置只在首次加载时填充，避免 30s 轮询覆盖用户正在编辑的值
+
+async function loadAnchorLoop() {
+    try {
+        const d = await api('/api/training/loop');
+        const badge = $('at-run-badge');
+        if (d.running) {
+            badge.textContent = '● 运行中';
+            badge.style.color = '#27ae60';
+            $('at-run-since').textContent = d.started_at ? `（自 ${d.started_at}）` : '';
+        } else {
+            badge.textContent = '○ 未运行（需重启 Web 服务后自启）';
+            badge.style.color = '#c0392b';
+            $('at-run-since').textContent = '';
+        }
+        if (d.last_cycle && d.last_cycle.lottery) {
+            $('at-last-cycle').textContent =
+                `${d.last_cycle.lottery} @ ${d.last_cycle.ts}（${d.last_cycle.n_trials} 试验 · seed=${d.last_cycle.seed}）`;
+        }
+        $('at-nightly').textContent = d.nightly_done_date
+            ? `最近完成于 ${d.nightly_done_date}` : '本次运行尚未触发';
+
+        if (!_atCfgLoaded && d.config) {
+            const c = d.config;
+            $('at-cfg-enabled').value = c.enabled ? 'on' : 'off';
+            $('at-cfg-interval').value = c.interval_seconds;
+            $('at-cfg-trials').value = c.trials_per_cycle;
+            $('at-cfg-window').value = c.window_size;
+            $('at-cfg-nightly').value = c.nightly_lightgbm ? 'on' : 'off';
+            $('at-cfg-hour').value = c.nightly_hour;
+            $('at-cfg-push').value = c.push_summary ? 'on' : 'off';
+            _atCfgLoaded = true;
+        }
+    } catch (e) { /* 静默：下个周期重试 */ }
+}
+
+async function saveAnchorLoop() {
+    const cfg = {
+        enabled: $('at-cfg-enabled').value === 'on',
+        interval_seconds: parseInt($('at-cfg-interval').value) || 60,
+        trials_per_cycle: parseInt($('at-cfg-trials').value) || 1,
+        window_size: parseInt($('at-cfg-window').value) || 50,
+        nightly_lightgbm: $('at-cfg-nightly').value === 'on',
+        nightly_hour: parseInt($('at-cfg-hour').value) || 3,
+        push_summary: $('at-cfg-push').value === 'on',
+    };
+    try {
+        await api('/api/training/loop', { method: 'POST', body: JSON.stringify(cfg) });
+        showAlert('循环配置已保存', 'success');
+        _atCfgLoaded = false;
+        loadAnchorLoop();
+    } catch (e) {
+        showAlert('保存失败：' + e.message, 'error');
+    }
+}
+
+async function startAnchorRun() {
+    const lottery = $('at-lottery').value;
+    const nTrials = parseInt($('at-trials').value) || 20;
+    const winSize = parseInt($('at-window').value) || 50;
+
+    hide('at-result');
+    show('at-progress');
+    html('at-progress-text', '加载历史并抽取锚点...');
+    $('at-progress-fill').style.width = '0%';
+    $('at-start-btn').disabled = true;
+
+    try {
+        const data = await api('/api/training/anchor/start', {
+            method: 'POST',
+            body: JSON.stringify({ lottery, n_trials: nTrials, window_size: winSize })
+        });
+        _atTaskId = data.task_id;
+        pollAnchorStatus();
+    } catch (e) {
+        hide('at-progress');
+        $('at-start-btn').disabled = false;
+        showAlert('启动失败：' + e.message, 'error');
+    }
+}
+
+function pollAnchorStatus() {
+    if (!_atTaskId) return;
+    _atPollTimer = setInterval(async () => {
+        try {
+            const d = await api(`/api/train/status/${_atTaskId}`);
+            if (d.status === 'running') {
+                html('at-progress-text', d.message || '锚点验证中...');
+                $('at-progress-fill').style.width = (d.progress || 0) + '%';
+            } else if (d.status === 'done') {
+                clearInterval(_atPollTimer);
+                $('at-progress-fill').style.width = '100%';
+                hide('at-progress');
+                show('at-result');
+                $('at-start-btn').disabled = false;
+                renderAnchorResult(d.result);
+                loadAnchorSummary();   // 台账立即刷新
+            } else if (d.status === 'error') {
+                clearInterval(_atPollTimer);
+                hide('at-progress');
+                $('at-start-btn').disabled = false;
+                showAlert('锚点验证失败：' + (d.error || '未知错误'), 'error');
+            }
+        } catch (e) { /* 网络抖动，下个 tick 重试 */ }
+    }, 1500);
+}
+
+function renderAnchorResult(r) {
+    if (!r || !r.stats) { html('at-result-content', '<p>无结果</p>'); return; }
+    let rows = '';
+    for (const [name, s] of Object.entries(r.stats)) {
+        const sig = String(s['显著性'] || '');
+        const color = sig.startsWith('本次抽样显著超随机') ? '#c0392b' : 'inherit';
+        rows += `<tr>
+            <td>${name}</td>
+            <td>${s['平均总命中']}</td>
+            <td>${s['基线平均总命中']}</td>
+            <td>${s['配对差值']}</td>
+            <td>${s['配对SE']}</td>
+            <td>${s['z']}</td>
+            <td style="color:${color}">${sig}</td>
+        </tr>`;
+    }
+    const issues = (r.anchor_issues || []).join('、');
+    html('at-result-content', `
+        <p style="font-size:13px;color:var(--gray);margin-bottom:8px">
+            ${r.lottery_name} ｜ ${r.n_trials} 个锚点 ｜ 窗口 ${r.window_size} 期 ｜ seed=${r.seed}<br>
+            锚点期号：${issues || '-'}
+        </p>
+        <table class="table">
+            <thead><tr>
+                <th>策略</th><th>平均总命中</th><th>随机基线</th><th>配对差值</th>
+                <th>SE</th><th>z</th><th>显著性（本次抽样）</th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+        </table>
+        <p style="font-size:12px;color:#c0392b;margin-top:8px">${r['诚实声明'] || ''}</p>
+    `);
+}
+
+async function loadAnchorSummary() {
+    try {
+        const d = await api('/api/training/anchor-summary');
+        const lots = Object.keys(d || {});
+        if (!lots.length) { html('at-summary-content', '<p>暂无试验记录（常驻循环运行后自动积累）</p>'); return; }
+
+        // 策略列取并集，保持稳定顺序
+        const stratNames = [];
+        for (const lot of lots) {
+            for (const s of Object.keys(d[lot]['策略'] || {})) {
+                if (!stratNames.includes(s)) stratNames.push(s);
+            }
+        }
+        let rows = '';
+        for (const lot of lots) {
+            const v = d[lot];
+            const stratCells = stratNames.map(s => {
+                const st = (v['策略'] || {})[s];
+                return `<td>${st ? st['平均总命中'] : '-'}</td>`;
+            }).join('');
+            rows += `<tr>
+                <td>${lot}</td>
+                <td>${v['试验数']}</td>
+                <td>${v['最新试验'] || '-'}</td>
+                <td>${v['基线平均总命中']}</td>
+                ${stratCells}
+            </tr>`;
+        }
+        const stratHead = stratNames.map(s => `<th>${s}</th>`).join('');
+        html('at-summary-content', `
+            <table class="table">
+                <thead><tr>
+                    <th>彩种</th><th>累计试验数</th><th>最新试验</th><th>随机基线平均</th>${stratHead}
+                </tr></thead>
+                <tbody>${rows}</tbody>
+            </table>
+        `);
+    } catch (e) {
+        html('at-summary-content', '<p style="color:#c0392b">台账加载失败（接口异常）</p>');
+    }
+}

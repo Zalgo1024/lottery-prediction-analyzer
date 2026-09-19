@@ -635,6 +635,52 @@ def start_rolling(lottery_name: str, params: dict) -> str:
 
 
 # ============================================================
+# 随机锚点走前验证异步任务（2026-09-18，持续训练）
+# ============================================================
+
+@run_async
+def run_anchor_task(task_id: str, lottery_name: str, params: dict):
+    """异步运行一轮随机锚点走前验证（与常驻循环同一实现，口径不漂移）。"""
+    from train.anchor_trainer import anchor_train
+
+    update_task(task_id, progress=5, message=f"加载 {lottery_name} 历史并抽取锚点...")
+    time.sleep(0.3)
+
+    result = anchor_train(
+        lottery_name,
+        n_trials=int(params.get("n_trials", 10)),
+        window_size=int(params.get("window_size", 50)),
+        min_history=int(params.get("min_history", 100)),
+    )
+    if "error" in result:
+        raise RuntimeError(result["error"])
+
+    update_task(task_id, progress=90, message="汇总配对差值与显著性...")
+    # 精简返回：只保留汇总，不回传逐试验明细（明细在 JSONL 台账里）
+    return {
+        "lottery_name": result.get("lottery_name"),
+        "n_trials": result.get("n_trials"),
+        "seed": result.get("seed"),
+        "window_size": result.get("window_size"),
+        "anchor_issues": result.get("anchor_issues", []),
+        "is_redblue": result.get("is_redblue"),
+        "stats": result.get("stats", {}),
+        "training_time": result.get("training_time"),
+        "诚实声明": result.get("诚实声明"),
+    }
+
+
+def start_anchor(lottery_name: str, params: dict) -> str:
+    """启动随机锚点走前验证任务，返回 task_id"""
+    task_id = create_task("anchor", {"lottery": lottery_name, **params})
+    thread = threading.Thread(
+        target=run_anchor_task, args=(task_id, lottery_name, params), daemon=True
+    )
+    thread.start()
+    return task_id
+
+
+# ============================================================
 # 管道异步任务
 # ============================================================
 

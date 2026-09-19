@@ -1,48 +1,109 @@
 {% extends "base.html" %}
 {% block content %}
-<h2><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M3 21v-5h5"/></svg> 滚动预测训练</h2>
-<p style="color:var(--gray);margin-bottom:15px">用前 N 期数据预测下一期，滚动评估各策略真实命中表现（反馈闭环第 1 阶段）</p>
+<h2><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg> 持续训练中心</h2>
+<p style="color:var(--gray);margin-bottom:15px">
+  随机锚点走前验证（马后炮模式）：随机抽历史期为目标，只用它之前的数据预测再比对——常驻循环自动积累试验，全部如实记录
+</p>
+
 <div class="grid-2">
+  <!-- 左：常驻循环状态 + 配置 -->
   <div class="card">
-    <h3>参数设置</h3>
-    <div class="form-group">
-      <label>彩票类型</label>
-      <select id="roll-lottery"><option>双色球</option><option>大乐透</option><option>排列5</option><option>福彩3D</option><option>排列3</option><option>七星彩</option></select>
+    <h3>常驻训练循环</h3>
+    <div style="font-size:13px;line-height:2">
+      <div>状态：<span id="at-run-badge" style="font-weight:bold">加载中...</span>
+           <span id="at-run-since" style="color:var(--gray)"></span></div>
+      <div>最近一次循环：<span id="at-last-cycle" style="color:var(--gray)">-</span></div>
+      <div>今日夜训：<span id="at-nightly" style="color:var(--gray)">-</span></div>
+    </div>
+    <hr style="border:none;border-top:1px solid #eee;margin:12px 0">
+    <h3 style="font-size:15px">循环配置</h3>
+    <div class="form-row">
+      <div class="form-group">
+        <label>循环开关</label>
+        <select id="at-cfg-enabled"><option value="on">开启</option><option value="off">暂停</option></select>
+      </div>
+      <div class="form-group">
+        <label>循环周期（秒）</label>
+        <input id="at-cfg-interval" type="number" value="60" min="1" max="3600">
+      </div>
     </div>
     <div class="form-row">
       <div class="form-group">
-        <label>训练窗口（期）</label>
-        <input id="roll-window" type="number" value="50" min="10" max="500">
+        <label>每轮试验数</label>
+        <input id="at-cfg-trials" type="number" value="1" min="1" max="50">
       </div>
       <div class="form-group">
-        <label>评估期数</label>
-        <input id="roll-eval-periods" type="number" value="100" min="10" max="1000">
+        <label>训练窗口（期）</label>
+        <input id="at-cfg-window" type="number" value="50" min="10" max="500">
       </div>
     </div>
-    <button id="roll-start" class="btn btn-primary" onclick="startRolling()"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 3c3 2 5 6 5 10l-3 3H10l-3-3c0-4 2-8 5-10z"/><circle cx="12" cy="9" r="1.5"/><path d="M9 19l-2 2M15 19l2 2"/></svg> 开始滚动训练</button>
-
-    <div id="roll-progress" class="hidden" style="margin-top:15px">
-      <div id="roll-progress-text">启动中...</div>
-      <div class="progress-bar"><div id="roll-progress-fill" class="fill" style="width:0%"></div></div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>夜间 lightgbm 重训</label>
+        <select id="at-cfg-nightly"><option value="on">开启</option><option value="off">关闭</option></select>
+      </div>
+      <div class="form-group">
+        <label>夜训时刻（点）</label>
+        <input id="at-cfg-hour" type="number" value="3" min="0" max="23">
+      </div>
+    </div>
+    <div class="form-group">
+      <label>夜训完成后推送汇总</label>
+      <select id="at-cfg-push"><option value="on">开启</option><option value="off">关闭</option></select>
+    </div>
+    <button class="btn btn-primary" onclick="saveAnchorLoop()">保存循环配置</button>
+    <div style="font-size:12px;color:var(--gray);margin-top:8px">
+      配置改动最多 1 个循环周期内生效；夜间重训与手动训练走同一管线，完成后企微推送一条汇总。
     </div>
   </div>
 
-  <div>
-    <div id="roll-result" class="hidden">
-      <div class="card">
-        <h3>滚动训练结果</h3>
-        <div id="roll-result-content"></div>
+  <!-- 右：手动锚点验证 -->
+  <div class="card">
+    <h3>手动锚点验证</h3>
+    <p style="font-size:13px;color:var(--gray)">与常驻循环同一实现：随机抽 N 个历史期作目标，严格只用目标期之前的数据预测，每个锚点都带同形态随机基线</p>
+    <div class="form-group">
+      <label>彩票类型</label>
+      <select id="at-lottery"><option>双色球</option><option>大乐透</option><option>排列5</option><option>福彩3D</option><option>排列3</option><option>七星彩</option></select>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>试验数（锚点数）</label>
+        <input id="at-trials" type="number" value="20" min="1" max="200">
+      </div>
+      <div class="form-group">
+        <label>训练窗口（期）</label>
+        <input id="at-window" type="number" value="50" min="10" max="500">
       </div>
     </div>
-    <div class="card">
-      <h3>说明</h3>
-      <ul style="font-size:13px;color:var(--gray);line-height:1.8;padding-left:20px">
-        <li>每期用 3 种策略分别预测（高频/遗漏/区间均衡）</li>
-        <li>与真实开奖对比，统计各策略平均命中与中奖率</li>
-        <li>评估结果为反馈闭环提供策略权重调整依据</li>
-        <li>运行时间较长（约 100 期 × 3 策略），异步执行不阻塞页面</li>
-      </ul>
+    <button id="at-start-btn" class="btn btn-primary" onclick="startAnchorRun()">开始锚点验证</button>
+    <div id="at-progress" class="hidden" style="margin-top:15px">
+      <div id="at-progress-text">启动中...</div>
+      <div class="progress-bar"><div id="at-progress-fill" class="fill" style="width:0%"></div></div>
+    </div>
+    <div id="at-result" class="hidden" style="margin-top:15px">
+      <h3 style="font-size:15px">本轮结果</h3>
+      <div id="at-result-content"></div>
     </div>
   </div>
 </div>
+
+<!-- 台账汇总（全宽） -->
+<div class="card" style="margin-top:15px">
+  <h3>锚点试验台账汇总 <span style="font-size:12px;color:var(--gray)">（全部试验如实计入，含不显著的）</span></h3>
+  <div id="at-summary-content" style="font-size:13px">加载中...</div>
+  <div style="font-size:12px;color:#c0392b;margin-top:10px">
+    <strong>诚实提示</strong>：显著性为「本次抽样」的正态近似 z 结论，未做 FDR 多重比较校正；
+    按裁判层结论，彩票长期期望为负，任何「超随机」都应先视为多重比较假象。试验明细落账于
+    <code>training/anchor_trials/&lt;彩种&gt;.jsonl</code>。
+  </div>
+</div>
+
+<script>
+window.addEventListener('DOMContentLoaded', function() {
+    loadAnchorLoop();
+    loadAnchorSummary();
+    setInterval(loadAnchorSummary, 30000);   // 台账每 30 秒刷新
+    setInterval(loadAnchorLoop, 30000);
+});
+</script>
 {% endblock %}

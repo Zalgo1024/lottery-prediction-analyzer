@@ -69,8 +69,15 @@ def check_pending_freshness():
                 issues.append(f"目标期号 {targets} ≠ 本地最新期+1({latest + 1})")
             # 出号注数期望值按彩种分流（2026-09-13）：数字型固定 5 注；
             # 乐透型名义 100 注、启用低重叠剪枝后可能更少 → 只守"每策略保底"下限。
+            # ★ 期望取**生成时刻**的快照（pending["目标注数"]，2026-09-20 修）：
+            #   此前直接读实时 resolve_groups——夜间流水线先出号、后结算，
+            #   结算时动态滑轨会调整配置，体检再拿新值当期望 → 旧批次被误报
+            #   「出号 N 注（期望 M）」（福彩3D 连续两晚 25/27、35/37 均属此类）。
+            #   旧 pending 无目标注数字段时回退实时配置（容忍旧数据）。
             if name in ("福彩3D", "排列3", "排列5"):
-                expected = resolve_groups(name)
+                declared = [p.get("目标注数") for p in active
+                            if isinstance(p.get("目标注数"), int) and p.get("目标注数") > 0]
+                expected = declared[0] if declared else resolve_groups(name)
                 if groups != expected:
                     issues.append(f"数字型出号 {groups} 注（期望 {expected}）")
             elif groups < PRUNE_MIN_PER_STRATEGY:

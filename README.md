@@ -2,7 +2,7 @@
 
 > **带严格证伪机制的时间序列分析框架（彩票作为示例场景）**
 
-![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB) ![Tests](https://img.shields.io/badge/pytest-374%20passed-3B6D11) ![Lotteries](https://img.shields.io/badge/%E5%BD%A9%E7%A7%8D-6-854F0B) ![License](https://img.shields.io/badge/License-AGPL--3.0-blue)
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB) ![Tests](https://img.shields.io/badge/pytest-504%20passed-3B6D11) ![Lotteries](https://img.shields.io/badge/%E5%BD%A9%E7%A7%8D-6-854F0B) ![License](https://img.shields.io/badge/License-AGPL--3.0-blue)
 
 **为什么用彩票做示例场景？** 开奖数据足够纯——无协变量、无趋势、大样本、完全随机。这是检验一套时序分析方法"是否真有预测力"的最严苛测试场：任何看似有效的策略都会在这里被拆穿。本框架的价值不在于"预测中了多少"，而在于**给出可复现的证伪结论**。
 
@@ -40,7 +40,7 @@ python run.py                # 看门狗模式，访问 http://127.0.0.1:5000
 # 3. 或者只用 CLI
 python cli.py --help
 
-# 4. 跑测试套件（374 例）
+# 4. 跑测试套件（504 例）
 pytest tests/
 ```
 
@@ -85,7 +85,7 @@ pytest tests/
 │   └── utils.py             # run_auto_pipeline_core（三路流水线统一入口）
 │
 ├── scripts/                 # 运维工具（体检/审计/修复/回归，见下文）
-├── tests/                   # pytest 测试套件（374 例）
+├── tests/                   # pytest 测试套件（495 例）
 ├── logs/logger.py           # 分级日志模块（运行时依赖，入 git）
 │
 ├── lottery_data/            # ★ 历史开奖数据（不入 git，见「数据文件详解」）
@@ -301,8 +301,8 @@ POST /api/settings/push-notify/test     # 发一条测试消息（未配置返�
 ## 测试
 
 ```bash
-pytest -q              # 491 passed（全量；含奖金表 33 例、写保护/分区归一化回归、撞号度量与中奖归因、批次契约、出号数量固定/动态、消息推送：图片渲染/发送节流/降级/全入口接线）
-pytest tests/          # 482 passed（仅 tests/ 目录；另有 9 例在 scripts/ 下，故用 pytest -q 跑全量）
+pytest -q              # 504 passed（全量；含奖金表 33 例、写保护/分区归一化回归、撞号度量与中奖归因、批次契约、出号数量固定/动态、消息推送：图片渲染/发送节流/降级/全入口接线、随机锚点走前验证与持续训练循环）
+pytest tests/          # 495 passed（仅 tests/ 目录；另有 9 例在 scripts/ 下，故用 pytest -q 跑全量）
 ```
 
 ## 备份

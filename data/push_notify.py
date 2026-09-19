@@ -566,6 +566,57 @@ def _image_or_text(
         return {"ok": False, "detail": f"{tag} 回退亦失败: {str(e)[:150]}"}
 
 
+def _pending_meta_lines(lottery: str, predictions: List[Dict[str, Any]]) -> List[str]:
+    """从最新 pending 记录取图片头部的元信息行（目标期号/目标开奖/质量压缩说明）。
+
+    与看板弹窗同源（load_pending），拿不到就返回空——绝不因元信息失败阻塞推送。
+    """
+    try:
+        from data.feedback import load_pending
+        recs = load_pending(lottery)
+        rec = None
+        for r in recs or []:
+            if isinstance(r, dict) and r.get("预测号码") == predictions:
+                rec = r
+                break
+        if rec is None and recs and isinstance(recs[0], dict):
+            rec = recs[0]
+        if not rec:
+            return []
+        lines = []
+        issue, date = rec.get("目标期号"), rec.get("预测日期")
+        if issue or date:
+            lines.append(f"第 {issue or '?'} 期 · 目标开奖 {date or '?'}")
+        c = rec.get("压缩")
+        if isinstance(c, dict) and c.get("压缩前注数") != c.get("压缩后注数"):
+            lines.append(
+                f"质量压缩：出号 {c.get('压缩前注数')} 注 → 登记 {c.get('压缩后注数')} 注"
+                f"（低质量淘汰 {c.get('质量淘汰', 0)} · 重复 {c.get('重复淘汰', 0)}"
+                f" · 高重叠 {c.get('重叠淘汰', 0)}）；只省成本，单注中奖概率不变")
+        return lines
+    except Exception:
+        return []
+
+
+def _render_numbers_png(lottery: str, predictions: List[Dict[str, Any]], subtitle: str) -> bytes:
+    """号码图渲染：优先「看板弹窗同款」票面图（球珠+分组），票面缺结构时回退旧行式。"""
+    from data import push_image as _pimg
+    errors = []
+    try:
+        return _pimg.render_tickets_image(
+            predictions, title=f"{lottery} · 本期出号", subtitle=subtitle,
+            meta_lines=_pending_meta_lines(lottery, predictions))
+    except Exception as e:
+        errors.append(f"ticket:{e}")
+    try:
+        return _pimg.render_numbers_image(
+            [format_ticket_line(t) for t in predictions],
+            title=f"{lottery} 本期出号", subtitle=subtitle)
+    except Exception as e:
+        errors.append(f"lines:{e}")
+    raise RuntimeError("; ".join(errors)[:200])
+
+
 def push_lottery_images(
     lottery: str,
     *,
@@ -624,9 +675,7 @@ def push_lottery_images(
             if use_image:
                 subtitle = " · ".join(x for x in (pred_info, f"共 {len(predictions)} 注") if x)
                 out.append(_image_or_text(
-                    render=lambda: _pimg.render_numbers_image(
-                        [format_ticket_line(t) for t in predictions],
-                        title=f"{lottery} 本期出号", subtitle=subtitle),
+                    render=lambda: _render_numbers_png(lottery, predictions, subtitle),
                     fallback=lambda: build_pipeline_message(
                         lottery, predictions=predictions, draw_numbers=draw_numbers,
                         pred_info=pred_info, size_note=size_note, board_url=board_url,

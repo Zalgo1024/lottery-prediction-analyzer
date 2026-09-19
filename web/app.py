@@ -115,6 +115,13 @@ def main():
     from web.startup_recovery import run_startup_recovery
     run_startup_recovery()
 
+    # 持续训练循环：空闲时段随机锚点走前验证 + 夜间 lightgbm 重训（可选子系统）
+    try:
+        from web.training_loop import start_training_loop
+        start_training_loop(daemon=True)
+    except Exception as e:
+        log.warning(f"持续训练循环启动失败（Web 服务继续运行）: {e}")
+
     # 后台预热数据缓存：启动时加载所有彩种到内存，首次访问首页/统计页秒开
     import threading
     from config import LOTTERY_CONFIG
