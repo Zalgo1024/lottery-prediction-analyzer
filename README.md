@@ -177,7 +177,7 @@ python scripts/repair_records.py         # 记录修复（默认 dry-run，--app
 
 系统全程自动运转，无需人工干预：每天自动抓新开奖、评估昨日预测、更新策略权重、生成下一期预测、刷新看板。
 
-### 三个触发路径（统一入口 `web/utils.py::run_auto_pipeline_core`，口径一致、并发去重，绝不重复跑）
+### 三个触发路径（统一入口 `web/utils.py::run_auto_pipeline_core`，口径一致、并发去重，不重复跑）
 
 | 路径 | 实现 | 机制 |
 |---|---|---|
