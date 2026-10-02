@@ -11,7 +11,7 @@
 随机抽两条互相比较——两条独立开奖之间的距离分布，就是"瞎猜"
 与开奖的距离分布（同口径、同年代结构、无分布假设）。
 
-用途：验证预测的距离分布是否与随机基线重合（证伪视角的可视化），
+用途：验证预测的距离分布是否与随机基线重合（检验视角的可视化），
 同时给"差一位/差两位"这类近似命中一个直观刻画。
 """
 
@@ -129,7 +129,7 @@ def distance_stats(lottery: str, mc_trials: int = 5000,
         ndiff = (near_obs - near_base) if (near_obs is not None and near_base is not None) else None
         if abs(diff) < 0.5:
             verdict = ("观测距离分布与随机基线基本重合——预测未表现出超越随机的接近度"
-                       "（与证伪结论一致）")
+                       "（与检验结论一致）")
         elif diff <= -0.5:
             verdict = "预测中位距离显著小于基线（值得用假设闸门进一步检验的信号）"
         else:

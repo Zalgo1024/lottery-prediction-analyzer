@@ -81,6 +81,7 @@ const ICO_SVG = {
     check: '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5 9-11"/></svg>',
     cross: '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>',
     warning: '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l9 16H3z"/><path d="M12 10v4M12 17v.5"/></svg>',
+    info: '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8v.5"/></svg>',
 };
 
 function ico(name) { return ICO_SVG[name] || ''; }
@@ -241,6 +242,7 @@ function _ticketZoneDict(t) {
 
 // ===== 数据状态面板（首页） =====
 async function loadDataStatus() {
+    await loadMarketClosure();
     const data = await api('/api/data-status');
     for (const [lottery, status] of Object.entries(data)) {
         // 首页目前只有双色球/大乐透两张主卡片，数字型/七星彩作为附属展示
@@ -330,13 +332,34 @@ async function loadDataStatus() {
     renderDataLagBanner(data);
 }
 
+// ===== 休市提示条（2026-10-02：春节/国庆休市期间不出红色滞后横幅、不空跑补齐） =====
+let marketClosed = false;   // 休市期闸门：renderDataLagBanner 与 autoRecoverIfLagging 共用
+
+async function loadMarketClosure() {
+    try {
+        const c = await api('/api/market-closure');
+        marketClosed = !!(c && c.closed);
+        renderMarketClosureBanner(c);
+    } catch (e) { /* 提示条失败静默降级，不影响主看板 */ }
+}
+
+function renderMarketClosureBanner(c) {
+    const el = $('market-closure-banner');
+    if (!el) return;
+    if (!c || !c.closed) { el.innerHTML = ''; el.style.display = 'none'; return; }
+    el.style.display = 'block';
+    el.innerHTML = `<div class="alert" style="background:#eef3fb;border-left:4px solid #1565c0;color:#0d3b66;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        ${ico('info')}<strong>${c.name}休市中</strong>
+        <span style="font-size:13px">${c.message}</span></div>`;
+}
+
 function renderDataLagBanner(data) {
     const banner = $('data-lag-banner');
     if (!banner) return;
     const lagLots = Object.entries(data)
         .filter(([_, s]) => (s.data_lag_days || 0) > 0)
         .map(([name, s]) => ({ name, lag: s.data_lag_days, latest: s.latest_date }));
-    if (!lagLots.length) {
+    if (!lagLots.length || marketClosed) {   // 休市期不误报滞后、不自动补齐
         banner.innerHTML = '';
         banner.style.display = 'none';
         return;
@@ -2747,19 +2770,38 @@ function _renderBatchDetail(d) {
 
     // 整批号码：复用命中页同款球面；**每 5 注一组**，组与组之间用标题条 + 细分隔线区分
     const tickets = d.号码 || [];
+    // 票面策略名是原始值（ML(logistic)/统计训练(W50)），统计键是归一后的名字 → 同款归一后再查
+    const normStrat = s => (!s ? '' : (s === 'ML策略' || s.indexOf('ML') >= 0 || s.indexOf('统计训练') >= 0) ? 'ML策略' : s);
+    const statPool = d.策略实测 || {};
     let rows = '';
     for (let i = 0; i < tickets.length; i++) {
         const t = tickets[i];
         if (i % 5 === 0) {
             const end = Math.min(i + 5, tickets.length);
-            rows += `<div style="background:#f6f8fa;border-top:1px solid #e8edf2;padding:3px 12px;font-size:11px;color:var(--gray);font-weight:600">第 ${i + 1}–${end} 注</div>`;
+            const gStrats = [...new Set(tickets.slice(i, end).map(x => x.策略).filter(Boolean))].join('+');
+            rows += `<div style="background:#f6f8fa;border-top:1px solid #e8edf2;padding:3px 12px;font-size:11px;color:var(--gray);font-weight:600">第 ${i + 1}–${end} 注${gStrats ? ` · 策略 ${gStrats}` : ''}</div>`;
         }
         const lv = t.中奖等级 || '未中';
         const isWin = lv !== '未中';
         const ps = winStyle[lv] || '';
+        const strat = t.策略
+            ? _strategyBadge(t.策略)
+            : '<span style="color:#bdbdbd;font-size:12px" title="老记录未落盘注级策略">—</span>';
+        // 该策略的历史实测：平均命中个数 vs 随机基线 + 样本量 + 中奖率（口径见底部说明）
+        const st = t.策略 ? statPool[normStrat(t.策略)] : null;
+        let statLine = '<span style="font-size:11px;color:#bdbdbd">—</span>';
+        if (st && st.样本数 > 0) {
+            const pct = (st.中奖率 * 100).toFixed(0);
+            const tip = `历史真预测 ${st.样本数} 注：平均命中 ${st.平均总命中} 个，随机基线 ${st.理论基线} 个，中奖 ${st.中奖次数} 注（${pct}%）`
+                + (st.样本不足 ? '｜样本不足，差异多为噪声' : '');
+            statLine = `<span style="font-size:11px;color:${st.样本不足 ? '#bdbdbd' : 'var(--gray)'}" title="${tip}">`
+                + `实测 ${st.平均总命中.toFixed(2)} · 基线 ${st.理论基线.toFixed(2)} · n=${st.样本数} · 中奖 ${pct}%`
+                + `</span>`;
+        }
         rows += `<div style="display:flex;align-items:center;gap:10px;padding:6px 12px;border-bottom:1px solid #f4f6f8;${isWin ? 'background:#fffdf5' : ''}">
             <span style="min-width:40px;text-align:right;color:var(--gray);font-size:12px;font-weight:600">第${t.序号}注</span>
             <span style="flex:1">${renderZoneBalls(_ticketZones(t.号码), 'pred', { size: 24, showLabels: false, hitHighlight: false })}</span>
+            <span style="min-width:240px;text-align:left;font-size:12px;line-height:1.5"><div>${strat}</div><div>${statLine}</div></span>
             <span style="min-width:48px;text-align:center;font-size:12px;color:var(--gray)">命中 ${t.总命中}</span>
             <span style="min-width:52px;text-align:center;padding:1px 8px;border-radius:10px;font-size:12px;${ps || 'background:#f5f5f5;color:#9e9e9e'}">${isWin ? lvText(lv) : '未中'}</span>
         </div>`;
@@ -2778,11 +2820,13 @@ function _renderBatchDetail(d) {
         <div style="border:1px solid #eee;border-radius:6px;max-height:55vh;overflow:auto">
             <div style="display:flex;gap:10px;padding:6px 12px;background:#fafafa;border-bottom:1px solid #eee;font-size:12px;color:var(--gray)">
                 <span style="min-width:40px;text-align:right">注号</span><span style="flex:1">号码（按出号顺序，每 5 注一组）</span>
+                <span style="min-width:240px;text-align:left">策略 · 历史实测（平均命中/随机基线/样本量/中奖率）</span>
                 <span style="min-width:48px;text-align:center">命中</span><span style="min-width:52px;text-align:center">结果</span>
             </div>
             ${rows || '<div style="padding:12px;color:var(--gray)">该批没有号码记录</div>'}
         </div>
-        <p style="font-size:12px;color:var(--gray);margin:8px 0 0">「该批全部注」= 当时一次出号产出的所有号码（含未中奖的）。中奖与否只是事后结果，样本几十~一百注不构成任何策略优劣的证据。</p>
+        <p style="font-size:12px;color:var(--gray);margin:8px 0 0">「该批全部注」= 当时一次出号产出的所有号码（含未中奖的）。中奖与否只是事后结果，样本几十~一百注不构成任何策略优劣的证据。<br>
+        「历史实测」= 该策略在该彩种全部<strong>真预测</strong>上的平均命中个数（开奖后回放的训练记录不计入），「基线」= 随机选号的理论期望；同一期多注共享同一开奖号、彼此不独立，故<strong>不做显著性检验</strong>——实测与基线的差值基本落在噪声范围内，不构成「某策略更会选号」的证据。</p>
     </div>`;
 }
 
@@ -3351,7 +3395,15 @@ async function loadFeedbackHistory(lottery) {
     // 表头：预测/实际号码合并为完整红蓝球列
     const isRb = data.is_redblue !== false;
     const hitHeaders = isRb ? `<th>红</th><th>蓝</th>` : `<th>命中</th>`;
-    let htmlStr = `<p style="font-size:12px;color:var(--gray)">共 ${records.length} 条记录${source !== 'all' ? '（已筛选）' : ''}</p>`;
+    let htmlStr = '';
+    if (source === '训练') {
+        htmlStr += `<div class="alert alert-warning" style="font-size:12px;line-height:1.7">
+          <strong>你正在看「事后训练」栏</strong>：这些号码在<strong>开奖之后</strong>才生成，
+          仅供回放历史决策，<strong>不计入策略权重 / EV / 命中率</strong>。
+          「随机锚点走前验证」是另一套台账（配对 z 对随机基线），见「持续训练中心」，两者不混排。
+        </div>`;
+    }
+    htmlStr += `<p style="font-size:12px;color:var(--gray)">共 ${records.length} 条记录${source !== 'all' ? '（已筛选）' : ''}</p>`;
     htmlStr += `<table style="font-size:12px"><tr><th>期号</th><th>来源</th><th>策略</th><th>预测号码</th><th>实际开奖</th>${hitHeaders}<th>等级</th><th>时间</th></tr>`;
     for (const f of records) {
         const v = f.view || { zones: [], total_hit: 0, total_choose: 0, is_redblue: true };
@@ -3390,6 +3442,13 @@ async function loadFeedbackCompare() {
 
     let allHtml = '';
     const chartTasks = [];
+    if (source === '训练') {
+        allHtml += `<div class="alert alert-warning" style="font-size:12px;line-height:1.7">
+          <strong>你正在看「事后训练」栏</strong>：这些号码在<strong>开奖之后</strong>才生成，
+          仅供回放历史决策，<strong>不计入策略权重 / EV / 命中率</strong>。
+          「随机锚点走前验证」是另一套台账（配对 z 对随机基线），见「持续训练中心」，两者不混排。
+        </div>`;
+    }
     for (const lottery of lotteries) {
         const data = await api(`/api/feedback/${encodeURIComponent(lottery)}/compare?limit=${lookback}`);
         if (data.error) { allHtml += `<div class="alert alert-danger">${lottery}：${data.error}</div>`; continue; }

@@ -128,7 +128,10 @@ def test_compress_noop_for_digital_and_small_pools():
 
 def test_record_pending_compresses_production_prediction(tmp_fb):
     tickets = _mk_pool(n=20)
-    rec = {"目标期号": 26109, "来源": "predict", "档位": "一般",
+    # 目标期号取「真正的下一期」而不是硬编码——硬编码会在开奖后变成已开奖期号，
+    # 被马后炮闸门拒绝（2026-09-21 实锤：硬编码 26109 在 09-20 开奖后即失效；
+    # 此前它能通过是因为开奖日历把 09-20 误判休市、把推算开奖日推到 09-22）。
+    rec = {"目标期号": fb._next_issue("双色球"), "来源": "predict", "档位": "一般",
            "预测号码": tickets}
     fb.record_pending_prediction("双色球", rec)
     pend = fb.load_pending("双色球")

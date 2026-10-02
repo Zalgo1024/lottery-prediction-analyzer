@@ -9,15 +9,17 @@
 import logging
 import threading
 from datetime import datetime
+from typing import Optional
 
 from config import LOTTERY_CONFIG
+from data.holiday import is_draw_day, is_holiday
 from web.utils import get_data_status
 
 logger = logging.getLogger(__name__)
 
 
-def _needs_recovery(lottery_name: str, status: dict) -> bool:
-    """判断该彩种是否需要启动时补数据。"""
+def _needs_recovery(lottery_name: str, status: dict, now: Optional[datetime] = None) -> bool:
+    """判断该彩种是否需要启动时补数据。now 可注入（测试不得依赖真实时钟）。"""
     lag = status.get("data_lag_days") or 0
     if lag <= 0:
         return False
@@ -31,21 +33,27 @@ def _needs_recovery(lottery_name: str, status: dict) -> bool:
     except Exception:
         return False
 
-    today = datetime.now().date()
-    now = datetime.now()
-    draw_days = set(LOTTERY_CONFIG.get(lottery_name, {}).get("draw_days", []))
-    is_daily = len(draw_days) == 7
+    now = now or datetime.now()
+    today = now.date()
+
+    # 休市日：没有新开奖可补，抓取必然 0 期，不空跑流水线（P0 修好后 lag 本就为 0，
+    # 这里是双保险——防止任何一条旁路仍用自然日差口径时把休市误判成滞后）
+    if is_holiday(today):
+        return False
 
     # 下期开奖日已过：肯定已经开奖但本地没更新
     if next_draw_d < today:
         return True
 
+    draw_days = set(LOTTERY_CONFIG.get(lottery_name, {}).get("draw_days", []))
+    is_daily = len(draw_days) == 7
+
     # 每日开奖彩种：只要滞后 >=1 天且已过当晚 21:00，就补
     if is_daily and lag >= 1 and now.hour >= 21:
         return True
 
-    # 非每日开奖：如果今天就是开奖日且已到晚上 21:30，补
-    if not is_daily and today.weekday() in draw_days and (now.hour * 60 + now.minute) >= (21 * 60 + 30):
+    # 非每日开奖：今天必须是"合法开奖日"（含休市判断）且已到晚上 21:30，补
+    if not is_daily and is_draw_day(lottery_name, today) and (now.hour * 60 + now.minute) >= (21 * 60 + 30):
         return True
 
     return False
@@ -80,18 +88,19 @@ def _trigger_pipeline_if_needed(lottery_name: str):
         logger.warning(f"启动恢复触发流水线失败 {lottery_name}: {e}")
 
 
-def recover_lottery(lottery_name: str, force: bool = False):
+def recover_lottery(lottery_name: str, force: bool = False, now: Optional[datetime] = None):
     """
     对单个彩种执行补数据 + 评估反馈。
     force=True 时跳过滞后判断，强制抓取并评估。
+    now 可注入（测试不得依赖真实时钟）。
     返回 update_lottery_data / update_digital_lottery_data 的结果字典，或 None（无需恢复）。
     """
     from data.fetch_500 import update_digital_lottery_data
     from data.fetcher import update_lottery_data
     from data.feedback import evaluate_pending_predictions
 
-    status = get_data_status(lottery_name)
-    if not force and not _needs_recovery(lottery_name, status):
+    status = get_data_status(lottery_name, now=now)
+    if not force and not _needs_recovery(lottery_name, status, now=now):
         return None
 
     lag = status.get("data_lag_days", 0)

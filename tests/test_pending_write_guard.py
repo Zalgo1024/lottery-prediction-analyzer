@@ -78,13 +78,19 @@ def test_record_pending_syncs_group_count_after_compress(monkeypatch, fb_dir):
 def test_health_check_uses_declared_target(monkeypatch, fb_dir):
     """体检的期望注数优先取 pending 的目标注数（生成时刻快照），非实时配置。"""
     import scripts.health_check as hc
+    # ★ hc.FB 是模块级常量（指向真身 training/feedback），patch data.feedback.FEEDBACK_DIR
+    #   对它无效 → 必须同时重定向 hc.FB，否则本测试读到的是真实 pending，
+    #   会随「福彩3D 是否恰好有未结算预测」而 flaky（2026-09-30 实测：真实 pending 清空 → 失败）。
+    monkeypatch.setattr(hc, "FB", fb_dir)
     pend = [{"状态": "pending", "目标期号": 2026999,
              "目标注数": 35, "预测号码": [_digital_ticket(n=i) for i in range(35)]}]
     (fb_dir / "福彩3D_pending.json").write_text(
         json.dumps(pend, ensure_ascii=False), encoding="utf-8")
     monkeypatch.setattr(hc, "resolve_groups", lambda name: 37)  # 实时配置≠生成时
-    monkeypatch.setattr("data.loader.load_lottery", lambda name: type(
-        "LD", (), {"records": [type("R", (), {"期号": 2026998})]})())
+    # 同上：hc 顶部 `from data.loader import load_lottery` 已绑定到自己的模块名，
+    # patch data.loader 不生效 → 必须 patch hc.load_lottery，期号才可控。
+    fake_ld = lambda name: type("LD", (), {"records": [type("R", (), {"期号": 2026998})]})()
+    monkeypatch.setattr(hc, "load_lottery", fake_ld)
     rows = hc.check_pending_freshness()
     row = next(r for r in rows if r["彩种"] == "福彩3D")
     assert row["问题"] == [], f"生成时刻快照应放行，实际: {row['问题']}"

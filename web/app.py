@@ -46,7 +46,7 @@ from web.routes.records import bp as records_bp
 from web.routes.ev import bp as ev_bp
 from web.routes.hits import bp as hits_bp
 from web.routes.system import bp as system_bp
-from web.routes.honest import bp as honest_bp
+from web.routes.audit import bp as audit_bp
 from web.routes.settings import bp as settings_bp
 
 app.register_blueprint(dashboard_bp)
@@ -62,7 +62,7 @@ app.register_blueprint(records_bp)
 app.register_blueprint(ev_bp)
 app.register_blueprint(hits_bp)
 app.register_blueprint(system_bp)
-app.register_blueprint(honest_bp)
+app.register_blueprint(audit_bp)
 app.register_blueprint(settings_bp)
 
 

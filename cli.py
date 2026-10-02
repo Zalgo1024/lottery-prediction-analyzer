@@ -453,11 +453,11 @@ def main():
 
     hyp_parser = subparsers.add_parser(
         "hypothesize",
-        help="登记假设（发现闭环入口）：把可证伪的 edge 假设写入登记表，等待闸门判卷",
+        help="登记假设（发现闭环入口）：把待检验的 edge 假设写入登记表，等待闸门判卷",
     )
     hyp_parser.add_argument("lottery", choices=list(LOTTERY_CONFIG.keys()), help="彩票类型")
     hyp_parser.add_argument("--name", default=None, help="假设名（--auto 时忽略）")
-    hyp_parser.add_argument("--hypothesis", default=None, help="可证伪的假设内容")
+    hyp_parser.add_argument("--hypothesis", default=None, help="待检验的假设内容")
     hyp_parser.add_argument("--strategy", default=None,
                             help="被检验策略（credibility_gate 型须为 高频/遗漏/区间 之一）")
     hyp_parser.add_argument("--target-metric", default=None, help="目标指标（如 OOS均分/限号EV）")
@@ -1085,31 +1085,15 @@ def _gate_retrain(name: str, retrain: dict) -> str:
 def _cmd_lag(args):
     """输出各彩种数据滞后天数（白天兜底用）。
     滞后 = 最近一个应当已开奖的日期 − 数据最新开奖日期（>0 即漏跑/数据源延迟）。
-    判定与 web/utils.py::_expected_latest_date 保持一致：
+    判定真源 data/holiday.py::expected_latest_draw_date（2026-10-02 收编）：
       - 每日开奖彩种：当天 21:00 前不算已开奖（否则白天会被误判滞后 1 天）；
-      - 非每日：当天 21:30 前今天不算已开奖。
+      - 非每日：当天 21:30 前今天不算已开奖；
+      - 休市日（春节/国庆窗口）不算开奖日，自动回落到休市前最后开奖日。
     """
     import json as _json
-    from datetime import datetime as _dt, timedelta
+    from datetime import datetime as _dt
     from data.loader import load_lottery
-
-    def _expected(draw_days, now):
-        unique = set(int(d) for d in draw_days)
-        is_daily = len(unique) == 7
-        today = now.date()
-        if is_daily:
-            cutoff = now.replace(hour=21, minute=0, second=0, microsecond=0)
-            return today if now >= cutoff else today - timedelta(days=1)
-        for i in range(14):
-            cand = today - timedelta(days=i)
-            if cand.weekday() in unique:
-                if i == 0:
-                    cutoff = now.replace(hour=21, minute=30, second=0, microsecond=0)
-                    if now >= cutoff:
-                        return cand
-                    continue
-                return cand
-        return today
+    from data.holiday import expected_latest_draw_date
 
     targets = [args.lottery] if args.lottery else list(LOTTERY_CONFIG.keys())
     out = {}
@@ -1121,7 +1105,7 @@ def _cmd_lag(args):
             ld = str(data.records[0].开奖日期).split()[0] if data.records else None
             if ld:
                 ld_d = _dt.strptime(ld, "%Y-%m-%d").date()
-                exp = _expected(LOTTERY_CONFIG.get(name, {}).get("draw_days", list(range(7))), now)
+                exp = expected_latest_draw_date(name, now)
                 lag = max(0, (exp - ld_d).days) if ld_d < exp else 0
         except Exception:
             lag = -1
@@ -1634,7 +1618,7 @@ def _cmd_evalue(args):
                   f"{f' 越阈@{cross}' if cross is not None else ''}")
         hyps = rep.get("覆盖假设", [])
         if hyps:
-            print(f"  覆盖登记假设 {len(hyps)} 条（证伪对象=分区公平性，状态见上）")
+            print(f"  覆盖登记假设 {len(hyps)} 条（检验对象=分区公平性，状态见上）")
         return
 
     rep = run_all(alpha=args.alpha, warm=args.warm, write_json=not args.no_write)

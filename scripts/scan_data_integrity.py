@@ -24,6 +24,7 @@ BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
 
 from config import LOTTERY_CONFIG, LOTTERY_DATA_DIR  # noqa: E402
+from data.holiday import is_draw_day  # noqa: E402
 
 try:
     sys.stdout.reconfigure(errors="replace")
@@ -375,30 +376,33 @@ def scan_lottery(name: str, today: date):
         latest = max(r["date"] for r in dated)
         rep["最新一期"] = {"日期": str(latest),
                            "期号": max(recs, key=lambda x: (x["date"] or date.min))["期号"]}
-        # 最近应开奖日（不含今天之后）
+        # 最近应开奖日（2026-10-02 起走休市日历：休市日不产生期次，不计滞后）
         d = today
-        while d >= latest:
-            if not draw_days or d.weekday() in draw_days:
-                if d <= today:
-                    break
+        for _ in range(400):
+            if d < latest:
+                break
+            if is_draw_day(name, d):
+                expected = d
+                break
             d -= timedelta(days=1)
-        expected = d
-        lag_days = (today - latest).days
+        else:
+            expected = d
+        lag_days = max(0, (expected - latest).days)  # 开奖日历口径（休市期=0 才是真值）
         rep["滞后天数"] = lag_days
+        rep["距今天数"] = (today - latest).days        # 自然日差，仅人工参考数据陈旧度
         miss = []
-        if lag_days >= 1:
-            cur = latest + timedelta(days=1)
-            # 只统计"昨天及以前"：今天若还没到开奖时刻不算缺失
-            while cur < today:
-                if (not draw_days) or cur.weekday() in draw_days:
-                    miss.append(str(cur))
-                cur += timedelta(days=1)
+        cur = latest + timedelta(days=1)
+        # 只统计"昨天及以前"：今天若还没到开奖时刻不算缺失；有界 400 防死循环
+        while cur < today and len(miss) < 400:
+            if is_draw_day(name, cur):
+                miss.append(str(cur))
+            cur += timedelta(days=1)
         rep["疑似未抓取的开奖日"] = miss
         if miss:
             rep["问题"].append({
                 "级别": "警告", "项": "按开奖日历应有但本地缺失的日期",
                 "数量": len(miss), "样例": miss[:10],
-                "说明": "含法定节假日休市，需与期号缺号对照判断",
+                "说明": "已按彩票市场休市日历剔除休市日（data.holiday.is_draw_day），需与期号缺号对照判断",
             })
     return rep
 

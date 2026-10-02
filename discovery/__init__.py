@@ -2,7 +2,7 @@
 discovery —— 发现闭环（P0：假设登记册 + 重训闸门）
 
 把「裁判层」从"事后自检"升级为"前置发现闭环"：
-  1. hypothesis_registry.py  假设登记册：系统/人工提出可证伪的 edge 假设，落盘登记。
+  1. hypothesis_registry.py  假设登记册：系统/人工提出待检验的 edge 假设，落盘登记。
   2. gate.py                 闸门引擎：用裁判层四道闸（OOS/FDR/效应量/贝叶斯+异常交叉）
                              或 EV 边探测判卷，只有真正穿越随机的假设才 promoted。
 

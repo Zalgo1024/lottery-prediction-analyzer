@@ -56,8 +56,8 @@ def fig_architecture():
     _box(ax, 4.75, 6.0, 1.9, 0.84, "完整性体检\nhealth_check", fs=10)
     _box(ax, 6.85, 6.0, 2.35, 0.84, "开奖 CSV（6 彩种 20 年）\nlottery_data/", fs=10, fc="#F3F5F8", ec=C_GRAY)
 
-    # 证伪层（核心）
-    layer_label(0.55, 5.7, "证伪裁判层（核心）")
+    # 检验层（核心）
+    layer_label(0.55, 5.7, "检验裁判层（核心）")
     _box(ax, 0.55, 4.6, 2.6, 0.84, "假设登记 + 样本外回测\ncredibility/", fs=10, fc="#FDF3E7", ec="#C87F2F")
     _box(ax, 3.35, 4.6, 2.6, 0.84, "随机基线军团 + FDR\ndiscovery/", fs=10, fc="#FDF3E7", ec="#C87F2F")
     _box(ax, 6.15, 4.6, 3.05, 0.84, "鲁棒性六支柱 + 随机性审计\nrobustness · NIST", fs=10, fc="#FDF3E7", ec="#C87F2F")
@@ -71,12 +71,12 @@ def fig_architecture():
 
     # 展示层
     layer_label(0.55, 2.9, "展示层")
-    _box(ax, 0.55, 1.8, 3.9, 0.84, "Web 看板（14 页面 + 诚实看板）\nweb/", fs=10)
+    _box(ax, 0.55, 1.8, 3.9, 0.84, "Web 看板（14 页面 + 数据体检看板）\nweb/", fs=10)
     _box(ax, 4.85, 1.8, 4.35, 0.84, "CLI 双入口（credibility/payout/select/trials/…）\ncli.py", fs=10)
 
     # 底层
     _box(ax, 0.55, 0.45, 8.65, 0.95,
-         "支撑：pytest 374 例 · 原子写 · 写生产三道闸 · 自动流水线（调度/事件/自愈） · AGPL-3.0\n"
+         "支撑：pytest 594 例 · 原子写 · 写生产三道闸 · 自动流水线（调度/事件/自愈） · AGPL-3.0\n"
          "新增：撞号度量/低重叠剪枝（ev/coverage.py） · 中奖归因聚合（ev/attribution.py）",
          fs=10, fc="#F3F5F8", ec=C_GRAY)
 
@@ -89,7 +89,7 @@ def fig_architecture():
     fig.savefig(os.path.join(OUT, "fig_architecture.png"), bbox_inches="tight", facecolor=C_BG)
     plt.close(fig)
 
-# ---------------------------------------------------------------- 图2 证伪流水线
+# ---------------------------------------------------------------- 图2 假设检验流水线
 def fig_pipeline():
     fig, ax = plt.subplots(figsize=(11.5, 3.6), dpi=170)
     ax.set_xlim(0, 10); ax.set_ylim(0, 3.6); ax.axis("off")

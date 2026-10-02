@@ -290,14 +290,20 @@ def evaluate(name: str, test_frac: float = 0.2) -> dict:
 
 # ---------------------------------------------------------------- 下一期预测 + 信号回放
 def _next_date(name: str, last_date) -> pd.Timestamp:
-    """按开奖周历推下一开奖日"""
-    d = pd.Timestamp(last_date)
-    days = _DRAW_WEEKDAYS[name]
-    for k in range(1, 8):
-        cand = d + pd.Timedelta(days=k)
-        if cand.dayofweek in days:
-            return cand
-    return d + pd.Timedelta(days=7)  # 兜底（不该发生）
+    """按休市日历推下一开奖日（真源 data.holiday.next_draw_date，跳过春节/国庆休市窗口；
+    2026-10-02 前只按周历推算，会把 10-01 这类休市日当成开奖日）。"""
+    from datetime import timedelta as _td
+    from data.holiday import next_draw_date
+    d = pd.Timestamp(last_date).date()
+    try:
+        return pd.Timestamp(next_draw_date(name, d + _td(days=1)))
+    except (ValueError, KeyError):  # 未知彩种/一年找不到 → 退回旧周历兜底
+        days = _DRAW_WEEKDAYS[name]
+        for k in range(1, 8):
+            cand = d + _td(days=k)
+            if cand.weekday() in days:
+                return pd.Timestamp(cand)
+        return pd.Timestamp(d + _td(days=7))  # 兜底（不该发生）
 
 
 def forecast_next(name: str) -> dict:
@@ -376,6 +382,23 @@ def forecast_next(name: str) -> dict:
     # 顶格支撑注数 = 池可分池 / 封顶；split_margin>1 → 池厚到可顶格，EV 在天花板附近
     split_margin = (head_pool / _JACKPOT_CAP) / max(lam_hat, 1e-9) if head_pool > 0 else 0.0
     at_cap = bool(jackpot >= _JACKPOT_CAP * 0.999)
+
+    # ---- 冷门口径前瞻（策略升级 A）：μ_冷门 = λ_hat × 形态因子；降级显式落备注 ----
+    try:
+        from ev.rollover import _mu_cold_state
+        cold_factor, cold_basis = _mu_cold_state(name)
+    except Exception as e:
+        cold_factor, cold_basis = None, f"冷门口径不可用({type(e).__name__})"
+    mu_cold_fwd = lam_hat * cold_factor if (cold_factor and lam_hat > 0) else None
+    jackpot_cold = (min(_JACKPOT_CAP, head_pool / mu_cold_fwd)
+                    if (mu_cold_fwd and head_pool > 0) else None)
+    split_margin_cold = ((head_pool / _JACKPOT_CAP) / mu_cold_fwd
+                         if (mu_cold_fwd and head_pool > 0) else None)
+    at_cap_cold = (bool(jackpot_cold >= _JACKPOT_CAP * 0.999)
+                   if jackpot_cold is not None else None)
+    fwd_note_ext = (f"冷门口径可用（{cold_basis}）" if mu_cold_fwd is not None
+                    else str(cold_basis))
+
     return {
         "彩种": name,
         "已知最新期": {"期号": str(last["期号"]), "日期": str(last["date"].date()),
@@ -387,6 +410,7 @@ def forecast_next(name: str) -> dict:
             "销量(预测)": round(sales_hat, 0) if sales_hat else "销量列样本不足，不预测",
             "一等奖注数(预测, LightGBM对照)": round(n1_hat, 2),
             "销量推导λ(=销量/2×P1)": round(lam_sales, 4) if lam_sales else None,
+            "μ_冷门(预测,冷门口径)": round(mu_cold_fwd, 4) if mu_cold_fwd is not None else None,
         },
         "前瞻EV": {
             "头奖单注估计(预测)": round(jackpot, 0),
@@ -398,9 +422,15 @@ def forecast_next(name: str) -> dict:
             "顶格支撑富余(split_margin)": round(split_margin, 2),
             "顶格判定(≥99.9%封顶)": at_cap,
             "参与信号(前瞻)": at_cap,
+            "头奖单注估计(冷门口径前瞻)": (round(jackpot_cold, 0)
+                                        if jackpot_cold is not None else None),
+            "split_margin(冷门前瞻)": (round(split_margin_cold, 2)
+                                      if split_margin_cold is not None else None),
+            "顶格判定(冷门口径前瞻)": at_cap_cold,
             "备注": ("封顶 1000 万下 EV 有天花板；'参与窗口'= 池厚到可顶格且 split 风险低。"
                      "⚠️ rollover 原 P75 规则：大乐透历史 P75 顶格→恒False(死锁)；"
-                     "双色球顶格常态化→恒True(饱和)——本模块改用 EV 天花板语义"),
+                     "双色球顶格常态化→恒True(饱和)——本模块改用 EV 天花板语义；"
+                     + fwd_note_ext),
         },
     }
 

@@ -1,18 +1,18 @@
 """
-诚实看板 Web 路由（P3：开奖质量监控 + EV 看板 + P/L 反馈）
+数据体检看板 Web 路由（P3：开奖质量监控 + EV 看板 + P/L 反馈）
 
-- GET /honest                         诚实看板页面
-- GET /api/honest/quality/<lottery>   开奖质量监控（数据质量评分+异常分区）
-- GET /api/honest/ev/<lottery>        EV 看板（名义EV表 + 限号/撞号修正 + 冷门TOP）
-- GET /api/honest/rollover/<lottery>  双/大 Rollover-EV（参与信号）
-- GET /api/honest/pl/<lottery>        P/L 反馈摘要（命中率 | 模拟盈亏 | 权重）
-- GET /api/honest/distance/<lottery>  距离画像（观测 vs 随机基线）
-- GET /api/honest/payout_profile/<lottery> 实得画像（流行度LRT+反事实回测，NetPayout WP4）
-- GET /api/honest/trials/<lottery>          A/B 对照进度 + 人群漂移裁决（NetPayout WP5）
-- GET /api/honest/attribution/<lottery>    中奖归因（来源×策略×档位 + 最新批次撞号覆盖）
-- GET /api/honest/attribution_global       六彩种归因汇总
+- GET /audit                         数据体检看板页面
+- GET /api/audit/quality/<lottery>   开奖质量监控（数据质量评分+异常分区）
+- GET /api/audit/ev/<lottery>        EV 看板（名义EV表 + 限号/撞号修正 + 冷门TOP）
+- GET /api/audit/rollover/<lottery>  双/大 Rollover-EV（参与信号）
+- GET /api/audit/pl/<lottery>        P/L 反馈摘要（命中率 | 模拟盈亏 | 权重）
+- GET /api/audit/distance/<lottery>  距离画像（观测 vs 随机基线）
+- GET /api/audit/payout_profile/<lottery> 实得画像（流行度LRT+反事实回测，NetPayout WP4）
+- GET /api/audit/trials/<lottery>          A/B 对照进度 + 人群漂移裁决（NetPayout WP5）
+- GET /api/audit/attribution/<lottery>    中奖归因（来源×策略×档位 + 最新批次撞号覆盖）
+- GET /api/audit/attribution_global       六彩种归因汇总
 
-定位：只呈现「诚实指标」（可证伪的度量），不输出任何"中奖承诺"。
+定位：只呈现各项质量与 EV 指标，不输出任何"中奖承诺"。
 """
 
 from flask import Blueprint, jsonify, render_template, request
@@ -20,7 +20,7 @@ from flask import Blueprint, jsonify, render_template, request
 from web.utils import api_error_handler
 from web.validators import validate_lottery
 
-bp = Blueprint("honest", __name__)
+bp = Blueprint("audit", __name__)
 
 # 彩种分组
 _DIGITAL = ["排列5", "福彩3D", "排列3", "七星彩"]
@@ -28,12 +28,12 @@ _LOTTERY_STYLE = ["双色球", "大乐透"]
 _ALL = ["双色球", "大乐透", "排列5", "福彩3D", "排列3", "七星彩"]
 
 
-@bp.route("/honest")
+@bp.route("/audit")
 def page():
-    return render_template("honest.html", all_lotteries=_ALL)
+    return render_template("audit.html", all_lotteries=_ALL)
 
 
-@bp.route("/api/honest/quality/<lottery>")
+@bp.route("/api/audit/quality/<lottery>")
 @api_error_handler
 @validate_lottery
 def api_quality(lottery):
@@ -43,7 +43,7 @@ def api_quality(lottery):
     return jsonify(r)
 
 
-@bp.route("/api/honest/ev/<lottery>")
+@bp.route("/api/audit/ev/<lottery>")
 @api_error_handler
 @validate_lottery
 def api_ev(lottery):
@@ -53,7 +53,7 @@ def api_ev(lottery):
     from ev.sampler import sample_tickets
 
     if lottery not in _DIGITAL:
-        return jsonify({"error": f"{lottery} 为彩票式（双/大），用 /api/honest/rollover 查看 Rollover-EV"})
+        return jsonify({"error": f"{lottery} 为彩票式（双/大），用 /api/audit/rollover 查看 Rollover-EV"})
 
     # 名义EV 表（各玩法）
     nom = nominal_ev(lottery)
@@ -91,21 +91,21 @@ def api_ev(lottery):
     })
 
 
-@bp.route("/api/honest/rollover/<lottery>")
+@bp.route("/api/audit/rollover/<lottery>")
 @api_error_handler
 @validate_lottery
 def api_rollover(lottery):
     """双/大 Rollover-EV（参与信号）"""
     from ev.rollover import rollover_ev, rollover_history
     if lottery not in _LOTTERY_STYLE:
-        return jsonify({"error": f"{lottery} 非彩票式，无 Rollover 概念（用 /api/honest/ev）"})
+        return jsonify({"error": f"{lottery} 非彩票式，无 Rollover 概念（用 /api/audit/ev）"})
     cur = rollover_ev(lottery)
     hist = rollover_history(lottery, n=10)
     cur["趋势(近10期)"] = hist
     return jsonify(cur)
 
 
-@bp.route("/api/honest/pl/<lottery>")
+@bp.route("/api/audit/pl/<lottery>")
 @api_error_handler
 @validate_lottery
 def api_pl(lottery):
@@ -118,7 +118,7 @@ def api_pl(lottery):
     return jsonify(s)
 
 
-@bp.route("/api/honest/distance/<lottery>")
+@bp.route("/api/audit/distance/<lottery>")
 @api_error_handler
 @validate_lottery
 def api_distance(lottery):
@@ -127,7 +127,7 @@ def api_distance(lottery):
     return jsonify(distance_stats(lottery))
 
 
-@bp.route("/api/honest/trials/<lottery>")
+@bp.route("/api/audit/trials/<lottery>")
 @api_error_handler
 @validate_lottery
 def api_trials(lottery):
@@ -148,7 +148,7 @@ def api_trials(lottery):
     })
 
 
-@bp.route("/api/honest/payout_profile/<lottery>")
+@bp.route("/api/audit/payout_profile/<lottery>")
 @api_error_handler
 @validate_lottery
 def api_payout_profile(lottery):
@@ -172,7 +172,7 @@ def api_payout_profile(lottery):
     })
 
 
-@bp.route("/api/honest/attribution/<lottery>")
+@bp.route("/api/audit/attribution/<lottery>")
 @api_error_handler
 @validate_lottery
 def api_attribution(lottery):
@@ -190,7 +190,7 @@ def api_attribution(lottery):
     return jsonify(attribution_for_lottery(lottery, **({} if lb is None else {"lookback": lb})))
 
 
-@bp.route("/api/honest/attribution_global")
+@bp.route("/api/audit/attribution_global")
 @api_error_handler
 def api_attribution_global():
     """六彩种归因汇总：全局 (来源,策略,档位) 合并表 + 各彩种总计。"""

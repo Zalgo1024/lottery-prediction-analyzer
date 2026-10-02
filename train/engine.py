@@ -132,7 +132,7 @@ def _train_random_forest(X_train, y_train, hp=None):
 
 
 def _train_lightgbm(X_train, y_train, hp=None):
-    """训练 LightGBM 模型（最强证伪基线，见《算法升级路线图》P0-3）。
+    """训练 LightGBM 模型（最强对照基线，见《算法升级路线图》P0-3）。
 
     hp: 可选超参 dict（来自 Optuna 条件建议，覆盖 num_leaves / learning_rate /
     n_estimators），为 None 时用保守固定值（num_leaves=31 / lr=0.05 / 200 树）。

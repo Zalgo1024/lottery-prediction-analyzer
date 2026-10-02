@@ -111,6 +111,34 @@ def fixed_prize_ev(name: str) -> float:
     return sum(payout * p for payout, p in _FIXED_PRIZES[name].values())
 
 
+def _mu_cold_state(name: str, q_cold: float = 0.1) -> tuple:
+    """
+    冷门口径形态因子（策略升级 A）：exp(β·f(q10 分位组合))。
+
+    返回 (因子 | None, 口径说明)。流行度模型未 Go / 不可用 → None + 回退原因
+    （显式降级不许静默；回退口径 = λ 均摊，号码无关）。
+    μ_冷门 = λ × 因子（λ = N×P(一等) 为全市场平均；冷门组合因子 <1 → 分摊更少）。
+    """
+    try:
+        import numpy as np
+
+        from ev.popularity import cold_hot_combo, features_matrix, get_popularity_model
+        params = get_popularity_model(name)
+        if not params.get("go"):
+            return None, "流行度模型未达 Go 门槛 → 回退 λ 均摊口径（号码无关）"
+        ch = cold_hot_combo(name, q_cold)
+        if ch is None:
+            return None, "冷/热参考组合不可得 → 回退 λ 均摊口径"
+        f = features_matrix(np.array([ch[0]], dtype=np.int16))[0]
+        z = (f - params["m_"]) / params["s_"]
+        factor = float(np.exp(float(z @ params["beta"])))
+        if not (factor > 0):
+            return None, "冷门形态因子非正 → 回退 λ 均摊口径"
+        return factor, f"μ_冷门(q{max(1, int(round(q_cold * 100)))}分位组合)"
+    except Exception as e:
+        return None, f"流行度模型不可用({type(e).__name__}) → 回退 λ 均摊口径"
+
+
 def rollover_ev(name: str, issue: str = None, pool_share: float = _POOL_SHARE,
                 cap: float = _JACKPOT_CAP) -> dict:
     """
@@ -120,7 +148,14 @@ def rollover_ev(name: str, issue: str = None, pool_share: float = _POOL_SHARE,
           头奖单注奖金估计, 头奖期望贡献, 固定奖贡献, 总EV, 参与信号, 备注}
     参与信号 = EV 天花板语义：头奖单注估计顶格（≥99.9% 封顶）才算参与窗口
     （旧 P75 规则：大乐透死锁恒 False / 双色球饱和恒 True，见模块 docstring）。
+
+    冷门口径（策略升级 A）：λ 是「随机号」面对的平均分摊人数；冷门号面对的
+    μ_冷门 = λ×exp(β·f(q10组合)) 更低 → 参与门槛更低。既有键保持 λ 口径不变
+    （payout.py 兜底与前端语义依赖既有键名），冷门口径全部走新增键。
     """
+    if name not in _P1:
+        return {"error": f"{name} 非乐透型（双/大），无 rollover 概念"
+                         "（固定赔率彩种单注 EV 恒定；七星彩请用 ev.engine.net_ev）"}
     df = _load_history(name)
     if issue is None:
         row = df.iloc[0]
@@ -153,6 +188,14 @@ def rollover_ev(name: str, issue: str = None, pool_share: float = _POOL_SHARE,
     baseline = (f"EV天花板判定(split_margin={split_margin:.2f})" if head_pool > 0
                 else "无池/销售数据")
 
+    # ---- 冷门口径（策略升级 A）：门槛按冷门号实际面对的分摊人数 μ_冷门 = λ×因子 ----
+    cold_factor, cold_basis = _mu_cold_state(name)
+    mu_cold = lam * cold_factor if (cold_factor and lam > 0) else None
+    jpw_cold = min(cap, head_pool / mu_cold) if (mu_cold and head_pool > 0) else None
+    split_margin_cold = ((head_pool / cap) / mu_cold
+                         if (mu_cold and head_pool > 0) else None)
+    play_cold = (jpw_cold >= cap * 0.999) if jpw_cold is not None else None
+
     note = []
     if not pool:
         note.append("无奖池数据")
@@ -165,6 +208,10 @@ def rollover_ev(name: str, issue: str = None, pool_share: float = _POOL_SHARE,
         note.append(f"EV天花板窗口（{baseline}），可考虑小额参与（仍为负EV总期望，仅娱乐级）")
     else:
         note.append(f"未到EV天花板窗口（{baseline}），不参与")
+    if mu_cold is not None:
+        note.append(f"冷门口径可用（{cold_basis}：μ_冷={mu_cold:.2f} vs λ={lam:.2f}，门槛更低）")
+    else:
+        note.append(cold_basis)
 
     return {
         "彩种": name,
@@ -179,13 +226,24 @@ def rollover_ev(name: str, issue: str = None, pool_share: float = _POOL_SHARE,
         "固定奖贡献": round(fixed_contrib, 6),
         "总EV(每注)": round(total_ev, 6),
         "参与信号": play_signal,
+        "分摊口径": (f"{cold_basis}（μ_冷门口径）" if mu_cold is not None
+                     else "λ均摊（号码无关）"),
+        "μ_冷门": round(mu_cold, 4) if mu_cold is not None else None,
+        "头奖单注估计(冷门口径)": round(jpw_cold, 2) if jpw_cold is not None else None,
+        "split_margin(冷门)": round(split_margin_cold, 4) if split_margin_cold is not None else None,
+        "参与信号(冷门口径)": play_cold,
         "备注": "；".join(note) or "-",
     }
 
 
 def rollover_history(name: str, n: int = 30) -> list:
-    """最近 n 期的 Rollover-EV 序列（看奖池滚动趋势；参与信号=EV天花板语义）"""
+    """最近 n 期的 Rollover-EV 序列（看奖池滚动趋势；参与信号=EV天花板语义）。
+
+    冷门口径（策略升级 A）：模型参数/组合只取一次，μ_冷门 逐行算（各期销量不同）；
+    既有键（头奖单注估计/参与信号）保持 λ 口径不动。
+    """
     df = _load_history(name)
+    cold_factor, cold_basis = _mu_cold_state(name)
     out = []
     for _, row in df.head(n).iterrows():
         pool = float(row["奖池奖金"]) if row.get("奖池奖金") == row.get("奖池奖金") else 0.0
@@ -193,11 +251,16 @@ def rollover_history(name: str, n: int = 30) -> list:
         n_t = sales / 2.0
         lam = n_t * _P1[name]
         jpw = min(_JACKPOT_CAP, pool * _POOL_SHARE / max(lam, 1e-9)) if pool > 0 else 0.0
+        mu_cold = lam * cold_factor if (cold_factor and lam > 0) else None
+        jpw_cold = (min(_JACKPOT_CAP, pool * _POOL_SHARE / mu_cold)
+                    if (mu_cold and pool > 0) else None)
         out.append({
             "期号": str(row["期号"]),
             "奖池": round(pool, 0),
             "头奖单注估计": round(jpw, 0),
             "参与信号": bool(jpw >= _JACKPOT_CAP * 0.999 and lam > 0),
+            "μ_冷门": round(mu_cold, 3) if mu_cold is not None else None,
+            "头奖单注估计(冷门口径)": round(jpw_cold, 0) if jpw_cold is not None else None,
         })
     return out
 

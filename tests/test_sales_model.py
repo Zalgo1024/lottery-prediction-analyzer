@@ -12,14 +12,51 @@ from ev import sales_model as sm
 
 
 # ---------------------------------------------------------------- 零穿越
+def _raw_frame_with_lag1(name: str) -> pd.DataFrame:
+    """按 build_frame 的原始时间序重建 lag1 真源（仅 期号 + *_lag1）。
+
+    为什么不能对齐帧内相邻行：build_frame 末尾 `dropna(subset=["n1_lag1","pool_lag1"])`
+    会剔除「上一期池值为 NaN」的行（当期金额全 0 未回填 → _to_float 判为缺失）。
+    于是帧内某行 k 的 lag1 指向的**真实上一期可能已被剔除**，与帧内 k-1 行无关。
+    故必须回到 _load_history 的原始升序序列重算 shift(1) 作参照。
+    """
+    df = sm._load_history(name)
+    d = pd.to_datetime(df["开奖日期"], dayfirst=True, errors="coerce")
+    raw = pd.DataFrame({
+        "期号": df["期号"].astype(str),
+        "date": d,
+        "pool": sm._to_float(df["奖池奖金"]),
+        "sales": sm._to_float(df["总投注额"]),
+        "n1": pd.to_numeric(df["一等奖注数"], errors="coerce").fillna(0.0),
+    })
+    raw = raw.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
+    raw["sales"] = raw["sales"].where(raw["sales"].notna() & (raw["sales"] > 0))
+    out = raw[["期号"]].copy()
+    for col in ("pool", "sales", "n1"):
+        out[f"{col}_lag1"] = raw[col].shift(1)
+    return out
+
+
 class TestFrameLag:
     def test_lags_are_strictly_past(self):
-        """滞后特征必须等于上一期的实际值（不允许当期/未来信息进入特征）"""
+        """滞后特征必须等于**原始上一期**的实际值（不允许当期/未来信息进入特征）。
+
+        2026-10-02 修正：改为按期号回原始序列对齐（原断言假设帧内相邻 = 真实上一期，
+        在出现金额缺失缝隙后不成立——见 _raw_frame_with_lag1 说明）。
+        """
         f = sm.build_frame("大乐透")
-        for k in (5, 100, 500, len(f) - 3):
-            assert f["pool_lag1"].iloc[k] == pytest.approx(f["pool_t"].iloc[k - 1])
-            assert f["sales_lag1"].iloc[k] == pytest.approx(f["sales_t"].iloc[k - 1])
-            assert f["n1_lag1"].iloc[k] == pytest.approx(f["n1_t"].iloc[k - 1])
+        m = f[["期号"]].copy()
+        m["期号"] = m["期号"].astype(str)
+        for col in ("pool", "sales", "n1"):
+            m[f"{col}_lag1"] = f[f"{col}_lag1"].values
+        m = m.merge(_raw_frame_with_lag1("大乐透"), on="期号", how="left",
+                    suffixes=("", "_ref"))
+        assert len(m) == len(f), "期号不唯一导致 merge 放大"
+        for col in ("pool", "sales", "n1"):
+            a, b = m[f"{col}_lag1"], m[f"{col}_lag1_ref"]
+            mask = a.notna() & b.notna()
+            assert mask.sum() > 100, col
+            assert (a[mask] == b[mask]).all(), f"{col}_lag1 与原始上一期不一致（疑似穿越）"
 
     def test_frame_is_ascending(self):
         f = sm.build_frame("大乐透")

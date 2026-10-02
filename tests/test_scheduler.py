@@ -2,7 +2,13 @@ import unittest
 from datetime import datetime, timedelta
 from unittest.mock import patch
 
+from data.holiday import is_holiday
 from web.scheduler import AutoScheduler
+
+# 注入固定日期，不依赖真实时钟：2026-09-30（周三，非休市，排列3 每日开奖）。
+# 2026-10-02 改造后休市期 _next_run 语义变化（休市窗口不算开奖日），
+# 用真实 datetime.now() 的用例在 10-01~10-04 期间会挂。
+FIXED_NOW = datetime(2026, 9, 30, 10, 0)
 
 
 class SchedulerTests(unittest.TestCase):
@@ -26,17 +32,17 @@ class SchedulerTests(unittest.TestCase):
         """
         scheduler = AutoScheduler()
         scheduler._save = lambda: None
-        now = datetime.now()
+        now = FIXED_NOW
         for lot in ("双色球", "大乐透", "七星彩", "排列3", "福彩3D", "排列5"):
-            nf = scheduler._next_future_run(lot)
-            due = scheduler._next_run(lot)
+            nf = scheduler._next_future_run(lot, now=now)
+            due = scheduler._next_run(lot, now=now)
             self.assertIsNotNone(nf, lot)
             self.assertGreater(nf, now, f"{lot} 的 next_run 应为未来时间")
             self.assertIsNotNone(due, lot)
             # due 是"最近一个应触发的日期"（今天或更早），不保证已过 22:05
             self.assertLessEqual(due.date(), now.date(), f"{lot} 的 due_run 不应是未来日期")
-            # 每日开奖彩种：下一次不会超过 24 小时
-            if lot in ("排列3", "福彩3D", "排列5"):
+            # 每日开奖彩种：下一次不会超过 24 小时（休市期例外——休市窗口内没有开奖日）
+            if lot in ("排列3", "福彩3D", "排列5") and not is_holiday(now.date()):
                 self.assertLess((nf - now).total_seconds(), 24 * 3600, lot)
 
     def test_get_status_exposes_overdue_for_missed_draw_day(self):
@@ -49,7 +55,7 @@ class SchedulerTests(unittest.TestCase):
         """
         scheduler = AutoScheduler()
         scheduler._save = lambda: None
-        fixed = datetime.now().replace(hour=23, minute=30, second=0, microsecond=0)
+        fixed = datetime(2026, 9, 30, 23, 30)   # 周三非休市；注入固定时刻勿用真实时钟
         due = scheduler._next_run("排列3", now=fixed)
         scheduler.state["排列3"] = {
             "last_run": (due - timedelta(days=1)).isoformat(),
@@ -72,7 +78,7 @@ class SchedulerTests(unittest.TestCase):
         """
         scheduler = AutoScheduler()
         scheduler._save = lambda: None
-        fixed = datetime.now().replace(hour=8, minute=0, second=0, microsecond=0)
+        fixed = datetime(2026, 9, 30, 8, 0)     # 周三非休市；注入固定时刻勿用真实时钟
         scheduler.state["排列3"] = {
             "last_run": (fixed - timedelta(days=2)).isoformat(),
             "last_status": "done",

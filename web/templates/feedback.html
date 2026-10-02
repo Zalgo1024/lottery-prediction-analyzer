@@ -19,14 +19,22 @@
     <option value="50">近 50 期</option>
     <option value="100">近 100 期</option>
   </select>
-  <select id="fb-source" style="padding:8px 15px;border:1px solid #ddd;border-radius:5px;font-size:14px">
-    <option value="all" selected>全部来源</option>
-    <option value="predict">日常预测</option>
-    <option value="训练">训练生成</option>
+  <select id="fb-source" style="padding:8px 15px;border:1px solid #ddd;border-radius:5px;font-size:14px" title="默认只看前瞻战绩；事后训练栏仅供排查">
+    <option value="predict" selected>前瞻战绩（开奖前出号）</option>
+    <option value="训练">事后训练（开奖后生成）</option>
+    <option value="all">全部（含事后训练·仅排查用）</option>
   </select>
   <button class="btn btn-primary" onclick="loadFeedbackSummary()"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg> 刷新摘要</button>
   <button class="btn btn-info" onclick="loadFeedbackCompare()"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4-4"/></svg> 对比视图</button>
   <button class="btn btn-warning" onclick="evaluatePending()">触发评估</button>
+</div>
+
+<div style="margin:10px 0 0;padding:10px 14px;border:1px solid var(--color-border-tertiary,#e5e7eb);border-left:3px solid var(--color-text-info,#185fa5);border-radius:8px;background:var(--color-background-secondary,#f9fafb);font-size:12px;color:var(--gray);line-height:1.7">
+  <strong>三类记录互不混排</strong>：
+  ① <strong>前瞻战绩</strong>——开奖前出号，计策略权重 / EV / 命中率，是唯一算战绩的口径；
+  ② <strong>事后训练</strong>——开奖后才生成的号码（含训练闭环回放），仅供回放历史决策，<strong>不计入任何战绩口径</strong>；
+  ③ <strong>随机锚点走前验证</strong>——另一套独立台账（<code>training/anchor_trials/</code>，指标为配对 z 与随机基线对比），
+  不在本页，见 <a href="/rolling">持续训练中心</a>。②与③性质不同，永不合并。
 </div>
 
 <div style="margin:10px 0 20px;padding:12px 14px;border:1px solid var(--color-border-secondary,#e5e7eb);border-radius:8px;background:var(--color-background-secondary,#f9fafb);display:flex;gap:10px;flex-wrap:wrap;align-items:center">

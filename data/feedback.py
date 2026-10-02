@@ -825,15 +825,39 @@ def _parse_iso_date(s):
     return None
 
 
-def _is_valid_prediction(pred_date_str, actual_date):
+DRAW_CUTOFF = "21:00"  # 各彩种开奖时间均在 21:15 之后，取 21:00 作为「当日开奖前」的分界
+
+
+def _is_valid_prediction(pred_date_str, actual_date, gen_time_str=None):
     """
     判定一条反馈是否为「真预测」而非「马后炮回测」。
 
-    规则：预测日期必须不晚于开奖日期。
-    - 预测日期 <= 开奖日期 → 真预测（开奖前生成，valid=True）
-    - 预测日期 >  开奖日期 → 开奖后才生成（马后炮），一律归为「训练/回测」，valid=False
-    任一方日期缺失则保守视为真预测（避免误杀旧数据）。
+    ★ 2026-09-21 起改为**优先看生成时间**（有则按它判，没有才回退日期规则）：
+    - 生成时间 <= 开奖日 21:00 → 真预测（valid=True）
+    - 生成时间 >  开奖日 21:00 → 开奖后才生成，归「训练/回测」（valid=False）
+    回退规则（无生成时间的老记录，保守沿用原口径）：
+    - 预测日期 <= 开奖日期 → 真预测；预测日期 > 开奖日期 → 马后炮。
+    两者信息都缺 → 保守视为真预测（避免误杀旧数据）。
+
+    为什么不再单靠日期：`预测日期` 是由开奖日历推算出来的**派生字段**，
+    日历一旦偏（如 2026-09-20 国庆调休上班日被误判休市），预测日期就被推到下一期，
+    开奖前出好的真预测会被误标成「开奖后回测·训练」（09-21 核查：646 条训练标签里
+    0 条确认是开奖后生成、136 条有生成时间戳铁证是开奖前生成）。
+    生成时间是**事实**，不受日历推算影响，故以它为准。
     """
+    from datetime import datetime as _dt, time as _time
+
+    gen = None
+    if gen_time_str:
+        try:
+            gen = _dt.fromisoformat(str(gen_time_str))
+        except (ValueError, TypeError):
+            gen = None
+
+    if gen is not None and actual_date:
+        cutoff = _dt.combine(actual_date, _time.fromisoformat(DRAW_CUTOFF))
+        return gen <= cutoff
+
     pd = _parse_iso_date(pred_date_str)
     if not pd or not actual_date:
         return True
@@ -922,8 +946,10 @@ def evaluate_pending_predictions(lottery_name: str) -> dict:
             still_pending_list.append(pred)
             continue
 
-        # 判定真预测/马后炮：预测日期必须不晚于开奖日期
-        is_valid = _is_valid_prediction(pred.get("预测日期", ""), actual.开奖日期)
+        # 判定真预测/马后炮：优先按「生成时间 vs 开奖日 21:00」（事实），
+        # 无生成时间的老记录回退「预测日期 <= 开奖日期」（派生字段，受日历影响）
+        _gen_raw = pred.get("生成时间") or pred.get("记录时间") or ""
+        is_valid = _is_valid_prediction(pred.get("预测日期", ""), actual.开奖日期, _gen_raw)
         # 来源=「训练/train」的一律不算真预测（此前仅按日期判定，马后炮训练样本混入 valid 口径）
         if pred.get("来源") in ("train", "训练"):
             is_valid = False

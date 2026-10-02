@@ -18,6 +18,7 @@ import threading
 from datetime import datetime, timedelta
 
 from config import LOTTERY_CONFIG, BASE_DIR, resolve_groups
+from data.holiday import is_draw_day
 from logs.logger import setup_logger
 
 logger = setup_logger("scheduler")
@@ -122,11 +123,12 @@ class AutoScheduler:
         cfg = LOTTERY_CONFIG.get(lottery)
         if not cfg:
             return None
-        days = set(cfg.get("draw_days", list(range(7))))
         now = now or datetime.now()
-        for d in range(0, 8):
+        # 休市日不排班：跳过 MARKET_CLOSURE 窗口，回落到休市前最后一个开奖日。
+        # 有界 for（15 天）而非 while：无死循环风险；超长休市（2020 疫情 49 天）返回 None = 不触发。
+        for d in range(0, 15):
             cand = now.date() - timedelta(days=d)
-            if cand.weekday() in days:
+            if is_draw_day(lottery, cand):
                 return datetime(cand.year, cand.month, cand.day, RUN_HOUR, RUN_MINUTE)
         return None
 
@@ -137,15 +139,15 @@ class AutoScheduler:
         今天该不该补跑，那个时间点通常已经过去；直接把它显示在看板「下次运行」列，
         会出现"下次运行 = 两天前"这种自相矛盾的展示，让人误判调度停摆。
         本方法只用于展示，不参与触发判断。
+        休市日历感知（2026-10-02）：休市窗口内的日期不算开奖日，自动跳到恢复后首个开奖日。
         """
         cfg = LOTTERY_CONFIG.get(lottery)
         if not cfg:
             return None
-        days = set(cfg.get("draw_days", list(range(7))))
         now = now or datetime.now()
-        for d in range(0, 8):
+        for d in range(0, 15):
             cand = now.date() + timedelta(days=d)
-            if cand.weekday() in days:
+            if is_draw_day(lottery, cand):
                 t = datetime(cand.year, cand.month, cand.day, RUN_HOUR, RUN_MINUTE)
                 if t > now:
                     return t

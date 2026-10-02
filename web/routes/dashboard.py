@@ -5,7 +5,7 @@
 import json
 from flask import Blueprint, jsonify, render_template, request
 
-from web.utils import api_error_handler, get_all_data_status, refresh_data, compare_training_with_actual, start_update, get_task, start_auto_pipeline, start_auto_batch, start_recover_all
+from web.utils import api_error_handler, get_all_data_status, get_market_closure, refresh_data, compare_training_with_actual, start_update, get_task, start_auto_pipeline, start_auto_batch, start_recover_all
 from web.scheduler import scheduler
 from web.validators import validate_lottery
 
@@ -22,6 +22,13 @@ def index():
 def api_data_status():
     """获取所有彩票的数据状态"""
     return jsonify(get_all_data_status())
+
+
+@bp.route("/api/market-closure")
+@api_error_handler
+def api_market_closure():
+    """当前是否处于彩票市场休市窗口（看板「休市中」提示条用）"""
+    return jsonify(get_market_closure())
 
 
 @bp.route("/robustness")

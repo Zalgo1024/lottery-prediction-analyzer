@@ -68,6 +68,45 @@ def _greedy_pick(scored: List, n: int, cap: int, lottery: str) -> List[Dict[str,
     return picked
 
 
+def _portfolio_metrics(picked: List[Dict[str, Any]], lottery: str) -> Dict[str, Any]:
+    """
+    组合方差指标（Step F）：衡量选中注集的分散程度。
+
+    有效独立注数 = m² / ΣΣ oᵢⱼ，其中 oᵢⱼ 按主区号码数归一、自重叠 oᵢᵢ=1：
+      - 注注相同 → oᵢⱼ=1 → m_eff=1（一注 repeated m 遍，方差无分散）
+      - 完全不重叠 → 非 对角 oᵢⱼ=0 → m_eff=m（独立度最高）
+    诚实边界：低重叠只降低「中奖结果之间的相关性」（方差），不改变总期望——
+    EV 的线性性与号码选择无关。
+    """
+    ts = [p["号码"] for p in picked]
+    m = len(ts)
+    if m == 0:
+        return {"注数": 0, "平均重叠": None, "最大重叠": None,
+                "有效独立注数": None, "口径": "无选中注"}
+    size = len(ts[0]["红球"]) if lottery in ("双色球", "大乐透") else len(ts[0]["号码"])
+    if m < 2:
+        return {"注数": m, "平均重叠": None, "最大重叠": None,
+                "有效独立注数": float(m),
+                "口径": "单注无组合方差可言（m_eff=m）"}
+    pair_overlaps = []
+    total = 0.0
+    for i in range(m):
+        for j in range(m):
+            o = size if i == j else _overlap(ts[i], ts[j], lottery)
+            total += o / size
+            if i < j:
+                pair_overlaps.append(o)
+    m_eff = (m * m) / total if total > 0 else float(m)
+    return {
+        "注数": m,
+        "平均重叠": round(sum(pair_overlaps) / len(pair_overlaps), 2),
+        "最大重叠": max(pair_overlaps),
+        "有效独立注数": round(m_eff, 2),
+        "口径": ("oᵢⱼ 按主区号码数（双/大=红球数，七星彩=7 位）归一，自重叠=1；"
+                 "m_eff∈[1, m]，重叠越低组合方差越小——只降方差不提EV"),
+    }
+
+
 def _select_redblue_vectorized(lottery: str, cands: List[Dict[str, Any]],
                                issue: Optional[str], n: int, cap: int,
                                rng: np.random.Generator) -> Optional[Dict[str, Any]]:
@@ -150,10 +189,13 @@ def select_tickets(lottery: str, n: int = 5, pool_size: int = 20000,
     返回
       {
         "彩种", "期号", "候选数", "选中数",
+        "限号修正": str,       # 七星彩=已前置（排序键=限号EV）；双/大=不适用（浮动奖池制）
         "机制": str,           # 本彩种 EV 与号码的关系（诚实标注）
-        "选中": [{"号码", "净EV", "一等奖实得", "分薄乘数"}, ...]   # 按实得降序
+        "选中": [{"号码", "净EV", "一等奖实得", "分薄乘数"}, ...],   # 按实得降序
+        "组合方差指标": {...}  # 平均/最大重叠 + 有效独立注数（只降方差不提EV）
       }
-    固定赔率彩种返回 {"彩种", "机制", "拒绝": True, "原因": ...}
+    七星彩选中行额外含 限号暴露概率 / μ（同号期望注数）。
+    固定赔率彩种返回 {"彩种", "机制", "拒绝": True, "限号修正", "原因": ...}
 
     candidates: 外部传入的候选池（A/B 对照实验时用同一池，保证对照严格）。
     """
@@ -162,6 +204,7 @@ def select_tickets(lottery: str, n: int = 5, pool_size: int = 20000,
             "彩种": lottery,
             "机制": "固定赔率：撞号不分薄每注赔付，单注 EV 恒定",
             "拒绝": True,
+            "限号修正": "不适用（固定赔率，无分薄/限号EV概念）",
             "原因": ("选号不改变期望——任何'高奖金号码'的说法对固定赔率彩种都不成立。"
                      "如需反大众形态采样（纯形态偏好）请用 `cli.py ev " + lottery + " --sample N`"),
         }
@@ -180,8 +223,10 @@ def select_tickets(lottery: str, n: int = 5, pool_size: int = 20000,
                 "候选数": len(cands),
                 "选中数": len(fast["选中"]),
                 "重叠上限": cap,
+                "限号修正": "不适用（浮动奖池制，无固定赔付限额）",
                 "机制": fast["机制"],
                 "选中": fast["选中"],
+                "组合方差指标": _portfolio_metrics(fast["选中"], lottery),
             }
         # 模型不可用/数据缺失 → 回退逐注 payout_eff（EV 仍号码相关或恒定）
 
@@ -205,9 +250,11 @@ def select_tickets(lottery: str, n: int = 5, pool_size: int = 20000,
                 "候选数": len(cands),
                 "选中数": len(picked),
                 "重叠上限": cap,
+                "限号修正": "不适用（浮动奖池制，无固定赔付限额）",
                 "机制": ("大乐透：WP1 流行度模型 OOS 未达门槛（诚实否决）→ EV 恒定，"
                          "排序无信息量，故不做打分、直接随机出号（无号码相关收益）"),
                 "选中": picked,
+                "组合方差指标": _portfolio_metrics(picked, lottery),
             }
         # 万一未来模型转 GO，走与双色球相同的向量化路径
         fast = _select_redblue_vectorized(lottery, cands, issue, n, cap, rng)
@@ -215,7 +262,9 @@ def select_tickets(lottery: str, n: int = 5, pool_size: int = 20000,
             return {
                 "彩种": lottery, "期号": fast["期号"], "候选数": len(cands),
                 "选中数": len(fast["选中"]), "重叠上限": cap,
+                "限号修正": "不适用（浮动奖池制，无固定赔付限额）",
                 "机制": fast["机制"], "选中": fast["选中"],
+                "组合方差指标": _portfolio_metrics(fast["选中"], lottery),
             }
 
     # ---- 逐注打分路径（七星彩 crowd v2；双/大回退） ----
@@ -245,6 +294,9 @@ def select_tickets(lottery: str, n: int = 5, pool_size: int = 20000,
             if ev is None:
                 continue
             scored.append((float(ev) + 2.0, t))  # key=头奖贡献+固定部分
+            # Step B：限号明细前置存储（排序键本身已是限号EV → 无需事后修正）
+            detail[id(t)] = {"限号暴露概率": r.get("限号暴露概率"),
+                             "μ": (r.get("详情") or {}).get("同号期望注数μ")}
         mechanism = ("七星彩：浮动头奖撞号分薄（crowd v2），冷门组合 EV 高于热门（不改变中奖概率）")
 
     scored.sort(key=lambda x: x[0], reverse=True)
@@ -258,12 +310,15 @@ def select_tickets(lottery: str, n: int = 5, pool_size: int = 20000,
         t, key = item["号码"], float(item["排序键"])
         row = {"号码": t, "净EV": None, "一等奖实得": None, "分薄乘数": None}
         d = detail.get(id(t))
-        if d is not None:                       # 双/大：一次算出，直接回填真实明细
+        if lottery in ("双色球", "大乐透") and d is not None:
             row["净EV"] = d.get("净EV")
             row["一等奖实得"] = round(key, 2)
             row["分薄乘数"] = (d.get("分薄") or {}).get("乘数")
         else:                                   # 七星彩：key = 头奖 EV 贡献 + 2
             row["净EV"] = round(key - 2.0, 4)
+            if d is not None:                   # Step B：限号明细回填
+                row["限号暴露概率"] = d.get("限号暴露概率")
+                row["μ"] = d.get("μ")
         picked.append(row)
 
     from ev.payout import _resolve_issue
@@ -273,8 +328,11 @@ def select_tickets(lottery: str, n: int = 5, pool_size: int = 20000,
         "候选数": len(scored),
         "选中数": len(picked),
         "重叠上限": cap,
+        "限号修正": ("已前置（排序键=限号EV）" if lottery == "七星彩"
+                     else "不适用（浮动奖池制，无固定赔付限额）"),
         "机制": mechanism,
         "选中": picked,
+        "组合方差指标": _portfolio_metrics(picked, lottery),
     }
 
 

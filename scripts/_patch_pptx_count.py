@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
-"""pptx 文本节点内 374→406（求职材料，仅本地不入库）。"""
+"""pptx 文本节点内 374→406（本地私有材料，仅本地使用、不入库）。"""
 import re
 import zipfile
 from pathlib import Path
 
-P = Path(r"E:\707\docs\求职项目简介\求职项目简介.pptx")
+# 本地私有材料，不入库；换机器时按需替换路径
+P = Path(r"E:\707\docs\local_only.pptx")
 OLD, NEW = "374", "406"
 
 with zipfile.ZipFile(P) as z:

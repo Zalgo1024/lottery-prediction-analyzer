@@ -10,7 +10,7 @@ import os
 import threading
 import time
 import uuid
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from functools import wraps
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -106,50 +106,34 @@ def api_error_handler(f):
 # 数据状态 & 刷新
 # ============================================================
 
-def _compute_next_draw_date(latest_date: str, draw_days: List[int]) -> str:
-    """根据最近开奖日期和开奖日表，计算下一期开奖日期（严格在 latest_date 之后）。"""
-    if not latest_date:
+def _compute_next_draw_date(latest_date: str, lottery_name: str) -> str:
+    """根据最近开奖日期 + 休市日历，计算下一期开奖日期（严格晚于 latest_date）。
+
+    ⚠️ 第二参数由 draw_days 改为彩种名（2026-10-02）：休市日历只在 data.holiday 里，
+    按 weekday 找下一开奖日会把休市日算成开奖日（2026-10-02 期间双色球算出 10-01，
+    正确是 10-06）。holiday.next_draw_date 的 from_date 语义「含自身」，故传 latest + 1 天。
+    """
+    from data.holiday import next_draw_date
+    if not latest_date or lottery_name not in LOTTERY_CONFIG:
         return ""
     try:
-        d = datetime.strptime(str(latest_date).split()[0], "%Y-%m-%d")
+        d = datetime.strptime(str(latest_date).split()[0], "%Y-%m-%d").date()
     except Exception:
         return ""
-    for i in range(1, 14):
-        cand = d + timedelta(days=i)
-        if cand.weekday() in draw_days:
-            return cand.strftime("%Y-%m-%d")
-    return ""
+    try:
+        return next_draw_date(lottery_name, d + timedelta(days=1)).strftime("%Y-%m-%d")
+    except ValueError:
+        return ""
 
 
-def _expected_latest_date(draw_days: List[int], now: Optional[datetime] = None) -> datetime.date:
-    """
-    根据开奖日规则，计算"最近一个应该已经开奖的日期"。
-    每日开奖：当天已过 21:00 则今天，否则昨天。
-    非每日：从今天往前找最近的开奖日；若落在今天，需已过 21:30 才视为已开奖。
-    """
-    if now is None:
-        now = datetime.now()
-    today = now.date()
-    unique_days = set(int(d) for d in draw_days)
-    is_daily = len(unique_days) == 7
-
-    if is_daily:
-        cutoff = now.replace(hour=21, minute=0, second=0, microsecond=0)
-        return today if now >= cutoff else today - timedelta(days=1)
-
-    for i in range(14):
-        cand = today - timedelta(days=i)
-        if cand.weekday() in unique_days:
-            if i == 0:
-                cutoff = now.replace(hour=21, minute=30, second=0, microsecond=0)
-                if now >= cutoff:
-                    return cand
-                continue
-            return cand
-    return today
+def _expected_latest_date(lottery_name: str, now: Optional[datetime] = None) -> datetime.date:
+    """（薄封装）真源在 data.holiday.expected_latest_draw_date：休市日历 + 21:00/21:30 cutoff。
+    保留 now= 注入语义（测试不得依赖真实时钟）。"""
+    from data.holiday import expected_latest_draw_date
+    return expected_latest_draw_date(lottery_name, now)
 
 
-def get_data_status(lottery_name: str) -> dict:
+def get_data_status(lottery_name: str, now: Optional[datetime] = None) -> dict:
     """
     检查指定彩票的数据状态：
     - 文件是否存在
@@ -157,6 +141,8 @@ def get_data_status(lottery_name: str) -> dict:
     - 数据总期数
     - 最新期号 + 日期
     - 清洗后数据情况
+
+    now 可注入（测试不得依赖真实时钟；滞后/下一期计算走休市日历）。
     """
     # 统一使用 loader 的通用路径推导，支持双色球/大乐透 + 数字型/七星彩
     csv_path = _file_path(lottery_name)
@@ -187,10 +173,10 @@ def get_data_status(lottery_name: str) -> dict:
                 result["latest_date"] = str(data.records[0].开奖日期 or "")
                 result["earliest_draw"] = str(data.records[-1].期号)
                 cfg = LOTTERY_CONFIG.get(lottery_name, {})
-                result["next_draw_date"] = _compute_next_draw_date(result["latest_date"], cfg.get("draw_days", []))
+                result["next_draw_date"] = _compute_next_draw_date(result["latest_date"], lottery_name)
                 try:
                     ld = datetime.strptime(str(result["latest_date"]).split()[0], "%Y-%m-%d").date()
-                    expected = _expected_latest_date(cfg.get("draw_days", []))
+                    expected = _expected_latest_date(lottery_name, now=now)
                     if ld < expected:
                         result["data_lag_days"] = (expected - ld).days
                     else:
@@ -240,6 +226,29 @@ def refresh_data(lottery_name: str) -> dict:
 def get_all_data_status() -> Dict[str, dict]:
     """获取所有彩票的数据状态"""
     return {name: get_data_status(name) for name in LOTTERY_CONFIG}
+
+
+def get_market_closure(today: Optional["date"] = None) -> dict:
+    """看板「休市中」提示条数据源（后端算：config.MARKET_CLOSURE 只在后端）。
+
+    休市中：{"closed": True, "name": "国庆", "start": "2026-10-01", "end": "2026-10-04",
+             "resume_date": "2026-10-05", "days_left": 3, "today": "2026-10-02",
+             "message": "国庆休市 10-01~10-04（还剩 3 天），10-05 起恢复开奖，期间无开奖数据更新"}
+    非休市：同结构但 closed=False、字符串字段为 ""、days_left=0（键齐全，前端不必判空）。
+    days_left 含今天 = (end - today).days + 1。
+    """
+    from data.holiday import closure_window
+    d = today or datetime.now().date()
+    w = closure_window(d)
+    if not w:
+        return {"closed": False, "name": "", "start": "", "end": "",
+                "resume_date": "", "days_left": 0, "today": d.isoformat(), "message": ""}
+    days_left = (w["end"] - d).days + 1
+    msg = (f"{w['name']}休市 {w['start']:%m-%d}~{w['end']:%m-%d}（还剩 {days_left} 天），"
+           f"{w['resume']:%m-%d} 起恢复开奖，期间无开奖数据更新")
+    return {"closed": True, "name": w["name"], "start": w["start"].isoformat(),
+            "end": w["end"].isoformat(), "resume_date": w["resume"].isoformat(),
+            "days_left": days_left, "today": d.isoformat(), "message": msg}
 
 
 # ============================================================

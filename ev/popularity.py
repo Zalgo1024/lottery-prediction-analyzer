@@ -2,7 +2,7 @@
 ev/popularity.py —— 双色球/大乐透 组合流行度模型（NetPayout WP1 + WP3）
 
 定位（与 ev/crowd_model.py 的数字型 v2 对应，补齐乐透型缺口）：
-- 不预测开奖（裁判层已证伪），只回答一件事：**哪些组合被更多人买**。
+- 不预测开奖（裁判层已否决），只回答一件事：**哪些组合被更多人买**。
 - 数据地基：双/大 CSV 自带 一等奖注数 + 总投注额 →
   某期开出组合 C 的一等奖注数 ≈ 当期票量 × P(一等) × exp(β·特征(C))。
   对数泊松回归反推 β（offset = log(票量)），β 显著 → 形态信号存在。
@@ -485,6 +485,26 @@ def ticket_mu(lottery: str, reds, N: float, p_grade: float, params: Dict[str, An
     f = features_matrix(np.array([reds], dtype=np.int16))[0]
     z = (f - params["m_"]) / params["s_"]
     return float(N * p_grade * math.exp(float(z @ params["beta"])))
+
+
+def cold_hot_combo(lottery: str, q_cold: float = 0.1, q_hot: float = 0.9
+                   ) -> Optional[Tuple[List[int], List[int]]]:
+    """
+    冷/热门参考组合（q 分位）：供 rollover 冷门口径与 total_ev 对照表复用。
+
+    模型未 Go / 数据缺失 / 打分失败 → 返回 None（调用方必须显式降级，不许静默）。
+    与 counterfactual_backtest 的冷/热组合共用三级缓存（参数指纹一致即复用）。
+    """
+    params = get_popularity_model(lottery)
+    if not params.get("go"):
+        return None
+    try:
+        _, cold, hot = _get_scores_cached(
+            lottery, params["beta"], params["m_"], params["s_"], q_cold, q_hot)
+        return list(cold), list(hot)
+    except Exception as e:
+        logger.debug(f"[popularity] 冷/热组合获取失败 {lottery}: {e}")
+        return None
 
 
 # ---------------- WP3：历史反事实回测 ----------------

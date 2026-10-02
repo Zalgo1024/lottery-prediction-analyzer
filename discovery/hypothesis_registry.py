@@ -3,14 +3,14 @@ discovery/hypothesis_registry.py —— 假设登记册
 
 存储：training/hypotheses/{彩种}_hypotheses.json（list[hypothesis]）
 
-一条假设是可证伪的 edge 声明，结构：
+一条假设是待检验的 edge 声明，结构：
 {
   "id": "H20260828-001",
   "name": "……",
   "lottery": "排列3",
   "proposed_by": "auto|human",
   "proposed_at": "……",
-  "hypothesis": "可证伪的陈述",
+  "hypothesis": "待检验的陈述",
   "probe": {
     "type": "credibility_gate|ev_edge",
     "strategy": "被检验的策略名",

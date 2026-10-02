@@ -296,6 +296,12 @@ def test_batch_detail_explicit_time_is_second_precise():
     assert [t["序号"] for t in d["号码"]] == [1, 2, 3]
     assert d["号码"][1]["中奖等级"] == "未中"
     assert d["号码"][0]["号码"] == {"红球": [1, 2, 3, 4, 5, 6], "蓝球": [7]}
+    # 注级策略透传（置信度已移除：改用策略历史实测，见 策略实测）
+    assert d["号码"][0]["策略"] == "高频策略"
+    assert "置信度" not in d["号码"][0]
+    # 供弹窗显示的历史实测：给 is_redblue 与该批策略的统计（至少含高频策略）
+    assert d["is_redblue"] is True
+    assert "策略实测" in d
 
 
 def test_batch_detail_derived_falls_back_to_pred_date():
@@ -316,6 +322,8 @@ def test_batch_detail_numeric_lottery_uses_zone_dict():
     d = batch_detail(g, "福彩3D")
     assert d["号码"][0]["号码"] == {"百位": [3], "十位": [5], "个位": [7]}
     assert d["中奖注数"] == 0   # 中奖等级=未中 → 不计入
+    # 记录无策略键 → 空串（前端降级显示 —），不抛错
+    assert d["号码"][0]["策略"] == ""
 
 
 def test_batch_detail_endpoint_returns_full_batch(client):
@@ -327,6 +335,7 @@ def test_batch_detail_endpoint_returns_full_batch(client):
     assert d["期号内批号"] == 1 and d["期号内批数"] == 2
     assert d["注数"] == 2 and d["中奖注数"] == 2
     assert len(d["号码"]) == 2
+    assert d["号码"][0]["策略"]   # 接口响应票面含注级策略（供弹窗显示）
     # B2 只有 1 注，期号内是第 2 批
     d2 = client.get("/api/hits/batch-detail?lottery=双色球&batch_id=B2").get_json()
     assert d2["期号内批号"] == 2 and d2["注数"] == 1

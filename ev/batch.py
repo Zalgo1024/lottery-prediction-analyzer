@@ -26,9 +26,12 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional
+
+logger = logging.getLogger(__name__)
 
 #: 推算批次时的切分间隔（秒）。同一次评估是循环写入，间隔在毫秒级；
 #: 两次独立出号至少相隔数秒，5 秒足以区分又不会把跨秒的同批切开。
@@ -303,7 +306,21 @@ def batch_detail(group: BatchGroup, lottery: str) -> Dict[str, Any]:
             "号码": nums,
             "总命中": r.get("总命中", 0),
             "中奖等级": _prize_name(r),
+            "策略": r.get("策略") or "",      # 注级策略（老记录可能为空串/旧格式，前端降级显示）
         })
+
+    # 本批出现过的策略 → 历史实测（含随机基线）；只取用到的策略，payload 保持很小
+    try:
+        from ev.strategy_stats import batch_strategy_stats
+        strat_stats = batch_strategy_stats(lottery, [t["策略"] for t in tickets])
+    except Exception as e:                    # 统计失败不该拖垮详情弹窗
+        logger.warning(f"[batch] 策略实测统计失败 {lottery}: {e}")
+        strat_stats = {}
+    try:
+        from data.schema import is_redblue as _is_rb
+        rb = bool(_is_rb(lottery))
+    except Exception:
+        rb = "红球" in (tickets[0]["号码"] if tickets else {})
 
     return {
         "彩种": lottery,
@@ -319,5 +336,7 @@ def batch_detail(group: BatchGroup, lottery: str) -> Dict[str, Any]:
         "出号时间": gen_time,
         "出号时间精确": gen_precise,
         "结算时间": _time_label(settle_raw[0]) if settle_raw else "",
+        "is_redblue": rb,                     # 前端据此分支红蓝/数字型命中口径
+        "策略实测": strat_stats,               # {策略名: {样本数, 平均总命中, 理论基线, 差值, 中奖率, ...}}
         "号码": tickets,
     }
