@@ -122,7 +122,7 @@ def api_pl(lottery):
 @api_error_handler
 @validate_lottery
 def api_distance(lottery):
-    """距离画像：预测「差多远」的分布 vs 随机基线（可证伪的近似命中度量）"""
+    """距离画像：预测「差多远」的分布 vs 随机基线（与随机基线对照的近似命中度量）"""
     from ev.distance_metrics import distance_stats
     return jsonify(distance_stats(lottery))
 
