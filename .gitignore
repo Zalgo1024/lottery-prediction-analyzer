@@ -80,3 +80,7 @@ logs/_pytest_*.log
 
 # ===== 本地 git 修复遗留（2026-10-08 重建仓库前的空壳 .git 备份，不入库） =====
 .git.broken-*/
+
+# ===== 兜底推送/复核的一次性脚本（代理 502 时走 REST API 用，不入库） =====
+.api_push*.py
+.api_verify*.py
