@@ -1,9 +1,9 @@
 """
 ev/coverage.py —— 撞号度量 + 低重叠剪枝（有效覆盖率 KPI）
 
-## 诚实定位（写死，防误读）
+## 诚实定位（防误读）
 
-本模块**不提升中奖概率**：
+本模块**不提升中奖概率**（作用域见段末）：
 
 - 每注命中概率是组合数学常数（双 1/14.9、大 1/15.0、七星 1/12.3、3D·排3 1/166.7、
   排5 1/10万），N 注「至少中一次」= 1-(1-p)^N 只随注数变化；
@@ -11,6 +11,11 @@ ev/coverage.py —— 撞号度量 + 低重叠剪枝（有效覆盖率 KPI）
 - 剪枝唯一能做的事：把「互相高度相似的注」裁掉。100 注若彼此高度相似，有效覆盖
   可能只相当于数十注独立随机 → 裁掉冗余后中奖率几乎不变，而成本显著下降。
   这叫**等效减注**，不是提率。
+
+> 作用域（2026-10-03，P3 叙事解绑）：上面「p 是组合数学常数」是**开奖对全部组合
+> 等可能**这一前提下的结论。该前提不由本模块保证，而由 `ev/mechanism/` 四轨测量
+> 独立检验（见 `python cli.py gap`）。**未检出偏离 ≠ 证明开奖公平**；若日后检出，
+> 则「剪枝只是等效减注」这一结论的作用范围需随之重估。
 
 ## 撞号口径
 
@@ -27,6 +32,7 @@ import math
 import re
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from ev.mechanism.narrative import RANDOMNESS_PREMISE_CAVEAT
 from ev.selection import _OVERLAP_CAP
 
 logger = logging.getLogger(__name__)
@@ -36,9 +42,14 @@ _SEQ_LOTTERY = ("七星彩",)
 _DIGITAL_FIXED = ("福彩3D", "排列3", "排列5")
 _DIGITAL_DIGITS = {"福彩3D": 3, "排列3": 3, "排列5": 5}
 
+# ⚠️ 后半段是 P3 叙事解绑从句（单一真源 ev.mechanism.narrative）。
+#    原句被 tests/test_coverage.py:137 锁定（"不提升任何单注中奖概率"），逐字保留。
+#    追加的正是这里最要紧的一句：**「p 是组合数常数」本身是个前提**，
+#    不是数学必然——若开奖被系统性选择，p 不再等可能，剪枝的作用需重估。
 HONEST_NOTE = (
     "剪枝仅改变注的分布形状（降低撞号 = 等效减注），不提升任何单注中奖概率"
     "（每注 p 是组合数常数，期望奖金与选号无关）"
+    + RANDOMNESS_PREMISE_CAVEAT
 )
 
 

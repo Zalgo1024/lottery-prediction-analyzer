@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 <h2><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v18M5 8l7-5 7 5M5 16l7 5 7-5"/></svg> 鲁棒性监控（第⑥支柱 · 过拟合与稳定性）</h2>
-<p style="color:var(--gray);margin-bottom:15px">实时监控选号流程的<b>稳定性与过拟合风险</b>——全部指标经置换零分布/噪声地板校准，带效应量门控。口径声明：这些指标度量「流程是否被少数窗口/参数主导」，<b>不代表号码中奖概率</b>（号码不可预测，L0 结论不变）。</p>
+<p style="color:var(--gray);margin-bottom:15px">实时监控选号流程的<b>稳定性与过拟合风险</b>——全部指标经置换零分布/噪声地板校准，带效应量门控。口径声明：这些指标度量「流程是否被少数窗口/参数主导」，<b>不代表号码中奖概率</b>（本模块不做号码预测；开奖是否偏离等可能由四轨测量单独检验，见 <code>python cli.py gap</code>）。</p>
 
 <!-- 全彩种判定卡片 -->
 <div id="rb-cards" style="display:flex;gap:10px;flex-wrap:wrap;margin:10px 0 15px"></div>

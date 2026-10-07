@@ -109,10 +109,16 @@ def _portfolio_metrics(picked: List[Dict[str, Any]], lottery: str) -> Dict[str, 
 
 def _select_redblue_vectorized(lottery: str, cands: List[Dict[str, Any]],
                                issue: Optional[str], n: int, cap: int,
-                               rng: np.random.Generator) -> Optional[Dict[str, Any]]:
+                               rng: np.random.Generator,
+                               mechanism_tilt: bool = True,
+                               gamma: Optional[float] = None) -> Optional[Dict[str, Any]]:
     """
     双色球 GO 路径：向量化批量打分（μ → E[min(cap,池/(1+X))]）→ 贪心低重叠。
     返回 {"机制","选中":[...]}（选中含 payout_eff 完整明细）；不可用返回 None（调用方回退）。
+
+    mechanism_tilt: P4 机制倾斜开关。**γ=0 时 `select_in_gap` 返回 base 本身**
+    （`key is eff1`）⇒ 排序输入逐位不变 ⇒ 出号与今天完全一致。
+    gamma: 显式传入 γ（测试/回放用）；None = 走 `ev.gap.mechanism_gamma` 红线。
     """
     try:
         from ev.payout import (_grade_pool, _resolve_issue, grade_probabilities,
@@ -136,25 +142,47 @@ def _select_redblue_vectorized(lottery: str, cands: List[Dict[str, Any]],
         if ok.sum() < n:
             return None
 
-        order = np.argsort(-np.where(ok, eff1, -np.inf))
-        scored = [(float(eff1[i]), cands[i]) for i in order[: min(len(order), 10 * n + 200)] if ok[i]]
+        # ---- P4 机制倾斜：mult(c) = exp(-γ·z(c))，与开奖倾向同向 ----
+        # ★ γ=0 时 select_in_gap 直接返回 eff1 本身（不是乘 1.0 的拷贝）
+        #   ⇒ argsort 的输入逐位相同 ⇒ 出号与未倾斜时完全一致。
+        tilt = None
+        if mechanism_tilt:
+            from ev.mechanism import gap_select as GS
+            tilt = GS.select_in_gap(lottery, R, eff1, gamma=gamma)
+            key = tilt["key"]
+        else:
+            key = eff1
+
+        order = np.argsort(-np.where(ok, key, -np.inf))
+        scored = [(float(key[i]), cands[i]) for i in order[: min(len(order), 10 * n + 200)] if ok[i]]
         picked = _greedy_pick(scored, n, cap, lottery)
 
+        # 倾斜后 `排序键` 已含乘数 ⇒ 展示字段必须回到**未倾斜**的 eff1，
+        # 否则「一等奖实得」会被机制乘数污染（量纲虽然均值为 1，但单注不同）。
+        idx_of = {id(c): i for i, c in enumerate(cands)}
         out = []
         for p in picked:
             t = p["号码"]
             r = payout_eff(lottery, t, issue=issue)
             jz = next((x for x in r.get("奖级明细", []) if x["奖级"] == "一等"), None)
+            i0 = idx_of.get(id(t))
+            base1 = float(eff1[i0]) if i0 is not None else float(p["排序键"])
             out.append({
                 "号码": t,
                 "净EV": float(r.get("净EV", float("nan"))),
-                "一等奖实得": (float(jz["实得单注"]) if jz and jz.get("实得单注") else round(p["排序键"], 2)),
+                "一等奖实得": (float(jz["实得单注"]) if jz and jz.get("实得单注") else round(base1, 2)),
                 "分薄乘数": r.get("分薄", {}).get("乘数"),
             })
         mechanism = (f"{lottery}：一等奖实得=E[min(1000万封顶, 池/(1+X))]，X~Poisson(μ(组合))，"
                      "μ 由 WP1 流行度模型给出 → 冷门组合 EV 高于热门（不改变中奖概率）；"
                      "批量向量化打分，与逐注 payout_eff 口径对齐")
-        return {"机制": mechanism, "选中": out, "期号": issue}
+        if tilt is not None and tilt.get("倾斜"):
+            mechanism += ("；P4 机制倾斜已激活（乘数 exp(-γ·z) 与开奖倾向同向，"
+                          "改的是中奖概率权重）")
+        # ⚠️ 只带 `状态`（纯标量）；`tilt["key"]` 是每候选一个 float 的大数组，
+        #    塞进返回会被 P5 的 pending 快照整份写盘。
+        return {"机制": mechanism, "选中": out, "期号": issue,
+                "机制倾斜": (tilt or {}).get("状态")}
     except Exception as e:
         logger.warning(f"[selection] 向量化路径失败 {lottery}: {e}")
         return None
@@ -184,7 +212,9 @@ def control_tickets(lottery: str, cands: List[Dict[str, Any]], n: int,
 
 def select_tickets(lottery: str, n: int = 5, pool_size: int = 20000,
                    seed: Optional[int] = None, issue: str = None,
-                   candidates: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+                   candidates: Optional[List[Dict[str, Any]]] = None,
+                   mechanism_tilt: bool = True,
+                   gamma: Optional[float] = None) -> Dict[str, Any]:
     """
     返回
       {
@@ -198,6 +228,8 @@ def select_tickets(lottery: str, n: int = 5, pool_size: int = 20000,
     固定赔率彩种返回 {"彩种", "机制", "拒绝": True, "限号修正", "原因": ...}
 
     candidates: 外部传入的候选池（A/B 对照实验时用同一池，保证对照严格）。
+    mechanism_tilt: P4 机制倾斜开关（True=开启；γ=0 时自动逐位退化，与关闭等价）。
+    gamma: 显式指定 γ（回放/测试用）；None = 走 `ev.gap.mechanism_gamma` 红线。
     """
     if lottery in _FIXED_ODDS:
         return {
@@ -215,7 +247,8 @@ def select_tickets(lottery: str, n: int = 5, pool_size: int = 20000,
 
     # ---- 双色球：优先走向量化批量打分（GO 时） ----
     if lottery == "双色球":
-        fast = _select_redblue_vectorized(lottery, cands, issue, n, cap, rng)
+        fast = _select_redblue_vectorized(lottery, cands, issue, n, cap, rng,
+                                          mechanism_tilt=mechanism_tilt, gamma=gamma)
         if fast is not None:
             return {
                 "彩种": lottery,
@@ -227,6 +260,7 @@ def select_tickets(lottery: str, n: int = 5, pool_size: int = 20000,
                 "机制": fast["机制"],
                 "选中": fast["选中"],
                 "组合方差指标": _portfolio_metrics(fast["选中"], lottery),
+                "机制倾斜": fast.get("机制倾斜"),
             }
         # 模型不可用/数据缺失 → 回退逐注 payout_eff（EV 仍号码相关或恒定）
 
@@ -257,7 +291,8 @@ def select_tickets(lottery: str, n: int = 5, pool_size: int = 20000,
                 "组合方差指标": _portfolio_metrics(picked, lottery),
             }
         # 万一未来模型转 GO，走与双色球相同的向量化路径
-        fast = _select_redblue_vectorized(lottery, cands, issue, n, cap, rng)
+        fast = _select_redblue_vectorized(lottery, cands, issue, n, cap, rng,
+                                          mechanism_tilt=mechanism_tilt, gamma=gamma)
         if fast is not None:
             return {
                 "彩种": lottery, "期号": fast["期号"], "候选数": len(cands),
@@ -265,6 +300,7 @@ def select_tickets(lottery: str, n: int = 5, pool_size: int = 20000,
                 "限号修正": "不适用（浮动奖池制，无固定赔付限额）",
                 "机制": fast["机制"], "选中": fast["选中"],
                 "组合方差指标": _portfolio_metrics(fast["选中"], lottery),
+                "机制倾斜": fast.get("机制倾斜"),
             }
 
     # ---- 逐注打分路径（七星彩 crowd v2；双/大回退） ----

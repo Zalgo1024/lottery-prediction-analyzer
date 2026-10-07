@@ -19,21 +19,29 @@ ev/threshold.py —— Rollover 门槛计算器（策略升级 E）
   ② 单期最大可购买注数；
   ③ 资金预算（ev.bankroll.Budget：单期预算 = 本金 2%）。
 
-诚实边界（写死）：长期 EV≈−50%、25 条 edge 全 rejected 的结论不因门槛达成而改变；
+诚实边界：长期 EV≈−50%、25 条 edge 全 rejected 的结论不因门槛达成而改变
+（该结论按**名义返奖率**算，前提是开奖对全部组合等可能；此前提由
+`ev/mechanism/` 四轨测量检验，见 `python cli.py gap`）；
 门槛达成只说明「头奖单注估计顶格」，单期可买注数 × 边际贡献通常仍是分元级——
 这是方差管理工具，不是收益工具。
 """
 import logging
 from typing import Any, Dict, Optional
 
+from ev.mechanism.narrative import EV_NEGATIVE_CAVEAT
 from ev.payout import _SSQ_DLT_CAP, pool_share_expected
 
 logger = logging.getLogger(__name__)
 
+# ⚠️ 末段是 P3 叙事解绑从句（单一真源 ev.mechanism.narrative）。
+#    原句整句保留（"不因门槛达成而改变" 被 tests/test_threshold.py:64 锁定）。
+#    追加的一句点明：EV≈−50% 与 25 条 edge 全 rejected 都是在**开奖等可能**前提下
+#    按名义返奖率算出的结论，该前提由四轨测量检验，不是自明的。
 _HONEST_NOTE = (
     "门槛达成只说明「头奖单注估计顶格」；长期 EV≈−50%、25 条 edge 全 rejected "
     "的结论不因门槛达成而改变；单期可买注数×边际贡献通常为分元级——"
     "这是方差管理工具，不是收益工具。"
+    + EV_NEGATIVE_CAVEAT
 )
 
 # 固定赔率彩种限号口径（ev/engine.py 同源）：限额 ≈ 当期销售额 × 49% / 单注奖金

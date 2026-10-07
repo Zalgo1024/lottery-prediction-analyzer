@@ -32,6 +32,7 @@ from typing import Dict, List, Optional, Tuple
 from config import LOTTERY_CONFIG
 from data.loader import load_lottery
 from data.schema import schema_from_cfg
+from ev.mechanism.narrative import RANDOMNESS_PREMISE_CAVEAT
 from prediction.engine import PredictSet, _window_candidates, _score_candidates
 
 logger = logging.getLogger(__name__)
@@ -44,9 +45,14 @@ HIGH_TIER_THRESHOLD = 0.70
 HIGH_TIER_RELAXED = 0.60
 
 # 诚实口径说明（结果必带）
+# ⚠️ 后半段是 P3 叙事解绑从句（单一真源 ev.mechanism.narrative）：
+#    原句被 tests/test_robust_tiers.py:143 锁定（"不代表号码中奖概率"），逐字保留，
+#    **只追加不改写**。追加的是「本断言的作用域」：它说的是流程自身的稳定性，
+#    不是开奖机制本身——后者由四轨测量负责。
 HONEST_NOTE = (
     "鲁棒性/共识分度量选号流程在多窗口/参数扰动下的稳定性与过拟合风险，"
     "不代表号码中奖概率。"
+    + RANDOMNESS_PREMISE_CAVEAT
 )
 
 

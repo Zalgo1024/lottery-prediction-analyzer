@@ -198,3 +198,53 @@ def api_attribution_global():
 
     lb = request.args.get("lookback", type=int)
     return jsonify(attribution_global(**({} if lb is None else {"lookback": lb})))
+
+
+# ------------------------------------------------------------------ ⑧ 机制缝隙测量
+@bp.route("/api/audit/gap/<lottery>")
+@api_error_handler
+@validate_lottery
+def api_gap(lottery):
+    """
+    单彩种机制缝隙快照（四轨测量）。
+
+    ⚠️ **只读缓存，不触发测量**：一次完整测量约 17s，看板刷新不该付这个代价。
+    缓存缺失 ⇒ `未测量=True`，前端照实显示「尚未测量」并给出运行命令，
+    **不**用 0 或空表粉饰成「无缝隙」。
+
+    ?refresh=1 才强制重算（显式、人工触发，用于「刚拉完新数据」）。
+    """
+    from ev.mechanism.snapshot import mechanism_snapshot
+
+    if request.args.get("refresh", type=int) == 1:
+        from ev.gap import measure
+        measure(lottery, use_cache=False)
+
+    snap = mechanism_snapshot(lottery)
+    if snap is None:
+        return jsonify({
+            "彩种": lottery, "未测量": True,
+            "提示": "尚无测量缓存。运行 `python cli.py gap` 后本卡片即有数据。",
+            "诚实说明": ("「未测量」≠「无缝隙」也≠「已证明公平」——只是还没测。"),
+        })
+
+    from ev.mechanism.gap_select import tilt_state
+
+    return jsonify({
+        "彩种": lottery,
+        "未测量": False,
+        "快照": snap,
+        # ★ 传**原始 γ** + 显著位，由 tilt_state 统一过红线。
+        #   只传 γ_可倾斜 会让「不显著」与「不可折算」两种降级混成一句话。
+        "机制倾斜": tilt_state(lottery, gamma=snap.get("γ"),
+                              significant=snap.get("γ显著")),
+    })
+
+
+@bp.route("/api/audit/gap_global")
+@api_error_handler
+def api_gap_global():
+    """六彩种机制缝隙快照汇总（只读缓存）。未测量的彩种单列，不与已测量混排。"""
+    from ev.mechanism.snapshot import mechanism_snapshot_all
+
+    return jsonify(mechanism_snapshot_all())

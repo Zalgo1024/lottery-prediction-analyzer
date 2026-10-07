@@ -260,15 +260,30 @@ def _hypothesis_coverage(name: str) -> list:
     out = []
     for h in hyps:
         probe = h["probe"].get("type")
-        note = ("监控对象=该彩种全部分区边际公平性：策略若真能跑赢随机，"
-                "必然来自某分区频率偏离均匀——正是本监控的告警条件"
-                if probe == "credibility_gate" else
-                "闸门已判（固定赔率EV恒等/七星彩需 crowd 数据逐期反推，"
-                "e-value 序贯对象为公平性类，本类不设逐期监控）")
+        if probe == "credibility_gate":
+            note = ("监控对象=该彩种全部分区边际公平性：策略若真能跑赢随机，"
+                    "必然来自某分区频率偏离均匀——正是本监控的告警条件")
+        elif probe == "mechanism_gap":
+            # 缝隙类问的是「开奖结果是否偏离等可能」，与 e-value 监控的对象
+            # （分区频率）不是同一件事：一个看中奖密度/开出号分位，一个看号码频率。
+            # 这里必须写明「不覆盖」，否则读者会以为序贯监控在替它把关。
+            track = h["probe"].get("track")
+            adj = h["probe"].get("adjudicating")
+            note = ("e-value 序贯监控**不覆盖**本类：监控对象是号码分区频率，"
+                    "而本假设检验的是中奖密度/开出号冷门度/结构偏差，两者不是同一统计量。"
+                    "本类由四轨测量检验（`python cli.py gap <彩种>`）"
+                    + (f"；轨 {track}"
+                       + ("（**参与**机制裁决）" if adj else "（**不参与**裁决，仅诊断）")
+                       if track else ""))
+        else:
+            note = ("闸门已判（固定赔率EV恒等/七星彩需 crowd 数据逐期反推，"
+                    "e-value 序贯对象为公平性类，本类不设逐期监控）")
         out.append({
             "id": h.get("id"),
             "name": h.get("name"),
             "probe": probe,
+            "track": h["probe"].get("track"),
+            "adjudicating": h["probe"].get("adjudicating"),
             "登记状态": h.get("status"),
             "e-value覆盖": note,
         })

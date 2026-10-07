@@ -595,6 +595,28 @@ def main():
     hyplist_parser.add_argument("lottery", choices=list(LOTTERY_CONFIG.keys()), help="彩票类型")
     hyplist_parser.add_argument("--detail", action="store_true", help="显示全部历史检验记录")
 
+    # ----- gap（机制缝隙测量：A 注数比 / B 开出号分位） -----
+    gap_parser = subparsers.add_parser(
+        "gap",
+        help="机制缝隙测量：一等奖注数比 R（模型无关）+ 真实开出号冷门度分位 ū + γ + 裁决",
+    )
+    gap_parser.add_argument("lottery", nargs="?", default="all",
+                            help="彩种（双色球/大乐透/排列5/七星彩/排列3/福彩3D），"
+                                 "all=全部（默认 all）")
+    gap_parser.add_argument("--min-effect", type=float, default=0.03,
+                            help="最小效应量：R 至少要低这么多才算「检出」（默认 0.03）")
+    gap_parser.add_argument("--min-train", type=int, default=1200,
+                            help="B 轨 walk-forward 起始训练期数（默认 1200）")
+    gap_parser.add_argument("--step", type=int, default=50,
+                            help="B 轨重拟合步长（默认 50）")
+    gap_parser.add_argument("--no-cache", action="store_true",
+                            help="忽略磁盘缓存，强制重算（B 轨约 15~30s/彩种）")
+    gap_parser.add_argument("--json", action="store_true",
+                            help="输出原始 JSON（供下游解析）")
+    gap_parser.add_argument("--out", metavar="PATH", default=None,
+                            help="把 Markdown 版报告写到该路径（含 n_leak 自检、降级标注、"
+                                 "选号倾斜状态）。省略则只打印文本版到 stdout")
+
     # ----- rolling -----
     rolling_parser = subparsers.add_parser("rolling", help="滚动预测训练（用历史数据模拟时序预测验证）")
     rolling_parser.add_argument(
@@ -713,6 +735,53 @@ def _dispatch(args):
         _cmd_conformal(args)
     elif args.command == "robustness":
         _cmd_robustness(args)
+    elif args.command == "gap":
+        _cmd_gap(args)
+
+
+def _cmd_gap(args):
+    """机制缝隙测量：一行命令拿到 γ、R、ū 与四轨裁决。
+
+    默认走磁盘缓存（cache/mechanism/）；--no-cache 强制重算。
+    输出措辞与 web 看板共用 ev/gap.report_text，避免两处说法不一致。
+    --out PATH 额外产出 Markdown 报告（比文本版多 n_leak 自检 / 降级标注 /
+    选号倾斜状态三块），用于归档与对外交付。
+    """
+    import json as _json
+    from ev import gap as _gap
+    from ev.mechanism.common import ALL_LOTTERIES
+
+    known = tuple(ALL_LOTTERIES)
+    if args.lottery == "all":
+        lots = list(known)
+    elif args.lottery in known:
+        lots = [args.lottery]
+    else:
+        print(f"「{args.lottery}」不在适用清单内；可选：{', '.join(known)} 或 all")
+        return
+
+    kw = dict(min_train=args.min_train, step=args.step,
+              min_effect=args.min_effect)
+    if args.json:
+        res = {lot: _gap.measure(lot, use_cache=not args.no_cache,
+                                 force=args.no_cache, **kw) for lot in lots}
+        print(_json.dumps(res, ensure_ascii=False, indent=1, default=str))
+        return
+
+    print(_gap.report_text(lots, use_cache=not args.no_cache,
+                           force=args.no_cache, min_train=args.min_train,
+                           step=args.step, min_effect=args.min_effect))
+
+    if getattr(args, "out", None):
+        from pathlib import Path as _P
+        md = _gap.report_markdown(lots, use_cache=not args.no_cache,
+                                  force=args.no_cache, min_train=args.min_train,
+                                  step=args.step, min_effect=args.min_effect)
+        p = _P(args.out)
+        if p.parent and not p.parent.exists():
+            p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(md, encoding="utf-8")
+        print(f"\nMarkdown 报告已写入：{p}")
 
 def _cmd_auto(args):
     """自动流水线：抓取 → 评估 → 异常检测 → 预测 → 期望 →（可选）重训"""

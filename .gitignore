@@ -40,6 +40,16 @@ reasonix.toml
 
 # ===== 数据备份（替换前的旧 CSV，本地留档不入库） =====
 *.bak
+*.bak_*
+
+# ===== 一次性运维脚本（探测/临时推送/数据探针，用完即弃，不入库） =====
+# 注：历史已入库的 46 个 scripts/_*.py 仍留在版本里，本规则只拦「以后新增的」。
+scripts/_*.py
+
+# ===== 文档/工具中间产物（docx 改写临时文件、探针输出） =====
+*.tmp
+*.docx.tmp
+.wprobe_*
 
 # ===== 历史开奖数据（约 3.3MB CSV，纳入版本做备份；锁文件与替换前的旧档忽略） =====
 lottery_data/_backup_*/
@@ -61,3 +71,12 @@ docs/_backup/求职*
 config/
 logs/flask_stdout.log
 logs/run_supervisor.log
+
+# ===== 一次性输出/测试落盘（pytest 全量日志、临时重定向文件，不入库） =====
+.pytest_tmp_glob.log
+.pytest_tmp_run.log
+.pytest_tmp_run2.log
+logs/_pytest_*.log
+
+# ===== 本地 git 修复遗留（2026-10-08 重建仓库前的空壳 .git 备份，不入库） =====
+.git.broken-*/

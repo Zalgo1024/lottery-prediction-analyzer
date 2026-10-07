@@ -1,7 +1,8 @@
 """
 ev/sampler.py —— 约束采样出号（任务 2.4，方案B 点5+6 的落点）
 
-不声称"哪个号更可能出"（裁判层已否决预测），只做两件可辩护的事：
+不声称"哪个号更可能出"（本项目不做号码预测；开奖机制由 `ev/mechanism/` 四轨测量负责），
+只做两件可辩护的事：
 ① 反大众：避开生日号/顺子/对称/重复等公众偏好 → 降低撞号（七星彩浮动头奖被分摊风险）；
    有 crowd 模型时直接用「拥挤分位」打分（数据驱动），无模型时用启发式模式惩罚。
 ② 形态约束：按用户风险形态出号（和值/奇偶比/区间分布/最大连号长度）。
@@ -13,6 +14,8 @@ ev/sampler.py —— 约束采样出号（任务 2.4，方案B 点5+6 的落点�
                 "max_consec": k, "zone_spread": n}
 """
 import random
+
+from ev.mechanism.gap_select import CROWD_GATE_DEFAULT, crowd_gate
 
 _CROWD_CACHE = {}
 
@@ -95,7 +98,8 @@ def _check_constraints(nums: list, constraints: dict) -> bool:
 
 def sample_tickets(name: str, n: int = 5, avoid_popular: bool = True,
                    constraints: dict = None, min_group_gap: int = 2,
-                   seed: int = None) -> dict:
+                   seed: int = None, mechanism_tilt: bool = True,
+                   gamma: float = None) -> dict:
     """
     约束采样出号。
     name: 彩种（排列3/福彩3D/排列5/七星彩）
@@ -103,8 +107,21 @@ def sample_tickets(name: str, n: int = 5, avoid_popular: bool = True,
     avoid_popular: 反大众开关
     constraints: 形态约束 {sum_range, odd_range, max_repeat, max_consec}
     min_group_gap: 任意两组最小数字重叠数（数字型每位0-9，gap按位不同数计）
+
+    mechanism_tilt / gamma: P4 机制倾斜（**仅七星彩生效**）。
+      γ=0 → 反大众阈值 = 0.5（与未倾斜逐位一致）；
+      γ>0 → 阈值下移（开奖偏冷门 ⇒ 只留更冷的组合）。
+      其它数字型（排列3/5、福彩3D）无判定轨可用 ⇒ 阈值恒为 0.5，不做倾斜。
     """
     rng = random.Random(seed)
+    # P4：反大众分位阈值（γ=0 时恒为 0.5 ⇒ 行为逐位不变）
+    gate = CROWD_GATE_DEFAULT
+    tilt_note = None
+    if mechanism_tilt and name == "七星彩":
+        from ev.mechanism.gap_select import resolve_gamma
+        gate = crowd_gate(gamma if gamma is not None else resolve_gamma(name))
+        if gate != CROWD_GATE_DEFAULT:
+            tilt_note = f"机制倾斜：反大众分位阈值 {CROWD_GATE_DEFAULT} → {gate:.3f}（γ>0 = 偏冷）"
     zones = [10] * (5 if name == "排列5" else 3)
     if name == "七星彩":
         zones = [10] * 6 + [15]
@@ -122,7 +139,7 @@ def sample_tickets(name: str, n: int = 5, avoid_popular: bool = True,
         # 反大众：crowd 分位 < 0.5（冷门半区）或启发式惩罚 < 阈值
         if avoid_popular:
             if model is not None:
-                if model.crowding_quantile(cand) > 0.5:
+                if model.crowding_quantile(cand) > gate:
                     continue
             else:
                 if _popularity_heuristic(cand) >= 3:
@@ -167,7 +184,9 @@ def sample_tickets(name: str, n: int = 5, avoid_popular: bool = True,
         "组数": len(rows),
         "约束": constraints,
         "反大众": avoid_popular,
+        "反大众阈值": round(gate, 4),
         "号码组": rows,
+        "机制倾斜": tilt_note,
         "说明": "约束采样：不预测开奖，只降低撞号概率+按形态出号（数字型每位0-9）",
     }
 

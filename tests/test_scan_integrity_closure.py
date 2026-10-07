@@ -26,11 +26,20 @@ def _row(issue, d):
 
 
 def test_lag_zero_during_closure_real_data():
-    """真数据（只读）：休市日 10-02 下排列5 最新 09-30 → 滞后 0、距今 2、无假缺失。"""
-    rep = si.scan_lottery("排列5", date(2026, 10, 2))
+    """真数据（只读）：休市日 10-02 下排列5 滞后 0、无假缺失。
+
+    注意：不写死「最新=09-30、距今=2」——CSV 会随抓取继续前进，一旦数据新于
+    2026-10-02 该断言必然失败（且与「距今天数」的算式同义反复，锁不住任何行为）。
+    这里改为锁真正的不变量：休市期滞后必须为 0、不得报假缺失，且数据不比
+    当初的快照（09-30）更旧。
+    """
+    today = date(2026, 10, 2)
+    rep = si.scan_lottery("排列5", today)
     assert rep["滞后天数"] == 0
-    assert rep["距今天数"] == 2
     assert rep["疑似未抓取的开奖日"] == []
+    latest = date.fromisoformat(rep["最新一期"]["日期"])
+    assert latest >= date(2026, 9, 30), f"数据比快照旧：{latest}"
+    assert rep["距今天数"] == (today - latest).days    # 自然日差自洽（数据领先时为负）
 
 
 def test_miss_excludes_closure_days(monkeypatch):

@@ -53,6 +53,12 @@
   <div id="hn-attribution"><div class="alert alert-info">加载中…</div></div>
 </div>
 
+<!-- ⑧ 机制缝隙测量（四轨：A 注数比 / A′ 数字型注数比 / B 开奖号冷门度 / C 结构偏差 / D 派奖期） -->
+<div style="margin:10px 0;padding:14px 16px;border:1px solid var(--color-border-secondary,#e5e7eb);border-radius:8px;background:var(--color-background-secondary,#f9fafb)">
+  <h3 style="margin:0 0 10px">⑧ 机制缝隙测量（四轨）</h3>
+  <div id="hn-gap"><div class="alert alert-info">加载中…</div></div>
+</div>
+
 <script>
 const HN_LOTTERY = document.getElementById("hn-lottery");
 
@@ -71,6 +77,7 @@ async function loadAll() {
   loadPayoutProfile(lot);
   loadTrials(lot);
   loadAttribution(lot);
+  loadGap(lot);
 }
 
 async function loadQuality(lot) {
@@ -507,6 +514,112 @@ async function loadAttribution(lot) {
       </div>`;
   } catch (e) {
     el.innerHTML = `<div class="alert alert-warning">中奖归因加载失败：${esc(e.message)}</div>`;
+  }
+}
+
+// ⑧ 机制缝隙测量：只读缓存的快照 + 六彩种汇总。
+// ⚠️ 文案纪律：裁决=none 时显示「未检出」，绝不能写成「已证明公平 / 无缝隙」；
+//    缓存缺失时显示「尚未测量」，绝不能显示成一张空表（那会被读成"啥都没有"）。
+const GAP_STATUS_TEXT = {
+  "strong": "检出缝隙（多轨一致）",
+  "weak": "弱线索（单轨）",
+  "none": "未检出",
+  "no-track": "无判定轨",
+};
+
+function gapBadge(status) {
+  const t = GAP_STATUS_TEXT[status] || status || "-";
+  const color = (status === "strong") ? "#c0392b"
+              : (status === "weak") ? "#b9770e"
+              : (status === "none") ? "#27ae60" : "#7f8c8d";
+  return `<span style="color:${color};font-weight:600">${esc(t)}</span>`;
+}
+
+function gapSnapshotHtml(snap) {
+  if (!snap) return '<div style="font-size:12px;color:var(--gray)">（无快照）</div>';
+  const rows = [
+    ["期数", snap.期数],
+    ["裁决", gapBadge(snap.裁决)],
+    ["判定轨", (snap.判定轨 || []).join(" / ") || "无"],
+    ["R（注数比）", num(snap.R, 5)],
+    ["ū（开奖号分位）", num(snap["ū"], 5)],
+    ["γ", snap["γ"] == null ? "-" : num(snap["γ"], 4)],
+    ["γ 显著", snap["γ显著"] ? "是" : "否"],
+    ["模型 Go", snap.模型Go == null ? "-" : (snap.模型Go ? "是" : "否")],
+    ["测量时间", esc(snap.测量时间 || "-")],
+  ];
+  let html = '<div style="margin-top:8px;overflow-x:auto"><table style="border-collapse:collapse;font-size:12px">';
+  for (const [k, v] of rows) {
+    html += `<tr><td style="padding:2px 10px 2px 0;color:var(--gray)">${esc(k)}</td><td>${v}</td></tr>`;
+  }
+  html += "</table></div>";
+  return html;
+}
+
+async function loadGap(lot) {
+  const el = document.getElementById("hn-gap");
+  el.innerHTML = '<div class="alert alert-info">加载机制缝隙测量…</div>';
+  try {
+    const [r1, r2] = await Promise.all([
+      fetch(`/api/audit/gap/${encodeURIComponent(lot)}`),
+      fetch(`/api/audit/gap_global`),
+    ]);
+    if (!r1.ok) throw new Error(`HTTP ${r1.status}`);
+    const d = await r1.json();
+    const g = r2.ok ? await r2.json() : {};
+    if (d.error) { el.innerHTML = `<div class="alert alert-warning">${esc(d.error)}</div>`; return; }
+
+    if (d.未测量) {
+      el.innerHTML = `
+        <div class="alert alert-info">${esc(d.提示 || "尚无测量缓存")}</div>
+        <div style="font-size:12px;color:var(--gray)">${esc(d.诚实说明 || "")}</div>`;
+      return;
+    }
+
+    const tilt = d.机制倾斜 || {};
+    const tiltHtml = tilt.倾斜
+      ? `<span style="color:#c0392b;font-weight:600">已激活</span>（γ=${num(tilt["γ"], 4)}，${esc(tilt.方向 || "")}）`
+      : `<span style="color:#27ae60">未激活</span>（γ=0 → 出号与不倾斜时逐位一致）`;
+
+    let sumHtml = "";
+    const done = g.已测量 || {};
+    const keys = Object.keys(done);
+    if (keys.length) {
+      sumHtml = '<div style="margin-top:12px;overflow-x:auto"><table style="border-collapse:collapse;font-size:12px">'
+        + '<tr><th style="text-align:left;padding:3px 12px 3px 0">彩种</th>'
+        + '<th style="text-align:left;padding:3px 12px 3px 0">裁决</th>'
+        + '<th style="text-align:right;padding:3px 12px 3px 0">R</th>'
+        + '<th style="text-align:right;padding:3px 12px 3px 0">ū</th>'
+        + '<th style="text-align:right;padding:3px 12px 3px 0">γ</th></tr>';
+      for (const k of keys) {
+        const s = done[k];
+        sumHtml += `<tr><td style="padding:2px 12px 2px 0">${esc(k)}</td>`
+          + `<td style="padding:2px 12px 2px 0">${gapBadge(s.裁决)}</td>`
+          + `<td style="text-align:right;padding:2px 12px 2px 0">${num(s.R, 5)}</td>`
+          + `<td style="text-align:right;padding:2px 12px 2px 0">${num(s["ū"], 5)}</td>`
+          + `<td style="text-align:right;padding:2px 12px 2px 0">${s["γ"] == null ? "-" : num(s["γ"], 4)}</td></tr>`;
+      }
+      sumHtml += "</table></div>";
+    }
+    const missHtml = (g.未测量彩种 || []).length
+      ? `<div style="margin-top:6px;font-size:12px;color:var(--gray)">尚未测量：${esc((g.未测量彩种 || []).join("、"))}</div>`
+      : "";
+
+    el.innerHTML = `
+      <div><strong>${esc(lot)}</strong>：${gapBadge((d.快照 || {}).裁决)} ·
+        机制倾斜 ${tiltHtml}</div>
+      ${gapSnapshotHtml(d.快照)}
+      <div style="margin-top:12px"><strong>六彩种汇总</strong></div>
+      ${sumHtml}
+      ${missHtml}
+      <div style="margin-top:10px;font-size:12px;color:var(--gray)">
+        判定轨只有 A（乐透注数比）/ A′（数字型注数比）/ B（开奖号冷门度分位）；
+        C（结构偏差）与 D（派奖期）只作诊断、不参与判定。
+        ⚠️ <strong>「未检出」≠「已证明开奖公平」</strong>——它是关于本数据、本功效与已测维度的陈述。
+        本卡片读的是<strong>缓存</strong>（不触发测量）；要最新数据请运行 <code>python cli.py gap</code>。
+      </div>`;
+  } catch (e) {
+    el.innerHTML = `<div class="alert alert-warning">机制缝隙测量加载失败：${esc(e.message)}</div>`;
   }
 }
 

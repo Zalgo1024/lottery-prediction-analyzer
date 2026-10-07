@@ -2,7 +2,7 @@
 
 > **带严格统计检验的时间序列分析框架（彩票作为示例场景）**
 
-![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB) ![Tests](https://img.shields.io/badge/pytest-594%20passed-3B6D11) ![Lotteries](https://img.shields.io/badge/%E5%BD%A9%E7%A7%8D-6-854F0B) ![License](https://img.shields.io/badge/License-AGPL--3.0-blue)
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB) ![Tests](https://img.shields.io/badge/pytest-851%20passed-3B6D11) ![Lotteries](https://img.shields.io/badge/%E5%BD%A9%E7%A7%8D-6-854F0B) ![License](https://img.shields.io/badge/License-AGPL--3.0-blue)
 
 **为什么用彩票做示例场景？** 开奖数据足够纯——无协变量、无趋势、大样本、完全随机。这是检验一套时序分析方法"是否真有预测力"的最严苛测试场：任何看似有效的策略都要在这里接受检验。本框架的价值不在于"预测中了多少"，而在于**给出可复现的检验结论**。
 
@@ -38,7 +38,7 @@ python run.py                # 看门狗模式，访问 http://127.0.0.1:5000
 # 3. 或者只用 CLI
 python cli.py --help
 
-# 4. 跑测试套件（全量 594 例）
+# 4. 跑测试套件（全量 851 例）
 pytest -q
 ```
 
@@ -85,10 +85,10 @@ pytest -q
 │   └── utils.py             # run_auto_pipeline_core（三路流水线统一入口）
 │
 ├── scripts/                 # 运维工具（体检/审计/修复/回归，见下文）
-├── tests/                   # pytest 测试套件（594 例）
+├── tests/                   # pytest 测试套件（842 例；另有 9 例在 scripts/ 下）
 ├── logs/logger.py           # 分级日志模块（运行时依赖，入 git）
 │
-├── lottery_data/            # ★ 历史开奖数据（不入 git，见「数据文件详解」）
+├── lottery_data/            # ★ 历史开奖数据（入 git 做备份，见「数据文件详解」）
 ├── training/                # 运行记录 + 反馈闭环数据（自动生成，不入 git）
 ├── config/                  # 运行时状态（worker 心跳/调度状态，不入 git）
 ├── cache/                   # 统计缓存（自动生成，不入 git）
@@ -116,7 +116,8 @@ pytest -q
 - 数字型（福彩3D 示例）：
   `期号, 开奖日期, 号码1, 号码2, 号码3`（排列5/七星彩列数相应为 5/7，日期为 `YYYY-MM-DD`）
 
-> 注：`lottery_data/` 不入 git（数据体量大且可从 500.com 重建）。已知唯一缺口：排列5 期 04006/04007（数据源本身缺失）。
+> 注：`lottery_data/` **已纳入版本控制**（约 3.3MB，作为数据备份；`_backup_*/` 与 `*.bak` 除外），
+> 虽也可从 500.com 重建。已知唯一缺口：排列5 期 04006/04007（数据源本身缺失）。
 
 ### 2. `training/feedback/` —— 预测-评估闭环（自动生成）
 
@@ -301,8 +302,8 @@ POST /api/settings/push-notify/test     # 发一条测试消息（未配置返�
 ## 测试
 
 ```bash
-pytest -q              # 594 passed（全量；含奖金表 33 例、写保护/分区归一化回归、撞号度量与中奖归因、批次契约、出号数量固定/动态、消息推送：图片渲染/发送节流/降级/全入口接线、随机锚点走前验证与持续训练循环、休市日历与真实开奖数据一致性、三口径 EV 对照/冷门口径 rollover/奖池门槛/Kelly 纪律仓位/限号前置与组合方差指标、策略历史实测命中统计（归一/过滤/基线/样本不足）、休市期全链路感知（看板滞后/下一期 + 调度器排班 + 启动自愈 + cli lag + 体检脚本 + 销量模型前瞻 + 休市提示条））
-pytest tests/          # 585 passed（仅 tests/ 目录；另有 9 例在 scripts/ 下，故用 pytest -q 跑全量）
+pytest -q              # 851 passed（全量；含奖金表 33 例、写保护/分区归一化回归、撞号度量与中奖归因、批次契约、出号数量固定/动态、消息推送：图片渲染/发送节流/降级/全入口接线、随机锚点走前验证与持续训练循环、休市日历与真实开奖数据一致性、三口径 EV 对照/冷门口径 rollover/奖池门槛/Kelly 纪律仓位/限号前置与组合方差指标、策略历史实测命中统计（归一/过滤/基线/样本不足）、休市期全链路感知（看板滞后/下一期 + 调度器排班 + 启动自愈 + cli lag + 体检脚本 + 销量模型前瞻 + 休市提示条）、机制缝隙四轨测量（A/A′注数比、开出号分位、结构偏差、派奖期）+ 缝隙内选号与反馈闭环、叙事解绑文案扫描）
+pytest tests/          # 842 passed（仅 tests/ 目录；另有 9 例在 scripts/ 下，故用 pytest -q 跑全量）
 ```
 
 ## 备份

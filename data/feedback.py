@@ -248,6 +248,66 @@ def predict_target(lottery_name: str) -> Tuple[Optional[int], Optional[date]]:
     return issue, draw_day
 
 
+# —— P5：机制缝隙快照（出号当时「已知」的测量状态）——
+# 三个字段都挂在 pending 顶层、**不进**「预测号码」⇒ 不影响
+# 「号码组数 == len(预测号码)」契约，也不受压缩影响。
+MECHANISM_SNAPSHOT_KEYS = ("缝隙快照", "机制γ", "机制倾斜")
+
+
+def _mechanism_snapshot(lottery_name: str) -> Optional[dict]:
+    """
+    委派到 `ev.mechanism.snapshot.mechanism_snapshot`（**只读缓存，不触发新测量**）。
+
+    实现放在测量层而不是本文件：pending / 看板 / 推送三处都要同一份轻量快照，
+    而三处都**不能**顺手跑一次完整测量（双色球约 17s）。
+    详情见 `ev/mechanism/snapshot.py` 的模块 docstring。
+    """
+    try:
+        from ev.mechanism.snapshot import mechanism_snapshot   # noqa: PLC0415
+        return mechanism_snapshot(lottery_name)
+    except Exception:                                # noqa: BLE001
+        return None
+
+
+def _attach_mechanism_snapshot(lottery_name: str, prediction: dict) -> None:
+    """
+    给 pending 挂上机制快照三件套。**幂等**：调用方已显式传过就不覆盖。
+
+    ⚠️ 放在**单一咽喉**（`record_pending_prediction`）里做，而不是让 5 个生产
+    调用点各自透传 —— 历史踩过 2 次 `record_pending` 漏传（rule 分支、
+    `_predict_generic` 分支），分散透传必然再漏第三次。
+    """
+    if prediction.get("缝隙快照") is not None:
+        return
+    snap = _mechanism_snapshot(lottery_name)
+    prediction["缝隙快照"] = snap
+    g = (snap or {}).get("γ")
+    prediction["机制γ"] = g
+    try:
+        from ev.mechanism import gap_select as _GS   # noqa: PLC0415
+        # ★ 必须一并传 significant：快照里的 γ 是**原始测量值**，可能非零但不显著
+        #   （双色球 γ=-0.0185 显著=False）。只判 γ≠0 会绕过 γ=0 红线。
+        prediction["机制倾斜"] = _GS.tilt_state(
+            lottery_name,
+            gamma=(snap or {}).get("γ"),           # 原始值，由 tilt_state 统一过红线
+            significant=(snap or {}).get("γ显著"),
+            reason=None if snap else "无测量缓存（尚未运行 `python cli.py gap`）")
+    except Exception:                                # noqa: BLE001
+        prediction["机制倾斜"] = None
+
+
+def _carry_mechanism_fields(pred: dict, feedback: dict) -> None:
+    """
+    把 pending 上的机制三件套带进反馈记录（供事后「倾斜有没有用」的归因）。
+
+    抽成函数是为了能单测——`evaluate_pending_predictions` 需要 pending/开奖/
+    权重一堆依赖，整条跑起来测试成本高，而这里要锁的只是「字段有没有带过去」。
+    """
+    for _pk in MECHANISM_SNAPSHOT_KEYS:
+        if pred.get(_pk) is not None:
+            feedback[_pk] = pred[_pk]
+
+
 def record_pending_prediction(lottery_name: str, prediction: dict):
     """
     记录一次新预测到 pending 列表（等待开奖后对比）
@@ -303,6 +363,10 @@ def record_pending_prediction(lottery_name: str, prediction: dict):
     #   契约：号码组数 == len(预测号码)（见 ev/coverage.py 模块注释）。
     if prediction.get("预测号码") is not None:
         prediction["号码组数"] = len(prediction["预测号码"])
+
+    # —— P5 机制快照（★ 放在「号码组数」之后、且只挂顶层字段）——
+    # 契约保护：三个字段都不进「预测号码」，故 len(预测号码) 与 号码组数 不受影响。
+    _attach_mechanism_snapshot(lottery_name, prediction)
 
     # —— 去重：同一 (目标期号, 档位) 只保留最新一条预测 ——
     # auto 流水线每次运行都会写入一组新预测，若开奖前不清理，
@@ -1062,6 +1126,9 @@ def evaluate_pending_predictions(lottery_name: str) -> dict:
                     feedback["中奖等级"] = "未中"
                     feedback.pop("中奖玩法", None)
             _k = _fb_key(feedback)
+            # —— P5：把出号时的机制快照带进反馈记录 ——
+            # ★ 放在 _fb_key **之后**：新增字段不得改变去重键，否则同批会重复入账。
+            _carry_mechanism_fields(pred, feedback)
             if _k in seen_keys:
                 # 重复(期号,策略,预测号码)不再入账，仅消费 pending
                 logger.info(f"跳过重复反馈: {lottery_name} 期{feedback.get('期号')} 策略{feedback.get('策略')}")

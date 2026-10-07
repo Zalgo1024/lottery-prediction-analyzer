@@ -532,7 +532,14 @@ def build_pipeline_message(
         sections.insert(0, head)
     title = f"彩票助手｜{lottery}"
     body = "\n\n".join(sections)
-    body += "\n\n> 仅供研究记录；单注中奖概率恒定，整体期望为负，请勿用于投注决策。"
+    # P5：footer 改**条件式**。原句「单注中奖概率恒定」是无前提的断言，
+    # 它只在「开奖对全部组合等可能」下成立——把前提写出来，并指明由谁检验。
+    body += ("\n\n> 仅供研究记录；在「开奖对全部组合等可能」的前提下单注中奖概率恒定、"
+             "整体期望为负，请勿用于投注决策。该前提由四轨测量独立检验"
+             "（见 `python cli.py gap`）；未检出偏离 ≠ 证明开奖公平。")
+    _tilt = _mechanism_footer_line(lottery)
+    if _tilt:
+        body += f"\n> {_tilt}"
     if board_url:
         body += f"\n\n[打开看板 · 调出号数量 / 看全部记录]({board_url})"
     return title, body
@@ -564,6 +571,31 @@ def _image_or_text(
         return send(title, body, cfg)
     except Exception as e:  # pragma: no cover - 回退也失败，返回失败而非抛出
         return {"ok": False, "detail": f"{tag} 回退亦失败: {str(e)[:150]}"}
+
+
+def _mechanism_footer_line(lottery: str) -> str:
+    """
+    推送 footer 的「机制倾斜」状态行。**只在真的激活时才返回非空**。
+
+    为什么 γ=0 时整行不出现：推送是高频通知，天天挂一句「机制倾斜未激活」
+    只会变成噪音，而那句话本身也不携带信息（默认状态就是未激活）。
+    **激活是异常事件，必须显式告知**——出号权重被动了，不能悄悄改。
+    """
+    try:
+        from ev.mechanism.gap_select import tilt_state        # noqa: PLC0415
+        from ev.mechanism.snapshot import mechanism_snapshot  # noqa: PLC0415
+        snap = mechanism_snapshot(lottery)
+        # ★ 传**原始 γ** + 显著位，由 tilt_state 统一过红线。
+        #   只看 γ≠0 会绕过红线：双色球 γ=-0.0185 但显著=False，照判就会误报「已激活」。
+        st = tilt_state(lottery, gamma=(snap or {}).get("γ"),
+                        significant=(snap or {}).get("γ显著"),
+                        reason=None if snap else "无测量缓存")
+        if not st.get("倾斜"):
+            return ""
+        return (f"机制倾斜**已激活**：γ={st.get('γ')}（{st.get('方向', '')}）——"
+                "出号已按 exp(-γ·z) 加权，与开奖倾向同向。")
+    except Exception:                                          # noqa: BLE001
+        return ""
 
 
 def _pending_meta_lines(lottery: str, predictions: List[Dict[str, Any]]) -> List[str]:

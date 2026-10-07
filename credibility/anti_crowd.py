@@ -18,6 +18,7 @@ from scipy import stats
 
 from data.loader import load_lottery
 from data.schema import get_schema, is_redblue
+from ev.mechanism.narrative import NO_SIGNAL_CAVEAT
 
 
 def _pattern_flags(reds: List[int], size: int) -> List[str]:
@@ -109,12 +110,20 @@ def anti_crowd_report(lottery_name: str) -> Dict:
     non_mean = float(non_a.mean())
 
     if mw_p < 0.05 and pop_med > non_med:
+        # 说明：这一支**不加**解绑从句，是刻意的。此处检的是「人的买号偏好」——
+        # 热门组合开出时平分者更多，属于**人的行为**后果，与「开奖是否被选择」
+        # 是两个问题。故「不改变中奖概率本身」在这里是准确的，无需限定作用域。
         interp = ("检测到显著关联：热门偏好组合一旦开出，头奖注数（按销量归一化）显著高于其他组合。"
                   "回避这类组合可降低中奖被多人平分的风险——这是合法且可量化的边缘优势，"
                   "但它不改变中奖概率本身。")
     else:
+        # ⚠️ 末段是 P3 叙事解绑从句（单一真源 ev.mechanism.narrative）。
+        #    原句整句保留：**判定逻辑一点没动**（上面 if/else 的条件与取值均不变）。
+        #    追加的一句把「未显现」的作用域钉死：它是本检验功效下的结论，
+        #    不是「反大众思路不成立」。
         interp = ("未检测到「热门组合→更多头奖平分者」的显著关联。头奖注数主要由销量与随机性驱动，"
-                  "反大众策略在本数据集上未显现可量化收益。")
+                  "反大众策略在本数据集上未显现可量化收益。"
+                  + NO_SIGNAL_CAVEAT)
 
     return {
         "lottery_name": lottery_name,

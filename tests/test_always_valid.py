@@ -107,8 +107,17 @@ class TestRealData:
         zb = next(z for z in b["分区"] if z["分区"] == "红球")
         assert za["组合e-max"] == zb["组合e-max"] == 2.0701
 
-    def test_hypothesis_coverage_25(self):
-        """25 条登记假设全部有 e-value 覆盖说明"""
+    def test_hypothesis_coverage_at_least_25(self):
+        """★ P6 放宽：登记假设**至少** 25 条，且每条都有 e-value 覆盖说明。
+
+        为什么从 == 25 放宽：假设登记册是可增长的（P6 起新增机制缝隙类），
+        写死等号会让「登记一条新假设」这个正当动作把测试顶红。
+        这里锁的是**下界 + 覆盖完整性**，不是历史上的那个数字。
+        """
         names = ["双色球", "大乐透", "排列5", "福彩3D", "排列3", "七星彩"]
         total = sum(len(monitor_lottery(nm)["覆盖假设"]) for nm in names)
-        assert total == 25
+        assert total >= 25, f"登记假设数 {total} < 25（假设被误删？）"
+        # 覆盖说明不许留空/占位
+        for nm in names:
+            for c in monitor_lottery(nm)["覆盖假设"]:
+                assert c["e-value覆盖"] and len(c["e-value覆盖"]) > 10

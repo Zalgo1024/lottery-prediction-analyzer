@@ -1,0 +1,26 @@
+request_id: jieti-20260912
+created_at: "2026-09-12T18:20:00+08:00"
+user_query: "基于 docs/结题报告.md 生成专业排版的 Word 结题报告（含 4 张配图与表格）"
+entry_type: beautify_only
+current_stage: 3
+output_docx_path: "E:/707/docs/结题报告.docx"
+output_docx_user_specified: true
+stage_1:
+  status: skipped
+  note: "内容已成品（E:/707/docs/结题报告.md），长尾组合 S2->S3，内容来源 = 该 md"
+stage_2:
+  status: completed_at
+  route: html
+  html_sub: template
+  genre: business-report
+  content_source: "E:/707/docs/结题报告.md"
+  intermediate_dir: "E:/707/output/jieti-20260912/stage2/intermediate"
+  output_path: "stage2/formatted-结题报告.html"
+  output_format: html
+  skills_invoked: [design-token, doc-typeset]
+  html_review_attempts: 0
+  fallback: false
+  fallback_reason: null
+stage_3:
+  status: in_progress
+  html_output_path: "E:/707/output/jieti-20260912/stage2/formatted-结题报告.html"

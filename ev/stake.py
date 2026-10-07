@@ -18,12 +18,18 @@ ev/stake.py —— 效用/注数决策（策略升级 C）
 import logging
 from typing import Any, Dict, Optional
 
+from ev.mechanism.narrative import EV_NEGATIVE_CAVEAT
+
 logger = logging.getLogger(__name__)
 
+# ⚠️ 末段是 P3 叙事解绑从句（单一真源 ev.mechanism.narrative）。
+#    原句整句保留（"纪律不下注" 被 tests/test_stake.py:21 锁定在 触发约束 里）。
+#    追加的一句点明：「EV 为负」是按**名义返奖率**算的，那本身就假定了开奖等可能。
 _HONEST_NOTE = (
     "Kelly 假设同分布可无限细分重复下注；彩票单期离散、不可微注，结果为理论上限展示；"
     "所有彩种单注名义 EV 为负 → 正确输出通常为 0（纪律不下注）。"
     "偏度/峰度：收益重尾时建议 1/4 Kelly 替代半 Kelly。"
+    + EV_NEGATIVE_CAVEAT
 )
 
 

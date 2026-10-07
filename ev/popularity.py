@@ -172,6 +172,64 @@ def _fit_glm(y, X, offset):
     return sm.GLM(y, X, family=sm.families.Poisson(), offset=offset).fit()
 
 
+def fit_beta(reds: np.ndarray, prev: np.ndarray, y: np.ndarray, N: np.ndarray,
+             fit_null: bool = True) -> Dict[str, Any]:
+    """
+    在**任意给定样本**上拟合流行度 GLM（标准化 → Poisson(log)，offset=log(票量)）。
+
+    与 fit_popularity 共用同一套口径，但**不做 CV**——供 ev/mechanism 的
+    walk-forward 分位检验在多个切点上快速重拟合（每段只重拟合 β，不做 5 折 CV）。
+
+    参数：
+      reds/prev: (n,k) 红球矩阵（prev = 上一期红球，供"上期重合数"特征）
+      y: (n,) 一等奖注数；N: (n,) 票量（= 总投注额/2）
+      fit_null=False 时跳过零模型拟合（LRT 字段为 None），约省一半时间。
+
+    返回 {"beta","m_","s_","X_raw","beta_raw","beta_p","bse","lrt_stat","lrt_p",...}
+      beta 为**标准化特征上**的系数（不含截距），与 popularity_quantile /
+      batch_mu / ticket_mu 使用的 params["beta"] 同口径。
+    样本不足以拟合（n < 50 或全零 y）→ 返回 {} 由调用方降级。
+    拟合异常向上抛，由调用方决定如何降级。
+    """
+    y = np.asarray(y, dtype=np.float64)
+    N = np.asarray(N, dtype=np.float64)
+    n = len(y)
+    if n < 50 or float(y.sum()) <= 0:
+        return {}
+
+    X_raw = features_matrix(reds, prev)
+    if len(X_raw) != n:
+        return {}
+    mu_ = X_raw.mean(axis=0)
+    sd_ = np.where(X_raw.std(axis=0) < 1e-12, 1.0, X_raw.std(axis=0))
+    Xz = (X_raw - mu_) / sd_
+    offset = np.log(N)
+    ones = np.ones((n, 1))
+
+    glm_full = _fit_glm(y, np.column_stack([ones, Xz]), offset)
+    out: Dict[str, Any] = {
+        "n": n,
+        "X_raw": X_raw,
+        "beta": np.asarray(glm_full.params[1:], dtype=np.float64),
+        "beta_raw": [round(float(b), 4) for b in glm_full.params[1:]],
+        "beta_p": [round(float(p), 4) for p in glm_full.pvalues[1:]],
+        "bse": np.asarray(glm_full.bse[1:], dtype=np.float64),
+        "m_": np.asarray(mu_, dtype=np.float64),
+        "s_": np.asarray(sd_, dtype=np.float64),
+        "llf_full": float(glm_full.llf),
+        "lrt_stat": None,
+        "lrt_p": None,
+    }
+    if fit_null:
+        glm_null = _fit_glm(y, ones, offset)
+        lrt_stat = 2.0 * (float(glm_full.llf) - float(glm_null.llf))
+        from scipy import stats as sps
+        out["llf_null"] = float(glm_null.llf)
+        out["lrt_stat"] = lrt_stat
+        out["lrt_p"] = float(sps.chi2.sf(max(lrt_stat, 0.0), X_raw.shape[1]))
+    return out
+
+
 def fit_popularity(lottery: str) -> Dict[str, Any]:
     """
     拟合 + LRT + 时序 CV。返回报告 dict（含 Go/No-Go 裁决）。
@@ -182,27 +240,19 @@ def fit_popularity(lottery: str) -> Dict[str, Any]:
         return {"lottery": lottery, "applicable": False,
                 "verdict": "样本不足或数据缺失，无法检验"}
 
-    X_raw = features_matrix(rows["reds"], rows["prev"])
     y = rows["y"]
-    offset = np.log(rows["N"])
-    n, k_feat = X_raw.shape
-
-    # 标准化（用全量统计量；CV 内部重新标准化）
-    mu_, sd_ = X_raw.mean(axis=0), X_raw.std(axis=0)
-    sd_[sd_ < 1e-12] = 1.0
-    X = (X_raw - mu_) / sd_
-
-    ones = np.ones((n, 1))
     try:
-        glm_full = _fit_glm(y, np.column_stack([ones, X]), offset)
-        glm_null = _fit_glm(y, ones, offset)
+        fb = fit_beta(rows["reds"], rows["prev"], y, rows["N"])
     except Exception as e:
         return {"lottery": lottery, "applicable": False, "verdict": f"GLM 拟合失败: {e}"}
+    if not fb:
+        return {"lottery": lottery, "applicable": False,
+                "verdict": "样本不足（<50 期或无中奖记录），无法检验"}
 
-    llf_full, llf_null = glm_full.llf, glm_null.llf
-    lrt_stat = 2.0 * (llf_full - llf_null)
-    from scipy import stats as sps
-    lrt_p = float(sps.chi2.sf(max(lrt_stat, 0.0), k_feat))
+    X_raw, offset = fb["X_raw"], np.log(rows["N"])
+    mu_, sd_ = fb["m_"], fb["s_"]
+    n, k_feat = X_raw.shape
+    lrt_stat, lrt_p = fb["lrt_stat"], fb["lrt_p"]
 
     # 时序 5 折 expanding CV
     n_folds = 5
@@ -246,10 +296,10 @@ def fit_popularity(lottery: str) -> Dict[str, Any]:
         "y_mean": round(float(y.mean()), 3),
         "y_zero_rate": round(float((y == 0).mean()), 3),
         "features": FEATURE_NAMES,
-        "beta_raw": [round(float(b), 4) for b in glm_full.params[1:]],
-        "beta_p": [round(float(p), 4) for p in glm_full.pvalues[1:]],
+        "beta_raw": fb["beta_raw"],
+        "beta_p": fb["beta_p"],
         # 未取整数组（get_popularity_model 直接复用，避免二次拟合）
-        "beta_full": [float(b) for b in glm_full.params[1:]],
+        "beta_full": [float(b) for b in fb["beta"]],
         "feat_mean": [float(v) for v in mu_],
         "feat_std": [float(v) for v in sd_],
         "lrt_stat": round(float(lrt_stat), 2),
@@ -287,45 +337,172 @@ def popularity_quantile(lottery: str, reds: List[int],
                         sd_: Optional[np.ndarray] = None) -> float:
     """
     组合流行度分位（0=最冷 1=最热）：对全部红球组合的特征打分后取分位。
-    缺省参数时自动用 get_popularity_model 的缓存拟合结果（不再每次重拟合）；
-    全组合打分走 _get_scores_cached 三级缓存（进程内/磁盘/现算）。
-    蓝球未建模（MVP 边界，见模块 docstring）。
+
+    薄封装——**唯一实现是 drawn_quantiles**，避免两条代码路径各算一遍 `own`
+    （实测：单行/批量两种内存布局会让 `own` 差 1 ULP，落在大并列组里时
+    分位可差 1.5e-5；统一入口从根上消除这种不一致）。
     """
+    return float(drawn_quantiles(lottery, np.asarray([reds], dtype=np.int16),
+                                 beta=beta, mu_=mu_, sd_=sd_)[0])
+
+
+def drawn_quantiles(lottery: str, reds_matrix,
+                    beta: Optional[np.ndarray] = None,
+                    mu_: Optional[np.ndarray] = None,
+                    sd_: Optional[np.ndarray] = None,
+                    persist: bool = True) -> np.ndarray:
+    """
+    **逐期真实开奖号**的流行度分位（0=最冷 1=最热），向量化批量版。
+
+    这是本项目此前**缺失**的那条口径：popularity_quantile 虽然签名上接受任意组合，
+    但全仓库零调用点；counterfactual_backtest 用的是固定 q10/q90 参考组合。
+    也就是说「实际开出的号码到底偏冷还是偏热」从未被计算过——本函数补上它。
+
+    ⚠️ **分位口径 = 中点秩（mid-rank），不是 count(≤)/M。**
+    全组合的分数存在**大量完全并列**（1.1M 个组合只有 9 维粗特征，特征相同的组合
+    分数 bit 级相同）。对并列数据：
+      · count(≤v)/M 的期望 = 1 − P/M² ≥ 0.5（P = 严格小于的有序对数）——**系统性正偏**，
+        且偏的方向恰好**压低真实冷门信号**（把缝隙量小）；
+      · 中点秩 (count(<v) + count(≤v)) / (2M) 的期望**恒等于 0.5**，
+        E[u] = [P + ½Σg²]/M² = ½（由 2P + Σg² = M² 得），与并列结构无关。
+    故一律用中点秩，保证「公平开奖 ⇒ mean_u = 0.5」这条判据是无偏的。
+
+    β 未显式传入且模型未 Go → 返回全 NaN（调用方必须显式降级，不许静默）。
+    persist=False 时不落磁盘打分缓存（walk-forward 高频重拟合用，见 _get_scores_cached）。
+    """
+    R = np.asarray(reds_matrix, dtype=np.int16)
+    if R.ndim == 1:
+        R = R.reshape(1, -1)
     if beta is None:
         params = get_popularity_model(lottery)
         if not params.get("go"):
-            return float("nan")
+            return np.full(len(R), np.nan)
         beta, mu_, sd_ = params["beta"], params["m_"], params["s_"]
-    s_ = sd_ if sd_ is not None else np.ones(len(beta))
-    m_ = mu_ if mu_ is not None else np.zeros(len(beta))
+    beta = np.asarray(beta, dtype=np.float64)
+    s_ = np.asarray(sd_ if sd_ is not None else np.ones(len(beta)), dtype=np.float64)
+    m_ = np.asarray(mu_ if mu_ is not None else np.zeros(len(beta)), dtype=np.float64)
 
-    scores_sorted, _, _ = _get_scores_cached(lottery, beta, m_, s_)
+    scores_sorted, _, _ = _get_scores_cached(lottery, beta, m_, s_, persist=persist)
+    if len(scores_sorted) == 0:
+        return np.full(len(R), np.nan)
+    F = features_matrix(R)
+    own = _score_std(F, m_, s_, beta)
+    lt = np.searchsorted(scores_sorted, own, side="left")
+    le = np.searchsorted(scores_sorted, own, side="right")
+    return (lt + le) / (2.0 * float(len(scores_sorted)))
 
-    q = features_matrix(np.array([reds], dtype=np.int16))
-    own = float((((q - m_) / s_) @ np.asarray(beta, dtype=np.float64))[0])
-    return float((scores_sorted <= own).mean())
+
+_DRAWN_Q_NOTE = (
+    "逐期**真实开奖号**的流行度分位（0=最冷 1=最热，**中点秩口径**）。"
+    "公平开奖下该序列应近似 U(0,1)：均值恰好 0.5、无系统性偏移。"
+    "均值显著低于 0.5 → 开出组合系统性偏冷，"
+    "与「开奖倾向开出全国购买人数最少的组合」这一假设同向。"
+)
+
+
+def actual_draw_quantile_report(lottery: str) -> Dict[str, Any]:
+    """
+    逐期实际开奖号的流行度分位概况——**仅描述性统计，不构成独立证据**。
+
+    ⚠️ 本函数用**全样本** β 给**全部**历史开奖号打分，模型见过这些开奖号，
+       因此分位与残差都不独立，`z` 与 `p` 只能当描述用。
+       **有无机制缝隙的裁决必须看 ev/mechanism 的 walk-forward 版本**
+       （每期分位只用其之前的数据拟合 β）。
+    """
+    rows = _load_draw_rows(lottery)
+    if rows is None:
+        return {"lottery": lottery, "applicable": False,
+                "note": "样本不足或数据缺失"}
+
+    params = get_popularity_model(lottery)
+    if not params.get("go"):
+        rep = params.get("report", {}) or {}
+        return {"lottery": lottery, "applicable": bool(rep.get("applicable")), "go": False,
+                "in_sample": True, "独立证据": False, "note": _DRAWN_Q_NOTE,
+                "降级": "流行度模型未达 Go 门槛 → 无形态打分口径，逐期分位不可得"}
+
+    u = drawn_quantiles(lottery, rows["reds"])
+    u = u[np.isfinite(u)]
+    if len(u) == 0:
+        return {"lottery": lottery, "applicable": False, "go": True,
+                "note": "分位计算结果为空"}
+    n = int(len(u))
+    mean_u = float(u.mean())
+    sd_u = float(u.std(ddof=1)) if n > 1 else float("nan")
+    se = sd_u / math.sqrt(n) if n > 1 else float("nan")
+    z = (mean_u - 0.5) / se if se and se > 0 else float("nan")
+    return {
+        "lottery": lottery,
+        "applicable": True,
+        "go": True,
+        "in_sample": True,
+        "独立证据": False,
+        "n": n,
+        "mean_u": round(mean_u, 4),
+        "median_u": round(float(np.median(u)), 4),
+        "p10": round(float(np.percentile(u, 10)), 4),
+        "p90": round(float(np.percentile(u, 90)), 4),
+        "share_below_half": round(float((u < 0.5).mean()), 4),
+        "z": round(float(z), 3) if np.isfinite(z) else None,
+        "se": round(float(se), 5) if np.isfinite(se) else None,
+        "口径": _DRAWN_Q_NOTE,
+        "结论": (f"全样本内 {n} 期真实开奖号的平均流行度分位 {mean_u:.4f}"
+                 f"（公平开奖期望 0.5）。⚠️ 模型见过这些期，非独立证据；"
+                 f"裁决见 ev/mechanism 的 walk-forward 版本。"),
+    }
 
 
 # 全组合打分缓存：lottery → (参数指纹, 排序后分数)
 _SCORE_CACHE: Dict[str, Tuple[str, np.ndarray]] = {}
 
+# 打分公式版本：进入指纹。改打分实现必须 bump——否则磁盘 npz 的旧分数会
+# 与旧指纹一起命中，静默用错口径（2026-10-03 加 _score_std 时踩过这个坑口：
+# 先挂了 v2 才接上 _score_std，v2 缓存里存的是矩阵乘出来的分数）。
+_SCORE_FORMULA_VER = "v3-elemwise"
+
+
+def _score_std(F: np.ndarray, m_: np.ndarray, s_: np.ndarray,
+               beta: np.ndarray) -> np.ndarray:
+    """
+    标准化特征 → 线性打分。
+
+    ⚠️ **必须逐特征累加，不能用 `Fz @ beta`。**
+    全组合分数存在大量**完全并列**（1,107,568 个组合只有 214,835 个不同分数，
+    最大并列组 149）。而 BLAS 的 gemv / gemm 在**不同行数**下累加顺序不同 →
+    同一个组合在「批量打分」与「单行打分」下会差 1 ULP；一旦落在并列组边界，
+    分位会跳最多 149/M ≈ 1.3e-4，且**方向取决于舍入方向**（不是零均值噪声）。
+
+    逐特征累加是**逐元素**运算，不含跨行归约 → 结果与行数无关，
+    「全组合分数」与「逐期开奖号分数」落在完全同一套浮点语义下。
+    """
+    z = (F - m_) / s_
+    out = z[:, 0] * beta[0]
+    for j in range(1, z.shape[1]):
+        out = out + z[:, j] * beta[j]
+    return out
+
 
 def _scores_fingerprint(beta, m_, s_) -> str:
-    """参数指纹（模型参数变 → 打分缓存失效）。"""
+    """参数指纹（模型参数或打分公式变 → 打分缓存失效）。"""
     import hashlib
     h = hashlib.md5()
+    h.update(_SCORE_FORMULA_VER.encode())
     for a in (beta, m_, s_):
         h.update(np.round(np.asarray(a, dtype=np.float64), 10).tobytes())
     return h.hexdigest()[:12]
 
 
 def _get_scores_cached(lottery: str, beta: np.ndarray, m_: np.ndarray, s_: np.ndarray,
-                       q_cold: float = 0.1, q_hot: float = 0.9
+                       q_cold: float = 0.1, q_hot: float = 0.9,
+                       persist: bool = True
                        ) -> Tuple[np.ndarray, List[int], List[int]]:
     """
     全组合标准化打分（排序后）+ 冷/热参考组合，三级缓存：
     进程内 → 磁盘 cache/popularity_scores_<lottery>.npz（110 万组合枚举+特征约 3~4s，
     Web 重启后首载不再重算）→ 现算。参数指纹不匹配自动重算。
+
+    persist=False 时**跳过磁盘读写**——ev/mechanism 的 walk-forward 会在几十个切点上
+    重拟合 β（指纹每次不同），落盘只会制造无谓 I/O 且互相覆盖。
     """
     fp = _scores_fingerprint(beta, m_, s_)
 
@@ -338,7 +515,7 @@ def _get_scores_cached(lottery: str, beta: np.ndarray, m_: np.ndarray, s_: np.nd
     npz_path = os.path.join(os.path.dirname(_model_cache_path(lottery)),
                             f"popularity_scores_{lottery}.npz")
     try:
-        if os.path.exists(npz_path):
+        if persist and os.path.exists(npz_path):
             z = np.load(npz_path, allow_pickle=False)
             if str(z["fp"]) == fp and abs(float(z["q_cold"]) - q_cold) < 1e-9 \
                     and abs(float(z["q_hot"]) - q_hot) < 1e-9:
@@ -359,20 +536,21 @@ def _get_scores_cached(lottery: str, beta: np.ndarray, m_: np.ndarray, s_: np.nd
         _ENUM_CACHE[lottery] = (combos, S)
         logger.info(f"[popularity] 枚举 {lottery} 组合 {combos.shape[0]} 条完成")
     combos, S = _ENUM_CACHE[lottery]
-    scores_all = ((S - m_) / s_) @ np.asarray(beta, dtype=np.float64)
+    scores_all = _score_std(S, m_, s_, np.asarray(beta, dtype=np.float64))
     order = np.argsort(scores_all)
     scores_sorted = scores_all[order]
     cold_combo = combos[order[int(q_cold * (len(order) - 1))]].tolist()
     hot_combo = combos[order[int(q_hot * (len(order) - 1))]].tolist()
 
     _SCORE_CACHE[lottery] = (fp, scores_sorted, cold_combo, hot_combo)
-    try:
-        np.savez_compressed(npz_path, fp=fp, scores=scores_sorted,
-                            cold=np.asarray(cold_combo, dtype=np.int16),
-                            hot=np.asarray(hot_combo, dtype=np.int16),
-                            q_cold=q_cold, q_hot=q_hot)
-    except Exception as e:
-        logger.debug(f"[popularity] 写打分缓存失败 {lottery}: {e}")
+    if persist:
+        try:
+            np.savez_compressed(npz_path, fp=fp, scores=scores_sorted,
+                                cold=np.asarray(cold_combo, dtype=np.int16),
+                                hot=np.asarray(hot_combo, dtype=np.int16),
+                                q_cold=q_cold, q_hot=q_hot)
+        except Exception as e:
+            logger.debug(f"[popularity] 写打分缓存失败 {lottery}: {e}")
     return scores_sorted, cold_combo, hot_combo
 
 

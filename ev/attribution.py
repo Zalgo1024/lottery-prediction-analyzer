@@ -31,6 +31,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from config import LOTTERY_CONFIG
 from data import feedback as fb
+from ev.mechanism.narrative import NO_SIGNAL_CAVEAT
 from data.prize_table import prize_payout
 
 logger = logging.getLogger(__name__)
@@ -40,9 +41,13 @@ _NULL_GRADES = {"", "未中", "none", "null", "0", "-", "无", "—"}
 
 DEFAULT_LOOKBACK = 2000
 
+# ⚠️ 后半段是 P3 叙事解绑从句（单一真源 ev.mechanism.narrative）。
+#    原句整句保留：它说的是**本归因表**的局限（未校正、样本量不足），
+#    追加的一句划清边界——那是本表的局限，不是对开奖机制的判断。
 HONEST_NOTE = (
     "归因只统计「开奖后按预先锁定的 pending 号码」结算的历史记录，不改变任何预测逻辑；"
     "分组命中率差异不构成「某策略更会选号」的证据（未做多重比较校正，样本量不足）"
+    + NO_SIGNAL_CAVEAT
 )
 
 

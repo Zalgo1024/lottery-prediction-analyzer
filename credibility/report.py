@@ -13,6 +13,8 @@ from typing import Dict, List
 
 from data.schema import get_schema
 
+from ev.mechanism.narrative import NO_SIGNAL_CAVEAT
+
 from .backtest import oos_backtest
 from .baseline import random_null, empirical_pvalue, benjamini_hochberg
 from .data_quality import data_quality_report
@@ -114,9 +116,15 @@ def run_credibility(lottery_name: str, k: int = 8, min_train: int = 100,
                    "但相对效应<2%（对头奖概率≈1/千万级无实质影响），且大样本下边界 p 值极可能是"
                    "多重比较噪声。不视为可行动信号，仅作监控。")
     else:
+        # ⚠️ P3 叙事解绑：**判定逻辑不动**（走哪个分支、取什么 verdict 键都不变）。
+        #    改的是措辞本身：原句用的是「不可能」式表述——把「本次没检出」说成了
+        #    「世界不可能」，会让四轨测量在逻辑上被自己的旧文案提前否掉。
+        #    改成关于**测量**的陈述（关于数据量、功效与已测维度）。
+        #    后半句是原句自带的有价值边界（"价值在纪律化与自检，不在提高中奖率"），保留。
         verdict = ("否 —— 在严格样本外、经 FDR 校正后，没有任何策略显著优于纯随机。"
-                   "这与「公平随机开奖不可被稳定预测」一致；当前系统的价值在于纪律化投注与诚实自检，"
-                   "而非提高中奖率。")
+                   "这与「在本检验的数据量、功效与已测维度下未检出可稳定利用的信号」一致；"
+                   "当前系统的价值在于纪律化投注与诚实自检，而非提高中奖率。"
+                   + NO_SIGNAL_CAVEAT)
 
     return {
         "lottery_name": lottery_name,

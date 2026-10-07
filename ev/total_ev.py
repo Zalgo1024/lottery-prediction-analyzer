@@ -13,8 +13,9 @@ ev/total_ev.py —— 总 EV 折算对照表（策略升级 D）
   ③ 冷/热门口径 —— E[min(cap, 池可分池/(1+X))]，X~Poisson(μ_q)，
                  μ_q = N×P(一等)×exp(β·f(q 分位组合))（流行度模型）
 
-诚实定位（写死，防误读）：
-- 不预测号码、不改变任何奖级的中奖概率（概率是组合常数）；
+诚实定位（防误读）：
+- 不预测号码、不改变任何奖级的中奖概率（概率是组合常数——在**开奖等可能**前提下；
+  该前提由 `ev/mechanism/` 四轨测量检验，见 `python cli.py gap`，未检出偏离 ≠ 证明公平）；
 - 冷门口径只回答「同样概率下中了能拿多少」；
 - ΔEV 的前提是流行度模型历史回测成立（1.484× 为历史中位，非承诺）；
 - 封顶 1000 万下总 EV 恒为负，本表是口径对照工具不是收益工具。
@@ -29,15 +30,22 @@ ev/total_ev.py —— 总 EV 折算对照表（策略升级 D）
 import logging
 from typing import Any, Dict, Optional
 
+from ev.mechanism.narrative import RANDOMNESS_PREMISE_CAVEAT
 from ev.payout import _SSQ_DLT_CAP
 
 logger = logging.getLogger(__name__)
 
+# ⚠️ 末段是 P3 叙事解绑从句（单一真源 ev.mechanism.narrative）。
+#    原句整句保留（"不预测号码" 属 HONEST_NOTE 体系，被 6 处测试锁定，绝不动）。
+#    追加的一句点明：原句里的「概率是组合常数」是**随机开奖假设下**的结论。
+#    注：句内 1.484× 是**实得奖金的分母口径差异**（同样概率下中了能拿多少的历史中位），
+#    它描述的是派奖结构，不构成「开奖偏向冷门」的证据——两者别混读。
 _HONEST_NOTE = (
     "不预测号码、不改任何奖级中奖概率（概率是组合常数）；冷门口径只回答"
     "「同样概率下中了能拿多少」；ΔEV 的前提是流行度模型历史回测成立"
     "（1.484× 为历史中位，非承诺）；封顶 1000 万下总 EV 恒为负，"
     "本表是口径对照工具不是收益工具。"
+    + RANDOMNESS_PREMISE_CAVEAT
 )
 
 _LOTTO = ("双色球", "大乐透")

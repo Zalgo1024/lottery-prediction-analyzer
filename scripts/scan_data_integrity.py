@@ -377,6 +377,9 @@ def scan_lottery(name: str, today: date):
         rep["最新一期"] = {"日期": str(latest),
                            "期号": max(recs, key=lambda x: (x["date"] or date.min))["期号"]}
         # 最近应开奖日（2026-10-02 起走休市日历：休市日不产生期次，不计滞后）
+        # expected 先兜底为 latest：当数据比 today 还新（回溯体检 / today 落在休市回退日）
+        # 时循环首轮即 break，此时按「无滞后」计，不能让它成为未绑定变量。
+        expected = latest
         d = today
         for _ in range(400):
             if d < latest:

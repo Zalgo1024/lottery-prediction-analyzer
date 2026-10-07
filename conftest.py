@@ -18,6 +18,9 @@ _TARGETS = (
     ("data.push_notify", "STORE_PATH", "push_notify.json"),
     ("data.ticket_size", "STORE_PATH", "ticket_size.json"),
     ("web.training_loop", "STORE_PATH", "training_loop.json"),
+    # ev/mechanism/gap_cache.py 的磁盘缓存目录（测量结果 JSON）。
+    # 不加这一条，用例一旦走 measure_gap(use_cache=True) 就会把真实 cache/mechanism 写脏。
+    ("ev.mechanism.gap_cache", "CACHE_DIR", "mechanism"),
 )
 
 

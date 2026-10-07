@@ -91,11 +91,80 @@ def _ev_templates(lottery: str) -> list:
     ]
 
 
+# ---------------------------------------------------------------- 机制缝隙类
+# 对应 ev/mechanism/ 四轨测量（python cli.py gap）。
+# ★ 与「选号 edge」类假设是**两个不同的问题**：edge 类问「有没有策略能跑赢随机」，
+#   缝隙类问「开奖结果本身是否偏离等可能」。后者即使检出，也不自动给出可利用的选号优势
+#   （还取决于你能不能在别人之前买到那注）；所以它单独成类，不混进 _cred_templates。
+#
+# ★ `adjudicating` 标明该轨**是否参与机制裁决**。这是硬纪律，不是装饰：
+#   C 轨（位级/分区结构偏差）已被证实对分段断裂敏感（大乐透 2007–2013 和值 97.2
+#   vs 2014 起 88.5 是数据分段问题，非机制），D 轨（派奖期）样本量仅 21 期、功效极低
+#   ⇒ 两者一律**不参与裁决**，只作诊断。注册它们是为了让「测过什么」可追溯，
+#   不是为了把它们抬进判定。
+_GAP_ADJUDICATING = {"A": True, "A′": True, "B": True, "C": False, "D": False}
+
+
+def _gap_templates(lottery: str) -> list:
+    """机制缝隙类假设模板（四轨测量的假设面）。
+
+    按彩种可判定性给模板，不给齐——某轨在该彩种上不可判定却硬注册一条，
+    等于承诺一个测不了的检验（排列3/福彩3D 的销售额覆盖全部玩法，A′ 轨量到的是
+    投注份额而非开奖倾向，这就是它们的反证）。
+    """
+    out = []
+
+    def _t(track, name, hyp, strategy, metric):
+        out.append({
+            "name": name,
+            "hypothesis": hyp,
+            "strategy": strategy,
+            "probe_type": "mechanism_gap",
+            "target_metric": metric,
+            "track": track,
+            "adjudicating": bool(_GAP_ADJUDICATING.get(track, False)),
+        })
+
+    if lottery in ("双色球", "大乐透"):
+        # A 轨：免票量口径 R = (Σy1/Σy2)(p2/p1)，免疫追加/复式/多倍/记账差异
+        _t("A", "高奖级注数比显著小于1",
+           f"{lottery}一等奖实际中奖注数相对理论注数的比值 R 显著小于 1（A 轨，"
+           f"免票量口径，长块 bootstrap 标准误）：即高奖级的开出密度低于等可能开奖的预期",
+           "A轨注数比", "R")
+        # B 轨：真实开出号的冷门度分位均值（分位用中点秩，避免并列正偏）
+        _t("B", "开出号冷门度分位均值显著低于0.5",
+           f"{lottery}真实开出组合在流行度模型下的分位均值 ū 显著低于 0.5（B 轨，"
+           f"经验离散度 + 长块 bootstrap）：即开出的号系统性比随机组合更冷门",
+           "B轨开出号分位", "ū")
+    elif lottery in ("排列5", "七星彩"):
+        # A′ 轨：数字型注数比。七星彩必须整段切现行段（≥2020-10-11），否则是假信号
+        _t("A′", "高奖级注数比显著偏离1",
+           f"{lottery}各奖级实际中奖注数相对理论注数的比值 R 显著偏离 1（A′ 轨，"
+           f"直读销售奖级数据）：即中奖密度与等可能开奖的预期不符",
+           "A′轨注数比", "R")
+
+    # C 轨：位级/分区结构偏差 —— 诊断性，不参与裁决
+    if lottery in ("排列3", "福彩3D", "排列5", "七星彩"):
+        _t("C", "位级分区分布偏离均匀",
+           f"{lottery}各位/分区的开出分布偏离均匀（C 轨，经 BH 多重比较校正）："
+           f"★ 诊断性假设，不参与机制裁决——已证实该轨对规则变更导致的分段断裂敏感",
+           "C轨结构偏差", "BH校正p")
+    # D 轨：派奖期 —— 诊断性，样本量小、功效极低
+    if lottery == "七星彩":
+        _t("D", "派奖期冷门偏置强于平常期",
+           f"{lottery}派奖期的冷门偏置显著强于平常期（D 轨）："
+           f"★ 诊断性假设，不参与机制裁决——派奖期仅 21 期，可检出效应下限约 0.37，功效极低",
+           "D轨派奖期", "ΔR")
+    return out
+
+
 def auto_templates(lottery: str) -> list:
     """该彩种的全部候选模板（人工提假设时可参考；--auto 用）。"""
     hyp_by_strategy = {s: f"{lottery}的{s}在严格样本外滚动回测中显著优于随机基线军团（经FDR校正）"
                        for s in _INTERNAL_STRATEGIES}
-    return _cred_templates(lottery, hyp_by_strategy) + _ev_templates(lottery)
+    return (_cred_templates(lottery, hyp_by_strategy)
+            + _ev_templates(lottery)
+            + _gap_templates(lottery))
 
 
 # ---------------- 文件 IO ----------------
@@ -186,6 +255,9 @@ def add_auto_hypotheses(lottery: str) -> list:
                     "strategy": t["strategy"],
                     "target_metric": t.get("target_metric"),
                     "gate_criteria": dict(DEFAULT_GATE),
+                    # 机制缝隙类专用：标明所属轨 + 该轨是否参与裁决（C/D 恒 False）
+                    **({"track": t["track"], "adjudicating": t["adjudicating"]}
+                       if "track" in t else {}),
                 },
                 "status": "proposed",
                 "promoted": False,
