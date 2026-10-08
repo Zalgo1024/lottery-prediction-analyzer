@@ -4,13 +4,15 @@ import numpy as np
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
 
-sys.path.insert(0, r"E:\707")
+# 项目根按脚本位置推导，不再写死绝对路径（换目录/换机器直接可用）
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, BASE_DIR)
 from data.loader import load_lottery
 from data.features import build_features, FEATURE_VERSION_STANDARD
 from config import LOTTERY_CONFIG
 
 WS = 50
-OUTFILE = r"E:\707\scripts\_diag_out.txt"
+OUTFILE = os.path.join(BASE_DIR, "scripts", "_diag_out.txt")
 open(OUTFILE, "w", encoding="utf-8").close()  # 清空
 
 def emit(lines):

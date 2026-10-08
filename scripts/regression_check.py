@@ -9,12 +9,15 @@
 """
 import argparse
 import json
+import os
 import sys
 import random
 import datetime
 import numpy as np
 
-sys.path.insert(0, r"E:\707")
+# 项目根按脚本位置推导，不再写死绝对路径（换目录/换机器直接可用）
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, BASE_DIR)
 
 # 固定 random.seed 抵消 predict 内部 random.seed(microsecond)
 import random as _random
@@ -223,7 +226,7 @@ parser = argparse.ArgumentParser(description="阶段0 回归校验脚本")
 parser.add_argument("--update-ref", action="store_true", help="更新 baseline 参考文件（数据正常更新后使用）")
 args = parser.parse_args()
 
-with open(r"E:\707\scripts\_reg_ref.json", encoding="utf-8") as f:
+with open(os.path.join(BASE_DIR, "scripts", "_reg_ref.json"), encoding="utf-8") as f:
     ref = json.load(f)
 
 fails = []
@@ -303,7 +306,7 @@ for lot in ["双色球", "大乐透"]:
 
 print("\n" + "=" * 50)
 if args.update_ref:
-    ref_path = r"E:\707\scripts\_reg_ref.json"
+    ref_path = os.path.join(BASE_DIR, "scripts", "_reg_ref.json")
     with open(ref_path, "w", encoding="utf-8") as f:
         json.dump(new_ref, f, ensure_ascii=False, indent=2)
     print(f"✅ 已更新 baseline: {ref_path}")

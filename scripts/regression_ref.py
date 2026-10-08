@@ -14,8 +14,12 @@ import random as _random
 _ORIG_SEED = _random.seed
 _random.seed = lambda *a, **k: _ORIG_SEED(12345)
 
+import os
 import sys
-sys.path.insert(0, r"E:\707")
+
+# 项目根按脚本位置推导，不再写死绝对路径（换目录/换机器直接可用）
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, BASE_DIR)
 
 import config
 from data.loader import load_lottery
@@ -81,7 +85,7 @@ for lot in ["双色球", "大乐透"]:
     lot_out["preds"] = preds
     out[lot] = lot_out
 
-with open(r"E:\707\scripts\_reg_ref.json", "w", encoding="utf-8") as f:
+with open(os.path.join(BASE_DIR, "scripts", "_reg_ref.json"), "w", encoding="utf-8") as f:
     json.dump(out, f, ensure_ascii=False, indent=2)
 
 # 校验并汇报

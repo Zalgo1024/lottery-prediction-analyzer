@@ -2,9 +2,12 @@
 阶段2 数字型接入冒烟测试：
 对 排列5/福彩3D/排列3/七星彩 做 加载 + 三策略预测，捕获任何崩溃。
 """
+import os
 import sys
 import traceback
-sys.path.insert(0, r"E:\707")
+
+# 项目根按脚本位置推导，不再写死绝对路径（换目录/换机器直接可用）
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from data.loader import load_lottery
 from pipeline.statistics import frequency_analysis, missing_value_analysis, summary_stats

@@ -112,7 +112,9 @@ pytest -q
 
 - 乐透型（双色球示例，15 列）：
   `期号, 红球1..红球6, 蓝球1, 奖池奖金(元), 一等奖注数, 一等奖奖金（元）, 二等奖注数, 二等奖奖金（元）, 总投注额(元), 开奖日期`
-  大乐透为红球 1-5 + 蓝球 1-2。⚠️ **开奖日期格式为 `M/D/YYYY`**（如 `10/9/2026`）
+  大乐透为红球 1-5 + 蓝球 1-2。⚠️ **开奖日期格式为 `D/M/YYYY`（日在前、月在后，不是美式 `M/D/YYYY`）**
+  ——例：`23/2/2003` = 2003-02-23（日 23 > 12，可直接判读）。解析口径见
+  `data/schema.py::parse_draw_date`，写出口径见 `data/cleaner.py`。
 - 数字型（福彩3D 示例）：
   `期号, 开奖日期, 号码1, 号码2, 号码3`（排列5/七星彩列数相应为 5/7，日期为 `YYYY-MM-DD`）
 
@@ -136,9 +138,9 @@ pytest -q
 ```python
 import pandas as pd
 
-# 乐透型（注意日期是 M/D/YYYY）
+# 乐透型（注意日期是 D/M/YYYY，日在前）
 ssq = pd.read_csv("lottery_data/双色球历史数据.csv", encoding="utf-8-sig")
-ssq["开奖日期"] = pd.to_datetime(ssq["开奖日期"], format="%m/%d/%Y")
+ssq["开奖日期"] = pd.to_datetime(ssq["开奖日期"], format="%d/%m/%Y")
 print(ssq.tail())                     # 最新几期
 print(ssq["一等奖奖金（元）"].describe())  # 头奖奖金分布
 
