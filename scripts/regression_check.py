@@ -6,6 +6,12 @@
 1) 新 features 与"旧逻辑忠实重实现"逐元素相等（全套特征向量，不抽样）
 2) feature_dim / 标签维度 / build_features 形状与 baseline 一致
 3) 单策略预测（固定种子）产出的号码组与 baseline 完全一致（行为零破坏）
+
+★数据窗口钉死（2026-10-08）
+baseline 的 Xs_shape 行数与 preds 都依赖采集当天的 CSV 快照，而 CSV 每期追加。
+不钉死的话，数据一前进就必然报"回归失败"——那是数据在动，不是代码坏了；
+而每次失败都去 --update-ref 刷新基准，会把当前行为固化成新基准，掩盖真回归。
+现按 baseline `_meta.pinned_issue` 把输入截断到当时的最新期号，使校验可复现。
 """
 import argparse
 import json
@@ -15,9 +21,11 @@ import random
 import datetime
 import numpy as np
 
-# 项目根按脚本位置推导，不再写死绝对路径（换目录/换机器直接可用）
+# 项目根 / scripts 目录按脚本位置推导，不再写死绝对路径（换目录/换机器直接可用）
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
+sys.path.insert(0, SCRIPTS_DIR)
 
 # 固定 random.seed 抵消 predict 内部 random.seed(microsecond)
 import random as _random
@@ -34,6 +42,7 @@ from data.features import (
 )
 import train.engine as te
 import prediction.engine as pe
+import regression_pin as rp
 
 # ============================================================
 # 旧逻辑忠实重实现（重构前 features.py 的副本，用于差异对比）
@@ -226,14 +235,32 @@ parser = argparse.ArgumentParser(description="阶段0 回归校验脚本")
 parser.add_argument("--update-ref", action="store_true", help="更新 baseline 参考文件（数据正常更新后使用）")
 args = parser.parse_args()
 
-with open(os.path.join(BASE_DIR, "scripts", "_reg_ref.json"), encoding="utf-8") as f:
+REF_PATH = os.path.join(SCRIPTS_DIR, "_reg_ref.json")
+with open(REF_PATH, encoding="utf-8") as f:
     ref = json.load(f)
+
+pins = rp.read_pins(ref)
+if pins is None and not args.update_ref:
+    print("❌ baseline 为旧格式（缺 _meta.pinned_issue），无法确定它对应的数据窗口，")
+    print("   直接按当前全量数据比对必然因「数据前进」而误报回归。")
+    print("   请执行一次基线采集写入 pin：  python scripts/regression_ref.py")
+    print("   或显式重设基准：              python scripts/regression_check.py --update-ref")
+    raise SystemExit(2)
+
+# 钉死 predict 的输入窗口（prediction/engine.py 顶层 `from data.loader import load_lottery`，
+# 必须 patch 它自己的属性，patch data.loader 对已导入的名字无效）
+rp.install_pinned_loader(pe, pins)
 
 fails = []
 new_ref = {}
+update_pins = {}
 for lot in ["双色球", "大乐透"]:
     cfg = config.LOTTERY_CONFIG[lot]
-    data = load_lottery(lot)
+    full = load_lottery(lot)
+    pin = (pins or {}).get(lot)
+    # 更新基准时 pin 取当前最新期号；校验时沿用 baseline 记录的期号
+    update_pins[lot] = pin if pin is not None else (full.records[0].期号 if full.records else None)
+    data = rp.truncate_data(full, pin)
     win = data.records[:50]
 
     new_v1 = build_feature_vector_v1(win, cfg)
@@ -247,9 +274,16 @@ for lot in ["双色球", "大乐透"]:
     if not close(new_v2, ref_v2):
         fails.append(f"{lot}: v2 与新实现 vs 旧逻辑不一致 (len {len(new_v2)}/{len(ref_v2)})")
     # 新 v1 与 train._build_features[0] 内部一致
-    bf_X, bf_y = te._build_features(data, 50)
-    if not close(new_v1, bf_X[0].tolist()):
-        fails.append(f"{lot}: v1 与 train._build_features[0] 不一致")
+    # ⚠️ 窗口口径（2026-10-08 修）：build_features 第 i 个样本取
+    #    window = records[i+1 : i+1+ws]、target = records[i]
+    #    —— 这是 2026-08-31「时间方向」修正后的语义（用过去 ws 期预测下一期）。
+    #    所以样本 0 的窗口是 records[1:1+ws]，**不是** records[:ws]。
+    #    拿 records[:50] 去比 bf_X[0] 属于窗口错位，会恒定失败（实测 max|diff|=1.0）。
+    WS = 50
+    bf_X, bf_y = te._build_features(data, WS)
+    v1_on_bf_window = build_feature_vector_v1(data.records[1:1 + WS], cfg)
+    if not close(v1_on_bf_window, bf_X[0].tolist()):
+        fails.append(f"{lot}: v1 与 train._build_features[0] 不一致（窗口 records[1:1+{WS}]）")
 
     # 2) 维度/形状
     fd1 = feature_dim(cfg, 1)
@@ -262,8 +296,13 @@ for lot in ["双色球", "大乐透"]:
         fails.append(f"{lot}: fd2({fd2}) != v2长度({len(new_v2)})")
     if Xs.shape[1] != fd1 or Xr.shape[1] != fd2:
         fails.append(f"{lot}: build_features 列数 != feature_dim")
-    if bf_y.shape[1] != (fd1 - 5) // 2 + ((fd1 - 5) // 2):  # 标签数=总号码数=红size+蓝size
-        pass  # 仅记录，下面用 ref 比较
+    # 标签是「每个号码一个二分类」，列数应等于号码总数(红+蓝)，与特征维数 fd1 无关。
+    # （2026-10-08：原写法是 `if ...: pass` 的死代码且公式错，等于没校验，现改为真断言）
+    r_min, r_max = cfg["red_range"]
+    b_min, b_max = cfg["blue_range"]
+    n_numbers = (r_max - r_min + 1) + (b_max - b_min + 1)
+    if bf_y.shape[1] != n_numbers:
+        fails.append(f"{lot}: bf_y 列数 {bf_y.shape[1]} != 号码总数 {n_numbers}")
 
     # 3) 预测行为（固定种子）
     mode_preds = {}
@@ -302,15 +341,20 @@ for lot in ["双色球", "大乐透"]:
                         fails.append(f"   组{i}: 新={a}  旧={b}")
                         break
 
-    print(f"== {lot}: v1_len={len(new_v1)} v2_len={len(new_v2)} fd1={fd1} fd2={fd2} 预测组数校验完成 ==")
+    pin_note = f" 数据窗口 pinned≤{pin}" if pin is not None else " 数据窗口=当前全量"
+    print(f"== {lot}: v1_len={len(new_v1)} v2_len={len(new_v2)} fd1={fd1} fd2={fd2}"
+          f" Xs{list(Xs.shape)} |{pin_note} ==")
 
 print("\n" + "=" * 50)
 if args.update_ref:
-    ref_path = os.path.join(BASE_DIR, "scripts", "_reg_ref.json")
-    with open(ref_path, "w", encoding="utf-8") as f:
+    new_ref[rp.META_KEY] = {
+        "pinned_issue": update_pins,
+        "note": "preds/Xs_shape 均在此 pinned 期号下采集；校验时输入被截断到同一窗口，故数据追加不会误报回归。",
+    }
+    with open(REF_PATH, "w", encoding="utf-8") as f:
         json.dump(new_ref, f, ensure_ascii=False, indent=2)
-    print(f"✅ 已更新 baseline: {ref_path}")
-    print("   下次运行回归校验将使用本次数据作为新基准。")
+    print(f"✅ 已更新 baseline: {REF_PATH}")
+    print(f"   数据窗口 pinned_issue = {update_pins}（校验时按此截断，数据追加不再误报）")
 elif fails:
     print("回归校验失败：")
     for f in fails:
