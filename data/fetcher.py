@@ -17,6 +17,7 @@
 
 import csv
 import logging
+import os
 import re
 import ssl
 import urllib.request
@@ -24,7 +25,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from config import BASE_DIR, LOTTERY_CONFIG, LOTTERY_DATA_DIR
+from config import BASE_DIR, CLEANED_FILE_PATHS, LOTTERY_CONFIG, LOTTERY_DATA_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -356,14 +357,18 @@ def update_lottery_data(
         expected_new = end_int >= (int(latest_before) + 1) if (latest_before and latest_before.isdigit()) else True
         if expected_new and start_int <= end_int and not start_draw:
             logger.warning("期望有新期号但解析为 0 行，端点可能已改版")
+        # ★过期补清洗（2026-10-09）：抓 0 条 ≠ 没事干。若上次「写入后清洗」失败被吞
+        #（如清洗输出被 Excel 独占），cleaned 会永远滞后，而后续每次抓取都是 0 条
+        # ⇒ 提前 return 永远不会再触发清洗 ⇒ 死锁，下游全盲（双色球 26115 事故）。
+        cleaned_stale = _clean_if_stale(lottery_name, csv_path)
         return {
             "lottery": lottery_name,
             "latest_before": latest_before,
             "latest_after": latest_before,
             "fetched": 0,
             "new_records": [],
-            "message": "已是最新，无需更新",
-            "cleaned": False,
+            "message": "已是最新，无需更新" + ("（检测到清洗文件过期，已补清洗）" if cleaned_stale else ""),
+            "cleaned": cleaned_stale,
         }
 
     # 加文件锁：防止 Web 按钮和定时任务同时写 CSV（读→合并→写 原子化）
@@ -394,6 +399,31 @@ def update_lottery_data(
         "new_records": new_records,
         "cleaned": cleaned,
     }
+
+
+def _clean_if_stale(lottery_name: str, raw_csv_path) -> bool:
+    """清洗文件比原始数据旧时补一次清洗；返回是否执行了清洗。
+
+    背景（2026-10-09 双色球事故）：清洗输出文件被外部程序（Excel）独占 ⇒
+    run_clean 写入 PermissionError 被当 warning 吞掉 ⇒ cleaned 永远停在旧期；
+    而后续抓取都是 0 条、提前 return，永远不会再触发清洗 ⇒ 下游全盲死锁。
+    """
+    cleaned_path = CLEANED_FILE_PATHS.get(lottery_name)
+    if not (cleaned_path and Path(cleaned_path).exists()):
+        return False
+    try:
+        if os.path.getmtime(raw_csv_path) <= os.path.getmtime(cleaned_path):
+            return False
+    except OSError:
+        return False
+    try:
+        from data.cleaner import run_clean
+        run_clean(lottery_name)
+        logger.warning("%s 检测到清洗文件过期，已补清洗", lottery_name)
+        return True
+    except Exception as e:  # 清洗失败不能阻塞抓取主流程，但必须留痕
+        logger.warning("%s 过期补清洗失败: %s", lottery_name, e)
+        return False
 
 
 def _dedup_sorted(records: List[List[str]]) -> List[List[str]]:

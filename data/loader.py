@@ -74,11 +74,30 @@ def _file_path(lottery_name: str) -> "Path":
 
 
 def _resolve_csv_path(lottery_name: str, use_cleaned: bool = True) -> "Path":
-    """返回实际要读取的 CSV 路径（优先 cleaned，回退原始）。"""
+    """返回实际要读取的 CSV 路径（优先 cleaned，回退原始）。
+
+    ★过期防护（2026-10-09）：cleaned 是 raw 的派生缓存。抓到新数据后清洗若失败
+    （典型：清洗输出文件被 Excel 等外部程序独占，写入 PermissionError 被当
+    warning 吞掉），cleaned 会永远停在旧期次——继续读它会让评估/预测对新增
+    期次「全盲」（双色球 26115 卡死 24h+ 的根因）。故 raw 更新时改读 raw 并告警。
+    """
     if use_cleaned:
-        path = CLEANED_FILE_PATHS.get(lottery_name)
-        if path and path.exists():
-            return path
+        cleaned = CLEANED_FILE_PATHS.get(lottery_name)
+        if cleaned and cleaned.exists():
+            raw = _file_path(lottery_name)
+            try:
+                if raw.exists() and raw.stat().st_mtime > cleaned.stat().st_mtime:
+                    import time as _time
+                    logger.warning(
+                        "%s 清洗文件比原始数据旧（cleaned=%s < raw=%s），改读原始数据；请尽快补清洗",
+                        lottery_name,
+                        _time.strftime("%Y-%m-%d %H:%M:%S", _time.localtime(cleaned.stat().st_mtime)),
+                        _time.strftime("%Y-%m-%d %H:%M:%S", _time.localtime(raw.stat().st_mtime)),
+                    )
+                    return raw
+            except OSError:
+                pass
+            return cleaned
     return _file_path(lottery_name)
 
 
