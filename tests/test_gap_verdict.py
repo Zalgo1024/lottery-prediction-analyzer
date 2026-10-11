@@ -193,13 +193,14 @@ def test_judging_pvalue_sign_is_one_sided_cold():
 
 
 # ------------------------------------------------------------------ ⑤ 缓存
-def test_cache_protocol_bumped_to_v3():
-    """v2→v3：B 轨判定/z/γ 的标准误由「解析/短块」改为长块 bootstrap。
+def test_cache_protocol_bumped_to_v4():
+    """协议版本锁：v3→v4：C 轨红球形态的 MC 组合数改为随 n 缩放（≥400×n），
+    z 的 MC 种子噪声由 ~0.22 降到 ≤0.05（大乐透「连号对数」由误报 3.008 回到真值 ~2.88）。
 
     这条断言的对象**就是**协议版本本身，所以 bump 时必须同步改它 ——
     它不是「迁就实现的改断言」，而是防止「改了口径却让旧缓存继续命中」的那道锁。
     """
-    assert gap_cache._PROTOCOL == "v3"
+    assert gap_cache._PROTOCOL == "v4"
 
 
 def _sig(lottery="双色球", n=1, last="1", **over):

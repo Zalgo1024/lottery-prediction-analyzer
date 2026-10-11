@@ -33,6 +33,10 @@ r"""C 轨 · 位级 / 分区结构偏差（**不单独判缝隙**）。
    **且分段同质**（前半 vs 后半的差 z < 3）。
    分段闸门不是装饰：实测大乐透全样本 `和值` z=+4.15 看着像实质偏离，
    拆开一看是 2007–2013 段（97.2）与 2014 起（88.5）的分段断裂 —— 数据问题。
+4. **红球形态 z 的 MC 精度必须随 n 缩放**（`RED_NULL_MC_PER_DRAW`）。
+   MC 零均值自身误差 ⇒ z 的种子噪声 = √(n/mc)；固定 mc 会在数据增长后
+   把真值 z≈2.9 顶过门槛而误报（2026-10-11 大乐透「连号对数」实测 3.008）。
+   与位级分支的「p 分辨率地板」是同类的自检，缺一不可。
 """
 from __future__ import annotations
 
@@ -48,6 +52,17 @@ MC_B_DEFAULT = 2000
 MC_COMBOS_DEFAULT = 200_000
 V_MIN = 0.10            # 位级 Cramér's V 实质门槛
 Z_MIN = 3.0             # 红球形态 |z| 实质门槛
+
+# 红球形态 z 的 MC 精度闸门（与位级分支的「p 分辨率地板」对称，缺它就会误报）。
+# z = (观测均值 − MC 零分布均值)/se，其中 se = null_sd/√n；
+# 而 MC 零均值**自身**的抽样误差 = null_sd/√mc
+#   ⇒ **z 的 MC 种子噪声 = √(n/mc)**，随数据增长 n↑ 而固定 mc 时噪声↑。
+# 实测（2026-10-11）：大乐透 n≈2928、mc=6e4 ⇒ 噪声 = √(2928/6e4) = 0.221，
+# 足以把真值 z=2.88（解析期望 0.5714 口径）顶过 |z|≥3 门槛，
+# 把「连号对数」误报成「实质结构偏离」。故令 mc ≥ RED_NULL_MC_PER_DRAW × n
+#   ⇒ 噪声 ≤ 1/√400 = 0.05，与门槛 3.0 留出余量。
+RED_NULL_MC_PER_DRAW = 400      # 每个观测配 400 个 MC 组合
+RED_NULL_MC_MAX = 4_000_000     # 内存/耗时上限（n≤4000 时用不到）
 
 _C_NOTE = ("C 轨**不单独判缝隙**：结构偏差可能来自规则变更/数据源缺陷/摇奖设备/"
            "多重比较假阳性，无法与「机制筛选」区分。它只作 A/A′/B 轨的强化与排查线索。")
@@ -205,10 +220,14 @@ def _red_shape_tests(lottery: str, *, mc: int, seed: int) -> List[Dict[str, Any]
     if fr is None:
         return []
     obs = _red_features(fr.reds, red.min, red.max, int(red.choose))
-    null_vals = _mc_uniform_combos(red.min, red.max, int(red.choose),
-                                   mc=mc, seed=seed)
-    null_f = _red_features(null_vals, red.min, red.max, int(red.choose))
     n = len(obs)
+    # MC 组合数随 n 缩放：保证 z 的 MC 种子噪声 √(n/mc) ≤ 1/√RED_NULL_MC_PER_DRAW
+    # （见模块顶部常量注释；固定 mc 会在数据增长后误报「实质偏离」）。
+    mc_eff = int(min(RED_NULL_MC_MAX,
+                     max(int(mc), RED_NULL_MC_PER_DRAW * max(n, 1))))
+    null_vals = _mc_uniform_combos(red.min, red.max, int(red.choose),
+                                   mc=mc_eff, seed=seed)
+    null_f = _red_features(null_vals, red.min, red.max, int(red.choose))
     h = n // 2
     third = n // 3
     from scipy import stats as sps
@@ -236,6 +255,7 @@ def _red_shape_tests(lottery: str, *, mc: int, seed: int) -> List[Dict[str, Any]
             "检验": "形态z(MC均匀组合)",
             "特征": name,
             "n": n,
+            "MC组合数": mc_eff,
             "统计量": round(z, 4),
             "观测均值": round(om, 4),
             "零分布均值": round(nm, 4),
@@ -249,7 +269,8 @@ def _red_shape_tests(lottery: str, *, mc: int, seed: int) -> List[Dict[str, Any]
                      "同质": homogeneous},
             "近1/3段": {"n": third, "均值": round(m3, 4) if m3 == m3 else None,
                         "z": round(z3, 3) if z3 == z3 else None},
-            "明细": f"MC 组合数={mc}，null sd={nsd:.4f}",
+            "明细": (f"MC 组合数={mc_eff}（≥{RED_NULL_MC_PER_DRAW}×n，"
+                     f"z 的 MC 噪声≈{math.sqrt(n / mc_eff):.3f}），null sd={nsd:.4f}"),
         })
     return out
 
@@ -329,6 +350,14 @@ def structural_bias_report(lottery: str, *, B: int = MC_B_DEFAULT,
     else:
         note = "未发现任何实质结构偏离，全部检验与「均匀随机」相容。"
 
+    # 红球形态 z 的 MC 精度披露（与位级分支的「p 分辨率地板」对称）：
+    # 噪声 = √(n/mc)。mc 随 n 缩放后应 ≤ 0.05；一旦被 RED_NULL_MC_MAX 截顶或
+    # 有人调小 mc，这里会显式翻 False 说明本族判定可能被 MC 噪声污染。
+    _shape = [t for t in tests if t["族"].endswith("红球形态")]
+    _mc_red = _shape[0].get("MC组合数") if _shape else None
+    _z_noise = (round(math.sqrt(_shape[0]["n"] / _mc_red), 5)
+                if _shape and _mc_red else None)
+
     return {
         "lottery": lottery,
         "applicable": True,
@@ -366,6 +395,14 @@ def structural_bias_report(lottery: str, *, B: int = MC_B_DEFAULT,
             "族内最大检验数": m_max,
             "BH最严临界值": round(bh_crit_strictest, 10),
             "地板足够": bool(p_floor < bh_crit_strictest),
+            # —— 红球形态 z 的 MC 精度披露 ——
+            # z 的 MC 种子噪声 = √(n/mc)。mc 随 n 缩放（≥400×n）后噪声 ≤0.05，
+            # 远低于门槛 3.0 ⇒ 对判定无影响。被 RED_NULL_MC_MAX 截顶时会翻 False。
+            "红球形态MC规则": (f"MC 组合数 = max(mc, {RED_NULL_MC_PER_DRAW}×n)，"
+                               f"使 z 的 MC 噪声 ≤ "
+                               f"{1.0 / math.sqrt(RED_NULL_MC_PER_DRAW):.3f}"),
+            "形态z的MC噪声": _z_noise,
+            "形态z地板足够": bool(_z_noise is not None and _z_noise < 0.06),
         },
     }
 

@@ -8,6 +8,8 @@
   ④ **分段同质闸门**：人造分段断裂必须判「分段不一致」而**不是**「实质偏离」
   ⑤ 七星彩第 7 位只用现行段（与 A′ 轨整段切的口径**不同**，不能混）
   ⑥ `gap` 恒为 False（C 轨绝不单独判缝隙）
+  ⑦ 位级 MC p 的分辨率地板：披露 `1/(B+1)` 并保证低于 BH 最严临界值
+  ⑧ 红球形态 z 的 MC 精度闸门：MC 组合数随 n 缩放（≥400×n），噪声 ≤0.05
 """
 from __future__ import annotations
 
@@ -318,3 +320,33 @@ def test_p_floor_scales_with_B():
         floors.append(r["口径"]["p分辨率地板"])
         assert r["口径"]["p分辨率地板"] == pytest.approx(1.0 / (B + 1), rel=1e-6)
     assert floors[0] > floors[1] > floors[2], "B 越大地板应越低"
+
+
+# ------------------------------------------------- ⑧ 红球形态 z 的 MC 精度闸门
+#
+# 与位级分支的「p 分辨率地板」对称：红球形态的
+#   z = (观测均值 − MC零分布均值) / (null_sd/√n)
+# 中，MC 零分布均值**自身**有抽样误差 null_sd/√mc
+#   ⇒ **z 的种子噪声 = √(n/mc)**，随数据增长而固定 mc 时噪声上升。
+# 2026-10-11 实测：大乐透 n≈2928、mc=6e4 ⇒ 噪声 0.221，
+# 把真值 z≈2.88（解析期望口径）顶到 3.008，误报「连号对数」为实质偏离。
+# 修法：mc 随 n 缩放（≥400×n），并把噪声披露出来自检。
+
+def test_red_shape_mc_noise_is_bounded_and_scales_with_n(monkeypatch):
+    """MC 组合数必须 ≥400×n，且披露的 z 噪声 ≤0.05（即便调用方传了更小的 mc）。"""
+    reds = _reds_from_support(1, 33, 6, 1200, seed=7)
+    monkeypatch.setattr(GC, "load_draw_frame", lambda lot, **k: _frame(reds))
+    r = GC.structural_bias_report("双色球", B=200, mc=20_000)
+    k = r["口径"]
+    shape = [t for t in r["检验"] if t["族"].endswith("红球形态")]
+    assert shape, "应产生红球形态检验"
+    assert shape[0]["MC组合数"] >= GC.RED_NULL_MC_PER_DRAW * shape[0]["n"], \
+        "MC 组合数必须随 n 缩放，否则大样本下 z 被 MC 噪声推过门槛"
+    assert k["形态z的MC噪声"] is not None and k["形态z的MC噪声"] <= 0.05 + 1e-9
+    assert k["形态z地板足够"] is True
+
+
+def test_real_daloto_consecutive_pairs_is_not_flagged():
+    """真数据回归：大乐透「连号对数」z≈2.95 是临界噪声，**不是**实质偏离。"""
+    r = GC.structural_bias_report("大乐透", B=1000, mc=60_000)
+    assert "连号对数" not in {x["特征"] for x in r["实质偏离"]}, r["实质偏离"]

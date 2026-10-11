@@ -19,7 +19,9 @@ from typing import Any, Dict, Optional
 
 CACHE_DIR = Path(__file__).resolve().parents[2] / "cache" / "mechanism"
 
-_PROTOCOL = "v3"   # v2→v3：B 轨判定/z/γ 的标准误由「解析 se / 短块」改为长块 bootstrap，
+_PROTOCOL = "v4"   # v3→v4：C 轨红球形态的 MC 组合数改为随 n 缩放（≥400×n），
+#      z 的 MC 种子噪声由 ~0.22 降到 ≤0.05；大乐透「连号对数」由误报 3.008 回到真值 ~2.88。
+#      v2→v3：B 轨判定/z/γ 的标准误由「解析 se / 短块」改为长块 bootstrap，
 #      结果数值语义变（se、ci95 字段口径不同）；指纹另加入全部阈值参数（见 make_sig）。
 
 
