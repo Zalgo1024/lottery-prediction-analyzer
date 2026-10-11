@@ -339,14 +339,17 @@ def record_pending_prediction(lottery_name: str, prediction: dict):
     # 开奖后即可回答「这一注是哪一批出号算出来的」。调用方若已显式指定则保留。
     if not prediction.get("批次号"):
         prediction["批次号"] = _make_batch_id(lottery_name, prediction)
-    # —— 质量+重叠压缩（2026-09-14）：生产出号入账前裁掉低质量/高重复注 ——
+    # —— 质量+去重压缩（2026-09-14；2026-10-11 改为「出号数量 = 最终注数」）——
     # 训练样本（来源=train）保持全量，评估口径不受影响；失败不阻断入账。
     # 压缩 KPI 记进 prediction["压缩"]（压缩前注数/淘汰明细/诚实声明）。
+    # ★ 2026-10-11：把生成时刻的目标注数传下去——目标 ≥ 候选时**不削减**，
+    #   使看板滑轨值即最终出号注数（原 0.4 比例使滑轨 176 实际只出 64）。
     if prediction.get("来源") != "train" and prediction.get("预测号码"):
         try:
             from ev.coverage import compress_tickets
             _tickets = prediction["预测号码"]
-            _kept, _kpi = compress_tickets(_tickets, lottery_name)
+            _kept, _kpi = compress_tickets(_tickets, lottery_name,
+                                           target_count=prediction.get("目标注数"))
             if len(_kept) < len(_tickets):
                 prediction["预测号码"] = [_tickets[i] for i in _kept]
                 prediction["压缩"] = _kpi
@@ -1181,21 +1184,36 @@ def evaluate_pending_predictions(lottery_name: str) -> dict:
 
 
 def _last_compress_kpi(lottery_name: str) -> Optional[Dict[str, Any]]:
-    """取最近一次已评估批次的质量压缩 KPI（动态策略的冗余度信号源）。
+    """取**最近一批**的质量压缩 KPI（动态策略的冗余度信号源）。
 
-    来源优先级：反馈历史里的「压缩」KPI（若写入）→ 命中记录汇总的淘汰明细。
-    找不到返回 None（策略将维持现注数）。
+    来源优先级：该批次反馈记录里的「压缩」KPI → 由「压缩前注数」与批次规模推算。
+    最新批次**没有**压缩记录（未削减）→ 返回 None（策略维持现注数）。
+
+    ★ 2026-10-11：由「回溯最近 500 条找带压缩的记录」改为「只看最新批次」。
+      压缩已改为「出号数量 = 最终注数」，最新批不再削减；若继续回溯，会把
+      09-14~10-11 的历史压缩记录当作当前信号，触发「冗余低 → 每期 -1」，
+      把看板滑轨设定值一路往下调，与「以出号数量为准」矛盾。
     """
     history = load_feedback_history(lottery_name)
     if not history:
         return None
-    # 从最近记录里找带压缩明细的
-    for fb in reversed(history[-500:]):
+    recent = history[-500:]
+    last_batch = None
+    for fb in reversed(recent):
+        b = fb.get("批次号")
+        if b:
+            last_batch = b
+            break
+    if not last_batch:
+        return None
+    # 只看最新批次
+    batch_recs = [fb for fb in recent if fb.get("批次号") == last_batch]
+    for fb in batch_recs:
         k = fb.get("压缩")
         if isinstance(k, dict) and k.get("启用"):
             return k
     # 退化：由「压缩前注数」与批次规模推算出淘汰总量
-    for fb in reversed(history[-500:]):
+    for fb in batch_recs:
         before = fb.get("压缩前注数")
         if before:
             try:

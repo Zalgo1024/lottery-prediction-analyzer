@@ -53,7 +53,7 @@ def test_record_pending_syncs_group_count_after_compress(monkeypatch, fb_dir):
     from data.feedback import record_pending_prediction
     from pathlib import Path as _P
 
-    def fake_compress(tickets, lottery):
+    def fake_compress(tickets, lottery, **kwargs):
         return [0, 1, 2], {"压缩前注数": len(tickets), "压缩后注数": 3,
                            "质量淘汰": 0, "重复淘汰": 0, "重叠淘汰": 0,
                            "启用": True, "说明": "test"}

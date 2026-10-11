@@ -1074,15 +1074,22 @@ def run_auto_pipeline_core(lottery_name: str, params: dict, task_id: Optional[st
         # 没有这道闸门就会为同一目标期号写入多份 pending，污染后续反馈结算。
         from data.feedback import _next_issue, load_pending
         target_issue = _next_issue(lottery_name)
+        groups_eff = resolve_groups(lottery_name, params.get("groups"))
         existing = [p for p in load_pending(lottery_name) if p.get("目标期号") == target_issue]
-        if existing:
+        # ★ 2026-10-11：出号数量 = 最终注数 → 已有预测的组数须与当前出号数量**一致**
+        #   才复用；不一致（用户改了滑轨 / 历史 pending 口径不同）则按新数量重新生成，
+        #   覆盖旧 pending（同 (目标期号,档位) 去重，不叠加）。
+        if existing and len(existing[0].get("预测号码") or []) == groups_eff:
             predictions = (existing[0].get("预测号码") or [])
             pred_info = f"复用下一期 {target_issue} 已有预测 {len(predictions)}组"
             steps.append(f"跳过预测(下期{target_issue}已预测)")
         else:
+            if existing:
+                steps.append(f"重新生成(下期{target_issue}已有预测"
+                             f"{len(existing[0].get('预测号码') or [])}组 ≠ 出号数量{groups_eff})")
             pred = predict(
                 lottery_name=lottery_name,
-                groups=resolve_groups(lottery_name, params.get("groups")),
+                groups=groups_eff,
                 mode=params.get("mode", "fresh"),
             )
             path = save_prediction_record(pred)

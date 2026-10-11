@@ -11,6 +11,7 @@
   5. 测试只写 tmp 目录，绝不碰生产 feedback 目录。
 """
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -56,8 +57,10 @@ def _mk_pool(n=20, seed_base=1):
 # ------------------------------------------------------------
 
 def test_compress_actually_reduces_and_respects_target():
+    # ★ 2026-10-11：生产已改为「出号数量 = 最终注数」（不按比例削减），
+    #   故此处**显式**传 keep_ratio 来验证削减能力本身仍然存在。
     tickets = _mk_pool()
-    kept, kpi = compress_tickets(tickets, "双色球")
+    kept, kpi = compress_tickets(tickets, "双色球", keep_ratio=0.4)
     n = len(tickets)
     assert len(kept) <= -(-n * 2 // 5)  # ceil(n*0.4)
     assert kpi["压缩后注数"] == len(kept)
@@ -69,6 +72,31 @@ def test_compress_actually_reduces_and_respects_target():
             assert pair_overlap(keys[a], keys[b], "双色球") <= 4
     # 高分票优先保留：保留集合里的最低推荐分 ≥ 淘汰池的最高推荐分（近似单调）
     kept_scores = [tickets[i]["推荐分"] for i in kept]
+
+
+def test_compress_target_count_ge_pool_keeps_all():
+    """★ 2026-10-11「出号数量 = 最终注数」：target_count ≥ 候选数 → 不削减。
+
+    生产路径 record_pending_prediction 传 target_count=生成目标注数，
+    与候选数相等，走这条 —— 滑轨设 176 就真的入账 176 注。
+    """
+    tickets = _mk_pool(n=20)
+    kept, kpi = compress_tickets(tickets, "双色球", target_count=20)
+    assert kept == list(range(20))
+    assert kpi["压缩后注数"] == 20 and kpi["目标上限"] == 20
+    assert "不削减" in kpi["说明"]
+
+    kept2, _ = compress_tickets(tickets, "双色球", target_count=50)
+    assert len(kept2) == 20                        # 目标大于候选也不凭空造注
+
+
+def test_compress_target_count_selects_exact_count():
+    """target_count < 候选数 → 精选到该值（不足时回填），最终恰好等于目标。"""
+    tickets = _mk_pool(n=20)
+    kept, kpi = compress_tickets(tickets, "双色球", target_count=6)
+    assert len(kept) == 6
+    assert kpi["目标上限"] == 6
+    assert kpi["压缩后注数"] == 6
 
 
 def test_compress_prefers_high_score_and_dedups():
@@ -126,20 +154,52 @@ def test_compress_noop_for_digital_and_small_pools():
 # 2. 入账接入
 # ------------------------------------------------------------
 
-def test_record_pending_compresses_production_prediction(tmp_fb):
+def _safe_gen_time():
+    """当天 09:00 的生成时间。
+
+    ★ 2026-10-11：原用例不带「生成时间」，record_pending_prediction 会回落到
+    datetime.now()；而马后炮闸门对「推算开奖日 == 今天 且 生成时间 ≥ 20:00」直接
+    拒绝，导致本用例**只在 20:00 之前通过**（实测 21:00 复现）。固定为 09:00 消除
+    这个时间脆弱性，与业务语义无关。
+    """
+    return datetime.now().replace(hour=9, minute=0, second=0,
+                                  microsecond=0).isoformat()
+
+
+def test_record_pending_keeps_target_count(tmp_fb):
+    """★ 2026-10-11「出号数量 = 最终注数」：生产入账不再按比例削减。
+
+    历史行为：keep_ratio=0.4 使看板滑轨设 176 实际只入账 64 注，与看板文案
+    「每次出号几注，由你决定」矛盾。现在 record_pending_prediction 传
+    target_count = 生成时刻目标注数（与候选数相等）→ 不削减，原样入账。
+    """
     tickets = _mk_pool(n=20)
     # 目标期号取「真正的下一期」而不是硬编码——硬编码会在开奖后变成已开奖期号，
     # 被马后炮闸门拒绝（2026-09-21 实锤：硬编码 26109 在 09-20 开奖后即失效；
     # 此前它能通过是因为开奖日历把 09-20 误判休市、把推算开奖日推到 09-22）。
     rec = {"目标期号": fb._next_issue("双色球"), "来源": "predict", "档位": "一般",
+           "目标注数": 20, "生成时间": _safe_gen_time(),
            "预测号码": tickets}
     fb.record_pending_prediction("双色球", rec)
     pend = fb.load_pending("双色球")
     assert len(pend) == 1
     stored = pend[0]
-    assert len(stored["预测号码"]) < 20                     # 真正减注
+    assert len(stored["预测号码"]) == 20                     # 出号数量即最终注数
+    assert stored["批次规模"] == 20
+    assert stored["号码组数"] == 20
+
+
+def test_record_pending_selects_when_target_below_candidates(tmp_fb):
+    """目标注数 < 候选数 → 精选到目标（压缩能力保留，KPI 随身）。"""
+    tickets = _mk_pool(n=20)
+    rec = {"目标期号": fb._next_issue("双色球"), "来源": "predict", "档位": "一般",
+           "目标注数": 6, "生成时间": _safe_gen_time(),
+           "预测号码": tickets}
+    fb.record_pending_prediction("双色球", rec)
+    stored = fb.load_pending("双色球")[0]
+    assert len(stored["预测号码"]) == 6
     assert stored["压缩"]["压缩前注数"] == 20
-    assert stored["批次规模"] == len(stored["预测号码"])     # 批次规模=压缩后
+    assert stored["批次规模"] == 6
     assert stored["压缩"]["说明"]                           # 诚实声明随身
 
 

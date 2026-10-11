@@ -87,12 +87,27 @@ class AutoPipelineCoreTests(unittest.TestCase):
         self.record_run.assert_called_once()
 
     def test_skips_prediction_when_next_issue_already_pending(self):
-        """三条触发路径并发时，后到的必须复用已有 pending 而不是再写一份。"""
-        pending = [{"目标期号": 26104, "预测号码": [{"红球": [9]}] * 7}]
+        """三条触发路径并发时，后到的必须复用已有 pending 而不是再写一份。
+
+        ★ 2026-10-11「出号数量 = 最终注数」：复用的前提是组数与当前出号数量一致
+          （本次 groups=100），否则会按新数量重新生成。
+        """
+        pending = [{"目标期号": 26104, "预测号码": [{"红球": [9]}] * 100}]
         res = self._run(pending=pending)
         self.assertEqual(self.predict_calls, [])          # 没有重复出号
         self.assertTrue(any("跳过预测" in s for s in res["steps"]))
         self.assertIn("复用下一期", res["prediction"])
+
+    def test_regenerates_when_pending_count_mismatches_groups(self):
+        """★ 2026-10-11：已有 pending 的组数与当前出号数量不符 → 重新生成。
+
+        场景：用户在看板改了滑轨注数，旧的下一期预测组数与之不符，
+        必须按新数量重出（覆盖旧 pending），否则改了设置也不生效。
+        """
+        pending = [{"目标期号": 26104, "预测号码": [{"红球": [9]}] * 7}]
+        res = self._run(pending=pending)
+        self.assertEqual(self.predict_calls, [("大乐透", 100, "fresh")])
+        self.assertTrue(any("重新生成" in s for s in res["steps"]))
 
     def test_core_runs_without_task_id(self):
         """worker / 启动恢复调用时不传 task_id，不应因缺少任务记录而报错。"""

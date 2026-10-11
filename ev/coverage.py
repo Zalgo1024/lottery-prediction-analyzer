@@ -317,12 +317,20 @@ def compress_tickets(
     quality_factor: Optional[float] = None,
     min_keep: Optional[int] = None,
     cap: Optional[int] = None,
+    target_count: Optional[int] = None,
 ) -> Tuple[List[int], Dict[str, Any]]:
-    """按「推荐分降序 + 质量线 + 去重 + 低重叠 + 目标上限」压缩票面列表。
+    """按「推荐分降序 + 质量线 + 去重 + 低重叠 + 目标注数」压缩票面列表。
 
     与 `prune_predicted_sets` 的区别：那只剪违例、尽量保全（真实数据下近似
-    no-op）；本函数带**硬性目标注数上限**（keep_ratio×n）与**质量线**
-    （推荐分 < 中位数×quality_factor 直接淘汰），会真正减注。
+    no-op）；本函数带**硬性目标注数上限**与**质量线**（推荐分 < 中位数×
+    quality_factor 直接淘汰），可能真正减注。
+
+    ★ 2026-10-11「出号数量 = 最终注数」——`target_count`（可选）语义：
+      - `target_count >= len(tickets)`：**不削减**，原样返回（出号数量就是
+        最终注数，仅记录 KPI）。生产路径走这条（见 record_pending_prediction）。
+      - `target_count <  len(tickets)`：按分数+去重+低重叠精选 `target_count` 注，
+        不足时按分数回填（仍去重）到该值。
+      - 未给出时沿用 `keep_ratio` 口径（`TICKET_COMPRESS_KEEP_RATIO`）。
 
     诚实边界：减注省成本，单注中奖概率不变（期望线性性）；"质量"= 推荐分
     （策略权重学习产物），保留的是"历史表现好的策略留下的票"，不构成
@@ -348,6 +356,16 @@ def compress_tickets(
         noop_kpi["说明"] = "未压缩（总开关关闭 / 注数≤保底 / 数字型不压缩）"
         return list(range(n)), noop_kpi
 
+    # ★ 2026-10-11「出号数量 = 最终注数」：目标 ≥ 候选 → 不削减，原样返回。
+    #   （生产路径 record_pending_prediction 传 target_count=生成目标注数，
+    #     与本批候选数相等，走这条；仅记录 KPI，不改动号码集合。）
+    if target_count is not None and int(target_count) >= n:
+        kpi = dict(noop_kpi)
+        kpi["目标上限"] = int(target_count)
+        kpi["说明"] = (f"出号数量 {int(target_count)} ≥ 候选 {n} 注 → 不削减"
+                       f"（出号数量即最终注数）")
+        return list(range(n)), kpi
+
     dicts = [_as_dict(t) for t in tickets]
 
     def _score(d: Dict[str, Any]) -> float:
@@ -369,8 +387,11 @@ def compress_tickets(
     quality_ok = [i for i in order if scores[i] >= floor]
     n_quality = n - len(quality_ok)
 
-    # 2) 去重 + 3) 低重叠贪心 + 4) 目标上限（分数降序扫描，选满即停）
-    target = max(min_keep, math.ceil(n * keep_ratio))
+    # 2) 去重 + 3) 低重叠贪心 + 4) 目标注数（分数降序扫描，选满即停）
+    if target_count is not None:
+        target = max(1, int(target_count))
+    else:
+        target = max(min_keep, math.ceil(n * keep_ratio))
     kept: List[int] = []
     seen_keys: set = set()
     n_dup = n_overlap = 0
@@ -387,12 +408,15 @@ def compress_tickets(
         else:
             n_overlap += 1
 
-    # 5) 保底回填：不足 min_keep 时按分数从被淘汰者回填（不再管重叠，仍去重）
+    # 5) 回填：不足目标时按分数从被淘汰者回填（不再管重叠，仍去重）。
+    #    默认路径保底到 min_keep（原行为不变）；显式给出 target_count 时补足到
+    #    目标注数（出号数量 = 最终注数）。
+    backfill_to = target if target_count is not None else min_keep
     backfilled = 0
-    if len(kept) < min_keep:
+    if len(kept) < backfill_to:
         chosen = set(kept)
         for i in order:
-            if len(kept) >= min_keep:
+            if len(kept) >= backfill_to:
                 break
             if i in chosen or keys[i] in seen_keys:
                 continue

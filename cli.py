@@ -950,13 +950,19 @@ def _cmd_auto(args):
             # 智能跳过：下一期若已有 pending 预测则不重复生成
             target_issue = _next_issue(name)
             existing = [p for p in load_pending(name) if p.get('目标期号') == target_issue]
-            if existing:
-                print(f"[4/6] 下一期 {target_issue} 已有预测，跳过（避免重复 pending）")
+            # ★ 2026-10-11：出号数量 = 最终注数 → 组数不一致则按当前出号数量重新生成
+            if existing and len(existing[0].get('预测号码') or []) == groups_eff:
+                print(f"[4/6] 下一期 {target_issue} 已有预测且组数一致，跳过（避免重复 pending）")
                 steps.append(f"跳过预测(下期{target_issue}已预测)")
                 log_lines.append(f"[{name}] 跳过预测(下期{target_issue}已预测)")
-                predictions = (existing[0].get('预测号码') or [])[:groups_eff]
+                predictions = (existing[0].get('预测号码') or [])
                 pred_info = f"复用下一期 {target_issue} 已有预测 {len(predictions)}组"
             else:
+                if existing:
+                    _old_n = len(existing[0].get('预测号码') or [])
+                    print(f"[4/6] 下一期 {target_issue} 已有预测（{_old_n}组）≠ 出号数量 {groups_eff}，重新生成")
+                    steps.append(f"重新生成(下期{target_issue}组数{_old_n}≠{groups_eff})")
+                    log_lines.append(f"[{name}] 重新生成(下期{target_issue}组数{_old_n}≠{groups_eff})")
                 print(f"[4/6] 生成下一期预测 (mode={args.mode}, groups={groups_eff})...")
                 try:
                     pred = predict(

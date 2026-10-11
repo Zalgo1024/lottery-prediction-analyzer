@@ -131,7 +131,7 @@ def test_mechanism_fields_do_not_break_group_count_contract(monkeypatch, fb_dir)
     """★ 三个字段不得进「预测号码」⇒ 号码组数 == len(预测号码) 必须仍然成立。"""
     from data import feedback as fb
 
-    def fake_compress(tickets, lottery):
+    def fake_compress(tickets, lottery, **kwargs):
         return [0, 1], {"压缩前注数": len(tickets), "压缩后注数": 2,
                         "质量淘汰": 0, "重复淘汰": 0, "重叠淘汰": 0,
                         "启用": True, "说明": "test"}
