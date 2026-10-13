@@ -44,6 +44,71 @@ function _strategyBadge(name) {
     return '<strong>' + n + '</strong>';
 }
 
+// HTML 属性/文本转义（机制状态卡的错误信息与 tooltip 会带后端文案，必须转义）
+function _escAttr(s) {
+    return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/"/g, '&quot;')
+        .replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// 机制缝隙（四轨测量）状态卡 —— 战绩榜 / 命中历史共用。
+// 三种状态：未测量 / 未激活 / 已激活。文案纪律：
+//   · 不许把「未激活」写成「无缝隙」或「已证明公平」（那是不同断言）；
+//   · γ=0 必须写明「与基础策略逐位相同 ⇒ 无独立战绩样本」。
+function _mechanismCardHtml(m) {
+    const title = `${ico('microscope')} 机制缝隙（四轨测量）`;
+    const foot = `<p style="font-size:12px;color:var(--gray);margin-top:8px">`
+        + `本卡只读测量缓存、不触发新测量，也<strong>不计入战绩统计</strong>；`
+        + `完整四轨裁决见 <a href="/audit" style="color:var(--primary)">数据体检看板 ⑧</a>，`
+        + `最新数据可运行 <code>python cli.py gap</code>。</p>`;
+    if (!m || m.未测量) {
+        return `<div class="card" style="margin-top:15px"><h3>${title}</h3>`
+            + `<div class="alert alert-info">${_escAttr((m && m.提示) || '尚无测量缓存。')}</div>`
+            + `<p style="font-size:12px;color:var(--gray);margin-top:6px">${_escAttr((m && m.诚实说明) || '')}</p>`
+            + foot + `</div>`;
+    }
+    const s = m.快照 || {};
+    const t = m.机制倾斜 || {};
+    const active = !!t.倾斜;
+    const stColor = active ? '#2e7d32' : '#8a6d00';
+    const stBg = active ? '#e8f5e9' : '#fff8e1';
+    const stText = active ? '已激活' : '未激活';
+    const num = (v, d) => (v === null || v === undefined || v === '' || Number.isNaN(v)) ? '—' : Number(v).toFixed(d === undefined ? 4 : d);
+    const tracks = (s.判定轨 && s.判定轨.length) ? s.判定轨.join(' + ') : '无（该彩种结构上不可判定）';
+    const rows = [
+        ['裁决', s.裁决 || '—'],
+        ['判定轨', tracks],
+        ['R（注数比）', num(s.R)],
+        ['ū（冷门度分位）', num(s.ū)],
+        ['γ（原始测量值）', num(s.γ)],
+        ['γ 过显著门', s.γ显著 ? '是' : '否'],
+        ['γ 可倾斜（过红线）', num(s.γ_可倾斜)],
+        ['样本期数', (s.期数 === null || s.期数 === undefined) ? '—' : s.期数],
+        ['测量时间', (s.测量时间 || '—').replace('T', ' ').slice(0, 19)],
+    ];
+    let grid = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:8px 18px;font-size:13px">';
+    for (const [k, v] of rows) {
+        grid += `<div><span style="color:var(--gray)">${_escAttr(k)}：</span><strong>${_escAttr(v)}</strong></div>`;
+    }
+    grid += '</div>';
+    return `<div class="card" style="margin-top:15px"><h3>${title}`
+        + `<span style="display:inline-block;margin-left:8px;padding:2px 10px;border-radius:12px;font-size:12px;font-weight:700;background:${stBg};color:${stColor}">${stText}</span></h3>`
+        + grid
+        + `<p style="font-size:12px;color:var(--gray);margin-top:10px" title="${_escAttr(t.原因 || '')}">${_escAttr(m.说明 || t.说明 || '')}</p>`
+        + `<p style="font-size:12px;color:var(--gray);margin-top:4px">${_escAttr(m.来源 || s.来源 || '')}</p>`
+        + foot + `</div>`;
+}
+
+// 命中详情里的机制状态行（γ / 是否激活 / 测量时间）。记录没有机制字段（旧数据）⇒ 返回空。
+function _mechanismHitSpan(r) {
+    const tilt = r.机制倾斜;
+    if (!tilt) return '';
+    const active = !!tilt.倾斜;
+    const g = (r.机制γ === null || r.机制γ === undefined) ? '—' : Number(r.机制γ).toFixed(4);
+    const when = r.机制测量时间 ? ` · 测量于 ${String(r.机制测量时间).replace('T', ' ').slice(0, 16)}` : '';
+    return `<span title="${_escAttr(tilt.说明 || tilt.原因 || '')}">机制缝隙：<strong style="color:${active ? '#2e7d32' : '#8a6d00'}">${active ? '已激活' : '未激活'}</strong>（γ=${g}）${when}</span>`;
+}
+
 // 内联 SVG 图标库（不依赖系统 emoji 字体，任何环境都能渲染）
 // viewBox 统一 0 0 24 24；多数用 currentColor 描边以跟随文字色，红蓝圈固定颜色以区分奖球
 const ICO_SVG = {
@@ -2963,6 +3028,7 @@ async function loadHits() {
                         ${payDetail}
                         <span>分区命中：<strong>${hitParts}</strong></span>
                         <span>策略：<strong>${r.策略 || '-'}</strong></span>
+                        ${_mechanismHitSpan(r)}
                         <span>来源：<strong>${r.来源 || '-'}</strong></span>
                         <span>预测日期：<strong>${r.预测日期}</strong></span>
                         <span>开奖日期：<strong>${r.开奖日期}</strong></span>
@@ -3601,6 +3667,45 @@ function _fbRenderStratBarsById(strat, id) {
     el.innerHTML = h;
 }
 
+// 机制缝隙·前瞻对照实验卡（只读，来自 ev/trials 的 A/B 台账）
+//   A = 按「一等奖实得」排序（冷门偏好）；B = 同候选池随机（阴性对照）。
+//   唯一差异 = 有没有按冷门偏好排序 ⇒ 直接检验「机制假设的可利用面」在实盘有没有价值。
+//   ⚠️ 这是**实验批次**，不是生产策略；主终点是中奖率等价性（理论上应为 0，用于检出 bug）。
+function _mechanismTrialsCardHtml(tr) {
+    const title = `${ico('scales')} 机制缝隙·前瞻对照实验`;
+    if (!tr || tr.参与 === false) {
+        const why = (tr && tr.说明) || '该彩种不参与前瞻对照实验。';
+        return `<div class="card" style="margin-top:15px"><h3>${title}</h3>`
+            + `<div class="alert alert-info" style="font-size:12px">${_escAttr(why)}</div></div>`;
+    }
+    let rows = '';
+    for (const a of (tr.臂 || [])) {
+        const rate = (a.中奖率 === null || a.中奖率 === undefined) ? '—' : (a.中奖率 * 100).toFixed(2) + '%';
+        const amt = (a.实得合计 === null || a.实得合计 === undefined) ? '—' : '¥' + Number(a.实得合计).toFixed(0);
+        rows += `<tr><td><strong>${_escAttr(a.名 || '')}</strong></td>`
+            + `<td>${a.中奖注数 == null ? '—' : a.中奖注数}</td><td>${rate}</td><td>${amt}</td></tr>`;
+    }
+    const eff = (Array.isArray(tr.功效) && tr.功效.length)
+        ? `<p style="font-size:12px;color:var(--gray);margin-top:8px">功效规划：`
+          + tr.功效.map(x => `检出 ${_escAttr(x.相对效应 || '')} 差异需约 ${x.需要期数} 期（≈${x.折合年数} 年）`).join('；')
+          + `</p>` : '';
+    return `<div class="card" style="margin-top:15px"><h3>${title}</h3>`
+        + `<div class="alert alert-warning" style="font-size:12px;line-height:1.7">`
+        + `这是 <strong>ev/trials.py 的前瞻对照组</strong>（内部实验，<strong>非生产策略</strong>）：`
+        + `同一候选池、同一低重叠约束，<strong>唯一差异 = 有没有按「一等奖实得」排序</strong>。`
+        + `A 组 = 冷门偏好排序；B 组 = 同池随机（阴性对照）。`
+        + `主终点是「中奖率等价性」——理论上两组应当<strong>完全相等</strong>（选号不改变中奖概率），`
+        + `故出现显著差异即意味着实现有 bug；实得奖金差异需真实中一/二等奖事件，`
+        + `<strong>在人类时间尺度内不可完成</strong>，只作长期存档。`
+        + `</div>`
+        + `<p style="font-size:12px;color:var(--gray)">已结算 ${tr.已结算期数} 期 × 每组 ${tr.每组注数} 注`
+        + (tr.未开奖期数 ? `（另有 ${tr.未开奖期数} 期未开奖）` : '') + `</p>`
+        + (rows ? `<table><tr><th>实验臂</th><th>累计中奖注数</th><th>中奖率</th><th>累计实得</th></tr>${rows}</table>` : '')
+        + (tr.裁决 ? `<div class="alert ${tr.等价性成立 ? 'alert-info' : 'alert-warning'}" style="font-size:12px;margin-top:10px">${_escAttr(tr.裁决)}</div>` : '')
+        + eff
+        + `</div>`;
+}
+
 // ===== 策略战绩榜 =====
 async function loadRecords(lottery) {
     html('records-result', '<div class="spinner"></div> 加载战绩中...');
@@ -3640,6 +3745,27 @@ async function loadRecords(lottery) {
         htmlStr += `</table>`;
     }
     htmlStr += `</div>`;
+
+    // ===== 机制缝隙（四轨测量）状态卡 =====
+    // ⚠️ 只读缓存展示，**不进** strategies 聚合：γ=0 时它与基础策略逐位相同，
+    //    没有独立战绩样本，所以不能伪装成榜单里的一行（详见
+    //    docs/机制缝隙_策略层可见性设计.md）。
+    try {
+        const mech = await api(`/api/records/${encodeURIComponent(lottery)}/mechanism`);
+        htmlStr += _mechanismCardHtml(mech);
+    } catch (e) {
+        htmlStr += `<div class="card" style="margin-top:15px"><h3>${ico('microscope')} 机制缝隙（四轨测量）</h3>`
+            + `<div class="alert alert-warning">状态卡加载失败：${_escAttr(e.message || '未知错误')}</div></div>`;
+    }
+
+    // ===== 机制缝隙·前瞻对照实验（A/B，来自 ev/trials 台账）=====
+    try {
+        const tr = await api(`/api/records/${encodeURIComponent(lottery)}/trials`);
+        htmlStr += _mechanismTrialsCardHtml(tr);
+    } catch (e) {
+        htmlStr += `<div class="card" style="margin-top:15px"><h3>${ico('scales')} 机制缝隙·前瞻对照实验</h3>`
+            + `<div class="alert alert-warning">对照实验加载失败：${_escAttr(e.message || '未知错误')}</div></div>`;
+    }
 
     // ===== 回测战绩 =====
     const rl = data.rolling;

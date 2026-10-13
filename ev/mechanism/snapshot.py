@@ -20,7 +20,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-__all__ = ["mechanism_snapshot", "mechanism_snapshot_all", "LOTTERIES_FOR_SNAPSHOT"]
+__all__ = ["mechanism_snapshot", "mechanism_snapshot_all",
+           "mechanism_status_card", "LOTTERIES_FOR_SNAPSHOT"]
 
 from ev.mechanism.common import ALL_LOTTERIES          # noqa: E402
 
@@ -92,3 +93,52 @@ def mechanism_snapshot_all(lotteries=LOTTERIES_FOR_SNAPSHOT) -> Dict[str, Any]:
         "已测量数": len(out),
         "来源": "只读缓存（不触发新测量）",
     }
+
+
+def mechanism_status_card(lottery: str) -> Dict[str, Any]:
+    """
+    战绩榜 / 命中历史共用的「机制缝隙」**状态卡**数据（只读缓存，绝不触发新测量）。
+
+    ⚠️ 它是**状态卡，不是战绩行**：γ=0（不可折算或 CI 含 0）时出号与基础策略
+    逐位相同，没有独立战绩样本，所以调用方不得把它塞进 strategies 聚合。
+
+    三种状态（`状态` 字段）：
+      - `未测量`：无缓存 ⇒ 明写「尚未测量」，**不**用 0 / 空表粉饰成「无缝隙」；
+      - `未激活`：γ=0（不可折算或 CI 含 0）⇒ 与基础策略逐位相同，无独立样本；
+      - `已激活`：γ≠0 且过显著门 ⇒ 乘数 exp(-γ·z) 生效。
+
+    ★ 从快照取 γ 时必须一并传 `显著` 位：快照里的 γ 是**原始测量值**，
+      可能非零但 CI 含 0（双色球 γ=-0.0185 且显著=False）。只判 γ≠0 会绕过红线。
+    """
+    from ev.mechanism.gap_select import tilt_state        # noqa: PLC0415
+    from ev.mechanism.narrative import NO_SIGNAL_CAVEAT   # noqa: PLC0415
+
+    snap = mechanism_snapshot(lottery)
+    if snap is None:
+        return {
+            "彩种": lottery,
+            "未测量": True,
+            "状态": "未测量",
+            "提示": ("尚无测量缓存。运行 `python cli.py gap` 后本卡片即有数据"
+                     "（约十几秒，会写缓存）。"),
+            "诚实说明": ("「未测量」≠「无缝隙」也≠「已证明公平」——只是还没测。"
+                         "本卡片只读缓存、不触发测量，也不进战绩统计。"),
+        }
+
+    # ★ 原始 γ + 显著位交 tilt_state 过红线（不显著 ⇒ 与 γ=0 同处理）
+    tilt = tilt_state(lottery, gamma=snap.get("γ"),
+                      significant=snap.get("γ显著"))
+    card: Dict[str, Any] = {
+        "彩种": lottery,
+        "未测量": False,
+        "状态": "已激活" if tilt.get("倾斜") else "未激活",
+        "快照": snap,
+        "机制倾斜": tilt,
+        "来源": snap.get("来源"),
+    }
+    if tilt.get("倾斜"):
+        card["说明"] = tilt.get("说明")
+    else:
+        # 「未检出 / 不显著」类断言必须带功效从句（单一真源，勿手抄）
+        card["说明"] = (tilt.get("说明") or "") + NO_SIGNAL_CAVEAT
+    return card

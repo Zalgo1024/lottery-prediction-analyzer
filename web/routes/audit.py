@@ -206,39 +206,26 @@ def api_attribution_global():
 @validate_lottery
 def api_gap(lottery):
     """
-    单彩种机制缝隙快照（四轨测量）。
+    单彩种机制缝隙**状态卡**（四轨测量；与战绩榜/命中历史同一份口径）。
 
     ⚠️ **只读缓存，不触发测量**：一次完整测量约 17s，看板刷新不该付这个代价。
-    缓存缺失 ⇒ `未测量=True`，前端照实显示「尚未测量」并给出运行命令，
-    **不**用 0 或空表粉饰成「无缝隙」。
+    缓存缺失 ⇒ `未测量=True` + `状态="未测量"`，前端照实显示「尚未测量」并给出
+    运行命令，**不**用 0 或空表粉饰成「无缝隙」。
+
+    状态取值：`未测量` / `未激活`（γ=0，含不可折算与 CI 含 0 两种降级）
+    / `已激活`（γ≠0 且过显著门）。它是**状态卡不是战绩行**——γ=0 时出号与
+    基础策略逐位相同，没有独立战绩样本。
 
     ?refresh=1 才强制重算（显式、人工触发，用于「刚拉完新数据」）。
     """
-    from ev.mechanism.snapshot import mechanism_snapshot
+    from ev.mechanism.snapshot import mechanism_status_card
 
     if request.args.get("refresh", type=int) == 1:
         from ev.gap import measure
         measure(lottery, use_cache=False)
 
-    snap = mechanism_snapshot(lottery)
-    if snap is None:
-        return jsonify({
-            "彩种": lottery, "未测量": True,
-            "提示": "尚无测量缓存。运行 `python cli.py gap` 后本卡片即有数据。",
-            "诚实说明": ("「未测量」≠「无缝隙」也≠「已证明公平」——只是还没测。"),
-        })
-
-    from ev.mechanism.gap_select import tilt_state
-
-    return jsonify({
-        "彩种": lottery,
-        "未测量": False,
-        "快照": snap,
-        # ★ 传**原始 γ** + 显著位，由 tilt_state 统一过红线。
-        #   只传 γ_可倾斜 会让「不显著」与「不可折算」两种降级混成一句话。
-        "机制倾斜": tilt_state(lottery, gamma=snap.get("γ"),
-                              significant=snap.get("γ显著")),
-    })
+    # 与战绩榜/命中历史共用同一份状态卡口径（单一真源：未测量 wording、红线、从句）
+    return jsonify(mechanism_status_card(lottery))
 
 
 @bp.route("/api/audit/gap_global")
