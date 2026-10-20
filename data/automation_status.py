@@ -50,11 +50,37 @@ logger = logging.getLogger(__name__)
 STATUS_FILE = BASE_DIR / "logs" / "automation" / "status.json"
 MAX_HISTORY = 50      # 旋转历史窗口（30→50：保证周几彩种至少一次落窗内，
                        # 即便数字型每天 3-4 条也至少保 ~12 天回看）
+# history 里每条只保留前 N 组预测号码（2026-10-21 瘦身）：
+#   实测 status.json 涨到 2.45MB，50 条历史里双色球每条带全量 200 组预测（≈80KB），
+#   而 history 的预测号码**没有任何消费方**（看板只用 last_run / last_run_per_lottery，
+#   二者保留完整数据）。故 history 只留摘要，文件立刻回落到 ~200KB 量级，
+#   显著缩短冷启读盘与前端轮询开销。
+HISTORY_PREDICTIONS_KEEP = 6
 _MAIN_LOTTERIES = ("双色球", "大乐透")   # 看板简报主彩种（与前端 mainLotteries 对齐）
 
 # 保护 status.json 的并发读写：web 调度器可能在同一时刻触发多个彩种流水线，
 # 多个线程并发写同一个文件会导致 JSON 损坏（出现非法 utf-8 字节）。
 _status_lock = threading.Lock()
+
+
+def _compact_entry(entry: Dict) -> Dict:
+    """history 用的轻量副本：预测号码截断 + 记录总组数。
+
+    完整 `predictions` 只保留在 `last_run` / `last_run_per_lottery`（看板数据源）里。
+    **幂等**：对已压缩过的 entry 再调用一次不会把「预测组数」改小
+    （写入时会对整段 history 复跑一次迁移，非幂等会把 200 变成 6）。
+    """
+    out = dict(entry)
+    preds = out.get("predictions") or []
+    try:
+        prev_total = int(out.get("预测组数") or 0)
+    except (TypeError, ValueError):
+        prev_total = 0
+    out["预测组数"] = max(len(preds), prev_total)
+    if len(preds) > HISTORY_PREDICTIONS_KEEP:
+        out["predictions"] = preds[:HISTORY_PREDICTIONS_KEEP]
+        out["预测已截断"] = True
+    return out
 
 
 def _load() -> Dict:
@@ -148,8 +174,9 @@ def record_run(
 
         state["last_run"] = entry
         history = state.get("history", [])
-        history.insert(0, entry)
-        state["history"] = history[:MAX_HISTORY]
+        history.insert(0, _compact_entry(entry))
+        # 一次性迁移：把历史里已有的全量 predictions 一并压掉（旧文件才有）
+        state["history"] = [_compact_entry(h) for h in history[:MAX_HISTORY]]
 
         # 持久彩种级最近一次：不受 MAX_HISTORY 旋转淘汰，看板简报永远展示最近值
         per_lot = state.setdefault("last_run_per_lottery", {})
@@ -197,15 +224,15 @@ def get_status() -> Dict:
     state.setdefault("last_failed", None)
     state.setdefault("last_run_per_lottery", {})
 
-    # 优先取持久彩种级映射（不受 MAX_HISTORY 旋转影响），再用 history 覆盖更新条目
+    # 优先取持久彩种级映射（不受 MAX_HISTORY 旋转影响）：那里存的是**完整** entry。
+    # ★ 2026-10-21：history 里存的是截断副本（HISTORY_PREDICTIONS_KEEP）⇒ 只用来
+    #   兜底「映射里还没有该彩种」的老文件，绝不覆盖完整数据。
     by_lottery: Dict[str, dict] = dict(state.get("last_run_per_lottery", {}))
     for entry in state.get("history", []):
         lottery = entry.get("lottery")
-        if not lottery:
+        if not lottery or lottery in by_lottery:
             continue
-        cur = by_lottery.get(lottery)
-        if cur is None or entry.get("time", "") > cur.get("time", ""):
-            by_lottery[lottery] = entry
+        by_lottery[lottery] = entry
     # 双/大主彩种若仍无记录，从 state["last_run"] 兼容一次（最后兜底）
     if state.get("last_run"):
         lr_lot = state["last_run"].get("lottery")

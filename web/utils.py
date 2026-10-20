@@ -28,6 +28,82 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================
+# 生产 pending 写入开关（2026-10-18）
+# ============================================================
+# 背景（真实事故）：一次 `auto_batch` 验证出号带 `groups=5`（6 彩种 × 3 模式），
+# 把下一期生产 pending 全量覆盖成 5 注——滑轨配置 200/38/50/44 全部失效，
+# 且当日开奖期的旧批次已无法重建（马后炮闸门按设计拒绝）。
+# 约定：任何冒烟/验证出号都必须显式 `record_pending=False`（Web API / CLI 均支持），
+# 只算不落库；生产流水线不传该参数（默认 True，行为零变化）。
+
+def _record_pending(params: Optional[dict]) -> bool:
+    """解析 record_pending 参数（缺省 True = 保持既有生产行为）。
+
+    兼容 Web JSON 的字符串表达（"false"/"0"/"no"/"off"）。
+    """
+    v = params.get("record_pending", True) if isinstance(params, dict) else True
+    if isinstance(v, str):
+        return v.strip().lower() not in ("0", "false", "no", "off", "")
+    return bool(v)
+
+
+def groups_invariant(lottery_names: Optional[list] = None) -> dict:
+    """「出号数量（滑轨）== 下一期 pending 组数」一致性体检。
+
+    为什么这条值得单独做一个接口（2026-10-21）：
+      五次同类事故（10-09 / 10-11×2 / 10-18 / 10-21）的共同形态都是——机器在跑、
+      日志全绿、报表照长，但把用户设的 200/38/50/44 悄悄换成了 5 注，页面上没有
+      一个字提示。唯一的可靠判据就是这条等式。故做成**常驻徽章**：
+      不一致的那一刻就能看见，不用等开奖后翻战绩才发现号码变少了。
+
+    状态三态：
+      - "一致"     ：有下一期 pending 且组数 == 滑轨值
+      - "不一致"   ：有 pending 但组数对不上（正常瞬态只在刚改滑轨后出现，
+                     下一次流水线会重生成；若长期不变说明有旁路在覆盖）
+      - "无预测"   ：还没有下一期 pending（开奖刚结算完的短暂空窗，非错误）
+    返回 {"全部一致": bool, "不一致": [彩种...], "彩种": [逐条明细]}
+    """
+    from config import LOTTERY_CONFIG, resolve_groups
+    from data.feedback import _next_issue, load_pending
+
+    names = list(lottery_names) if lottery_names else list(LOTTERY_CONFIG)
+    rows: list = []
+    bad: list = []
+    for lot in names:
+        try:
+            slide = int(resolve_groups(lot))
+            target = _next_issue(lot)
+            pend = [p for p in load_pending(lot)
+                    if str(p.get("目标期号") or "") == str(target)]
+            if not pend:
+                rows.append({"彩种": lot, "滑轨": slide, "组数": 0,
+                             "目标期号": target, "状态": "无预测", "一致": None,
+                             "说明": "下一期还没有 pending（开奖后的正常空窗）"})
+                continue
+            p = pend[0]
+            actual = len(p.get("预测号码") or [])
+            ok = (actual == slide)
+            if not ok:
+                bad.append(lot)
+            rows.append({
+                "彩种": lot,
+                "滑轨": slide,
+                "组数": actual,
+                "申报组数": p.get("号码组数"),
+                "目标期号": target,
+                "档位": p.get("档位"),
+                "生成时间": str(p.get("生成时间") or p.get("预测日期") or "")[:19],
+                "状态": "一致" if ok else "不一致",
+                "一致": ok,
+                "说明": "" if ok else f"滑轨 {slide} ≠ 实际出号 {actual}",
+            })
+        except Exception as e:  # 单个彩种异常不拖垮整个体检
+            rows.append({"彩种": lot, "状态": "检查失败", "一致": None,
+                         "说明": str(e)[:120]})
+    return {"全部一致": not bad, "不一致": bad, "彩种": rows}
+
+
+# ============================================================
 # 通用分区视图（方向A：红蓝彩种 ↔ 数字型统一渲染结构）
 # 把任意彩种的「预测/实际/命中」归一化为 zones 列表：
 #   红球 -> cls="red"、蓝球 -> cls="blue"、其余(cls=None)由前端按调色板着色。
@@ -870,6 +946,8 @@ def run_predict_task(task_id: str, lottery_name: str, params: dict):
         lottery_name=lottery_name,
         groups=resolve_groups(lottery_name, params.get("groups")),
         mode=params.get("mode", "fresh"),
+        # 验证/试算出号：必须只算不落库，避免用任意 groups 覆盖生产 pending
+        record_pending=_record_pending(params),
     )
 
     update_task(task_id, progress=50, message="生成报告和图表...")
@@ -1075,6 +1153,14 @@ def run_auto_pipeline_core(lottery_name: str, params: dict, task_id: Optional[st
         from data.feedback import _next_issue, load_pending
         target_issue = _next_issue(lottery_name)
         groups_eff = resolve_groups(lottery_name, params.get("groups"))
+        # ★ 2026-10-18：显式注数 ≠ 看板滑轨时留痕（验证出号会覆盖生产 pending 的入口）
+        if params.get("groups") is not None:
+            _slide_groups = resolve_groups(lottery_name)
+            if int(groups_eff) != int(_slide_groups):
+                msg = (f"⚠️ {lottery_name} 显式出号注数 {groups_eff} ≠ 看板滑轨 {_slide_groups}："
+                       f"本次生成会覆盖下一期生产 pending；仅验证请传 record_pending=false")
+                logger.warning(msg)
+                steps.append(f"注数 {groups_eff} ≠ 滑轨 {_slide_groups}（显式指定）")
         existing = [p for p in load_pending(lottery_name) if p.get("目标期号") == target_issue]
         # ★ 2026-10-11：出号数量 = 最终注数 → 已有预测的组数须与当前出号数量**一致**
         #   才复用；不一致（用户改了滑轨 / 历史 pending 口径不同）则按新数量重新生成，
@@ -1091,11 +1177,15 @@ def run_auto_pipeline_core(lottery_name: str, params: dict, task_id: Optional[st
                 lottery_name=lottery_name,
                 groups=groups_eff,
                 mode=params.get("mode", "fresh"),
+                # 试算/验证可显式 record_pending=False（不写生产 pending）
+                record_pending=_record_pending(params),
             )
             path = save_prediction_record(pred)
             record_dir = str(path)
             predictions = pred.get("预测号码") or []
             pred_info = f"预测: {pred['预测日期']} {pred['号码组数']}组"
+            if not _record_pending(params):
+                pred_info += "（仅试算，未写 pending）"
             steps.append(f"{pred_info} ({pred['预测模式']})")
 
     # ③b 前瞻 A/B 对照实验（NetPayout WP3）
@@ -1266,6 +1356,8 @@ def start_auto_batch(lotteries, modes, params: dict) -> str:
         # None → 由 run_auto_pipeline_core 按每个彩种 resolve_groups() 解析
         "groups": params.get("groups"),
         "skip_predict": params.get("skip_predict", False),
+        # ★ 验证性批流水线必须显式 record_pending=False，否则会覆盖生产 pending
+        "record_pending": _record_pending(params),
     }
     task_id = create_task("auto_batch", batch_params)
     thread = threading.Thread(
@@ -1309,6 +1401,7 @@ def run_auto_batch_task(task_id: str, lotteries: list, modes: list, params: dict
                 "auto", {"lottery": lot, "mode": mode,
                          "groups": params.get("groups"),
                          "skip_predict": params.get("skip_predict", False),
+                         "record_pending": params.get("record_pending", True),
                          "parent_batch": task_id},
             )
             # 同步执行子任务（run_auto_task 自身会更新子任务进度，

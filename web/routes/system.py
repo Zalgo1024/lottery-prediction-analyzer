@@ -42,6 +42,23 @@ def system_status():
         return jsonify({"ok": False, "msg": str(e)}), 500
 
 
+@bp.route("/api/system/invariants")
+def system_invariants():
+    """「出号数量 == 下一期 pending 组数」一致性体检（看板常驻徽章数据源）。
+
+    2026-10-21：把这条等式做成接口，是因为五次覆盖事故的共同点都是**静默** ——
+    机器在跑、日志全绿，页面上看不出滑动注数被换成了 5。判据集中在一处，
+    看板与启动自愈（web/startup_recovery.ensure_pending_groups）共用同一份口径。
+    """
+    try:
+        from web.utils import groups_invariant
+        rep = groups_invariant()
+        rep["ok"] = True
+        return jsonify(rep)
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
+
 @bp.route("/api/system/restart", methods=["POST"])
 def system_restart():
     """触发重启：写入 restart_flag，由 run.py 看门狗接管实际重启。"""

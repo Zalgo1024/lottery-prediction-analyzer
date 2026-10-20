@@ -844,7 +844,10 @@ def push_recovery_summary(
         if not effective_ready(cfg):
             return None
         changed, errored = [], []
+        healed = results.get("_注数自愈") if isinstance(results, dict) else None
         for lot, r in (results or {}).items():
+            if str(lot).startswith("_"):
+                continue
             if not isinstance(r, dict):
                 continue
             if r.get("error"):
@@ -860,6 +863,13 @@ def push_recovery_summary(
             lines += changed[:HEALTH_MAX_ITEMS] + errored[:HEALTH_MAX_ITEMS]
         else:
             lines.append("- ✅ 无彩种滞后，一切已是最新")
+        # 结构性自愈（2026-10-21）：下一期 pending 组数 ≠ 出号数量（被覆盖 / 引擎少注）
+        if isinstance(healed, dict) and healed:
+            lines.append(f"- ⚠️ 已按滑轨重生成下一期预测：{len(healed)} 个彩种")
+            for lot, info in list(healed.items())[:HEALTH_MAX_ITEMS]:
+                if isinstance(info, dict):
+                    lines.append(f"  - **{lot}**：{info.get('原组数')} → {info.get('滑轨')} 注"
+                                 f"（{info.get('动作') or '重生成'}）")
         res = send("彩票助手｜启动自检", "\n".join(lines), cfg)
         _mark_pushed(cfg, res.get("ok", False), res.get("detail", ""))
         logger.info(f"启动自检推送: ok={res.get('ok')} ({res.get('detail', '')[:80]})")

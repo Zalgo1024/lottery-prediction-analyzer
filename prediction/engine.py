@@ -186,6 +186,97 @@ def _dedup_and_record(reds: List[int], blues: List[int], existing: set, cfg: dic
     return reds, blues, True
 
 
+def _ps_zone_key(ps) -> tuple:
+    """PredictSet 的分区指纹（用于「完全重复」判定，与号码顺序无关）。"""
+    return tuple(sorted((str(k), tuple(int(x) for x in (v or [])))
+                        for k, v in (getattr(ps, "zones", None) or {}).items()))
+
+
+def _pad_to_groups(predicted_sets, groups, schema, *, lottery_name: str,
+                   refill_pool=None, score_fn=None):
+    """把出号组数**硬性拉平**到 groups（少了补齐，多了截断）。返回 (列表, KPI)。
+
+    为什么必须有这道闸（2026-10-21 实测）：
+      生产复用条件是「pending 组数 == 当前出号数量」（web/utils.py），而出号数量
+      由**剪枝 / 相似去重 / 策略池饱和**共同决定——三者都可能让它少几注。
+      实测 `predict(双色球, groups=200)` 会稳定落在 **198**：三个策略都从 Top30
+      热门号里抽样、又要求两两红球重叠 ≤3，200 组时池子已经饱和，`_apply_prune`
+      的第 2 阶段扫完全表也凑不满。
+      后果不是"少 2 注"，而是**下一期预测被无声改写**：每轮流水线都判定
+      "198 ≠ 200" → 重新生成 → pending 号码换一套。用户上午看到和晚上看到的不同。
+
+    补齐来源（按优先级）：
+      1) `refill_pool`：本次被剪枝掉的票（按置信度降序回填，复用已有打分）；
+      2) 按 schema **均匀随机**补足（只在完全重复时重抽）。
+    诚实边界：均匀随机与任何"策略"对公平开奖的期望完全相同（EV 线性性），
+    补齐不引入虚假优选；被回填的票保留原策略标签，不污染权重学习归因。
+    """
+    if groups is None or groups <= 0:
+        return list(predicted_sets), {"回填剪枝票": 0, "随机补齐": 0, "截断": 0}
+
+    out = list(predicted_sets)
+    if len(out) > groups:
+        return out[:groups], {"回填剪枝票": 0, "随机补齐": 0, "截断": len(out) - groups}
+
+    seen = {_ps_zone_key(p) for p in out}
+    from_pool = 0
+    for ps in (refill_pool or []):
+        if len(out) >= groups:
+            break
+        k = _ps_zone_key(ps)
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(ps)
+        from_pool += 1
+
+    rand = 0
+    tries = 0
+    budget = max(int(groups) * 50, 500)
+    zones_def = list(getattr(schema, "zones", None) or [])
+    while len(out) < groups and tries < budget and zones_def:
+        tries += 1
+        zones = {}
+        feasible = True
+        for z in zones_def:
+            lo, hi = int(z.min), int(z.max)
+            n = max(1, int(getattr(z, "choose", 1) or 1))
+            if getattr(z, "repeatable", False):
+                picks = [random.randint(lo, hi) for _ in range(n)]
+            elif hi - lo + 1 >= n:
+                picks = random.sample(range(lo, hi + 1), n)
+            else:
+                feasible = False
+                break
+            zones[z.name] = sorted(picks) if not getattr(z, "ordered", False) else picks
+        if not feasible:
+            break
+        ps = PredictSet(zones=zones, strategy="随机补齐")
+        k = _ps_zone_key(ps)
+        if k in seen:
+            continue
+        seen.add(k)
+        if score_fn is not None:
+            try:
+                ps.confidence, ps.score_detail = score_fn(ps)
+            except Exception:  # 打分失败不阻塞出号
+                pass
+        out.append(ps)
+        rand += 1
+
+    if from_pool or rand:
+        logger.warning(
+            f"{lottery_name}: 出号未达目标 {groups} 组（策略池/剪枝饱和），已补齐 "
+            f"{from_pool + rand} 组（回填剪枝票 {from_pool} + 均匀随机 {rand}）"
+        )
+    if len(out) < groups:
+        logger.error(
+            f"{lottery_name}: 号码空间不足，仅能产出 {len(out)}/{groups} 组"
+            f"（该彩种可用组合少于请求注数，请下调 groups）"
+        )
+    return out, {"回填剪枝票": from_pool, "随机补齐": rand, "截断": 0}
+
+
 # ============================================================
 # 三种号码生成策略
 # ============================================================
@@ -1057,7 +1148,18 @@ def _predict_generic(lottery_name: str, data: LotteryData, cfg: dict, schema, gr
     predicted_sets.sort(key=lambda x: x.confidence, reverse=True)
 
     # 低重叠剪枝：裁掉互相高度相似的票 = 等效减注（不改变单注中奖概率，见 ev/coverage）
+    _pre_prune = list(predicted_sets)
     predicted_sets, _prune_kpi = _apply_prune(lottery_name, mode, predicted_sets)
+
+    # ★ 2026-10-21：出号数量 = 最终注数（同红/蓝路径，理由见 _pad_to_groups 文档）
+    predicted_sets, _pad_kpi = _pad_to_groups(
+        predicted_sets, groups, schema,
+        lottery_name=lottery_name,
+        refill_pool=_pre_prune,
+        score_fn=lambda ps: _compute_confidence_generic(
+            ps.zones, freqs, missing, data.total_records, historical_hit_rate, schema),
+    )
+    predicted_sets.sort(key=lambda x: x.confidence, reverse=True)
 
     # 目标期号与预测日期统一口径（同源推算，杜绝 (26103, 9/8) 式错对）
     from data.feedback import predict_target
@@ -1081,6 +1183,8 @@ def _predict_generic(lottery_name: str, data: LotteryData, cfg: dict, schema, gr
         result["训练参考"] = {"模型类型": "statistical", "最优窗口": trained_window}
     if _prune_kpi is not None:
         result["剪枝统计"] = _prune_kpi
+    if any(int((_pad_kpi or {}).get(k) or 0) for k in ("回填剪枝票", "随机补齐", "截断")):
+        result["补齐统计"] = _pad_kpi
     if record_pending:
         try:
             record_pending_prediction(lottery_name, result)
@@ -1523,14 +1627,33 @@ def predict(
             ps.strategy = strategy_names[round_robin_idx % len(strategies)]
             predicted_sets.append(ps)
         round_robin_idx += 1
-        if round_robin_idx > groups * 3:
+        # 预算 = max(groups*3, 300)：大 groups 时策略池饱和得快，预算太小会提前放弃，
+        # 全部落到 _pad_to_groups 的随机补齐（能出号，但策略归因变弱）。
+        if round_robin_idx > max(groups * 3, 300):
             break
 
     # 按置信度排序
     predicted_sets.sort(key=lambda x: x.confidence, reverse=True)
 
     # 低重叠剪枝：裁掉互相高度相似的票 = 等效减注（不改变单注中奖概率，见 ev/coverage）
+    _pre_prune = list(predicted_sets)
     predicted_sets, _prune_kpi = _apply_prune(lottery_name, mode, predicted_sets)
+
+    # ★ 2026-10-21：出号数量 = 最终注数。剪枝/去重/策略池饱和可能让组数少几注
+    #   （实测双色球 groups=200 会落在 198），而「pending 组数 == 出号数量」是生产
+    #   复用的唯一判据 ⇒ 少注会让每轮流水线重生成、无声改写下一期号码。此处强制拉平。
+    predicted_sets, _pad_kpi = _pad_to_groups(
+        predicted_sets, groups, schema,
+        lottery_name=lottery_name,
+        refill_pool=_pre_prune,
+        score_fn=lambda ps: _compute_confidence_v2(
+            ps.reds, ps.blues,
+            freqs["红球"]["freq"], freqs["蓝球"]["freq"],
+            missing["红球"], missing["蓝球"],
+            data.total_records, historical_hit_rate,
+        ),
+    )
+    predicted_sets.sort(key=lambda x: x.confidence, reverse=True)
 
     # 预测日期（与目标期号同源推算，统一口径）
     from data.feedback import predict_target
@@ -1550,8 +1673,15 @@ def predict(
         "历史命中率(近50期)": round(historical_hit_rate, 4),
         "生成时间": datetime.now().isoformat(),
     }
+    # ★ 2026-10-21：红/蓝路径此前**没写** `目标注数` ⇒ `record_pending_prediction`
+    #   调 compress_tickets(target_count=None) 会退回 keep_ratio 口径并在
+    #   "质量线 + 重叠" 处真减注（回填只保底 min_keep）⇒ pending 组数 < 滑轨，
+    #   复用判据永不成立。数字型路径（_predict_generic）一直有写，这里补齐。
+    result["目标注数"] = groups
     if _prune_kpi is not None:
         result["剪枝统计"] = _prune_kpi
+    if any(int((_pad_kpi or {}).get(k) or 0) for k in ("回填剪枝票", "随机补齐", "截断")):
+        result["补齐统计"] = _pad_kpi
 
     # 预填目标期号，供落库与闭环评估使用（record_pending_prediction 会复用此值）
     result["目标期号"] = _tgt_issue

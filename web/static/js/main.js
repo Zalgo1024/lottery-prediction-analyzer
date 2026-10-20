@@ -624,6 +624,40 @@ function _renderOneLotteryStatus(lottery, record) {
     return htmlStr;
 }
 
+// ★ 2026-10-21：出号数量一致性徽章。
+// 事故形态（已复发 5 次）：机器在跑、日志全绿、报表照长，但滑轨 200/38/50/44
+// 被悄悄换成 5 注，页面上没有一个字提示。唯一可靠判据是这条等式：
+// 「滑轨设定值 == 下一期 pending 实际组数」。故常驻显示，不一致立刻变红。
+async function loadInvariants() {
+    const el = $('invariant-badge');
+    if (!el) return;
+    let d;
+    try {
+        d = await api('/api/system/invariants');
+    } catch (e) {
+        return; // 静默降级：体检失败绝不能干扰看板
+    }
+    const lots = (d && d.彩种) || [];
+    if (!lots.length) { el.innerHTML = ''; return; }
+
+    const bad = lots.filter(x => x.状态 === '不一致');
+    const pendingless = lots.filter(x => x.状态 === '无预测' || x.状态 === '检查失败');
+    const tip = lots.map(x => {
+        const actual = (x.状态 === '无预测') ? '无预测' : (x.组数 + ' 注');
+        return `${x.彩种}：滑轨 ${x.滑轨 == null ? '-' : x.滑轨} / 实际 ${actual}`;
+    }).join('；');
+
+    const base = 'padding:2px 10px;border-radius:10px;font-size:12px;margin-left:6px;cursor:help';
+    if (bad.length) {
+        const detail = bad.map(x => `${x.彩种} ${x.组数}/${x.滑轨}`).join('、');
+        el.innerHTML = `<span style="${base};background:#fdeaea;color:#c62828" title="${_escAttr(tip)}">注数不一致 ${bad.length} 个（${_escAttr(detail)}）</span>`;
+    } else if (pendingless.length) {
+        el.innerHTML = `<span style="${base};background:#f2f3f5;color:#5f6b7a" title="${_escAttr(tip)}">注数一致（${pendingless.length} 个暂无下期预测）</span>`;
+    } else {
+        el.innerHTML = `<span style="${base};background:#e6f4e6;color:#2e7d32" title="${_escAttr(tip)}">注数一致 ${lots.length}/${lots.length}</span>`;
+    }
+}
+
 async function loadAutomationStatus() {
     const el = $('auto-status-content');
     if (!el) return;
@@ -643,6 +677,9 @@ async function loadAutomationStatus() {
 
     // 看板顶部「今日简报」主动通知
     _renderAutoBrief(data);
+
+    // 出号数量一致性徽章（独立请求，失败静默）
+    loadInvariants();
 
     // 失败告警徽标（综合全部彩种）
     // 失败告警徽标：以「最近一次事件是不是失败」为准。
@@ -1118,9 +1155,17 @@ function runAutoPipeline(opts) {
     if (btnAllB) btnAllB.disabled = true;
     html('auto-result', '<div class="spinner"></div> 流水线执行中...');
 
+    // ★ 2026-10-21：**不要写死 groups=5**。显式 5 注会覆盖下一期生产 pending，
+    //   使滑轨（200/38/50/44）静默失效——10-09 / 10-11 / 10-18 / 10-21 已复发 4 次。
+    //   缺省不传 groups ⇒ 后端按「出号数量」滑轨解析（与调度器同一口径：fresh + 滑轨）。
+    //   多模式同时跑属诊断（fresh/rule/trained 写同一个 pending 会互相覆盖）⇒ 只算不落库。
+    const _multiMode = (modes === '__all__') || (Array.isArray(modes) && modes.length > 1);
     api('/api/auto', {
         method: 'POST',
-        body: JSON.stringify({ lottery, modes, mode, skip_predict: skipPredict, groups: 5 })
+        body: JSON.stringify({
+            lottery, modes, mode, skip_predict: skipPredict,
+            record_pending: !_multiMode
+        })
     }).then(data => {
         autoTaskId = data.task_id;
         pollAutoStatus();
@@ -1950,17 +1995,49 @@ async function viewRollingReport(recordDir) {
 let predictTaskId = null;
 let predictPollTimer = null;
 
-function doPredict() {
+// 出号数量（滑轨）缓存：{彩种: 当前生效注数}
+let _slideCache = null;
+async function _slideGroups(lottery) {
+    if (!_slideCache) {
+        try {
+            const d = await api('/api/settings/ticket-size');
+            _slideCache = {};
+            (d.lotteries || []).forEach(x => { _slideCache[x.lottery] = x.当前生效; });
+        } catch (e) {
+            return null;
+        }
+    }
+    return (_slideCache[lottery] == null) ? null : _slideCache[lottery];
+}
+
+// ★ 2026-10-21：这个页面曾是「5 注覆盖生产 pending」的活温床 ——
+//   组数下拉默认写死 5、后端 record_pending 默认 true，点一次"生成预测"
+//   就把滑轨 200/38/50/44 换成 5 注（10-09/10-11×2/10-18/10-21 共 5 次）。
+//   现在：① 缺省走滑轨（groups=null）；② 显式注数 ≠ 滑轨时强制只算不落库。
+async function doPredict() {
     const lottery = $('pred-lottery').value;
-    const groups = parseInt($('pred-groups').value) || 5;
+    const rawGroups = $('pred-groups') ? $('pred-groups').value : '';
+    const groups = (rawGroups === '' || rawGroups == null) ? null : parseInt(rawGroups, 10);
     const mode = $('pred-mode').value;
+    const recordBox = $('pred-record');
+
+    let record = recordBox ? !!recordBox.checked : false;
+    let note = '';
+    if (groups != null) {
+        const slide = await _slideGroups(lottery);
+        if (slide != null && groups !== slide) {
+            record = false;
+            note = `（${groups} 组 ≠ 滑轨 ${slide}：本次仅试算，不写生产 pending）`;
+        }
+    }
+    if (recordBox && !record) recordBox.checked = false;
 
     hide('pred-result');
-    html('pred-loading', '<div class="spinner"></div> 生成预测中...');
+    html('pred-loading', `<div class="spinner"></div> 生成预测中...${note ? ' ' + note : ''}`);
 
     api('/api/predict', {
         method: 'POST',
-        body: JSON.stringify({ lottery, groups, mode })
+        body: JSON.stringify({ lottery, groups, mode, record_pending: record })
     }).then(data => {
         predictTaskId = data.task_id;
         pollPredictStatus();

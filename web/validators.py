@@ -34,10 +34,16 @@ def validate_predict_body(f):
     """装饰器：校验 predict POST 请求体参数"""
     @wraps(f)
     def wrapper(*args, **kwargs):
+        from config import PREDICT_DEFAULTS
         data = request.get_json(silent=True) or {}
-        groups = data.get("groups", 5)
-        if not isinstance(groups, int) or not (1 <= groups <= 10):
-            return jsonify({"error": f"号码组数需在1-10之间: {groups}"}), 400
+        # groups 缺省 / null → 交给 resolve_groups 按「出号数量」滑轨解析。
+        # ★ 2026-10-21：原校验限死 1..10 且把 null 判成非法——它既挡住了滑轨
+        #   解析（null 直接 400），又暗示"手工填 5 注"是正常用法，是 5 注覆盖事故的温床。
+        groups = data.get("groups")
+        if groups is not None:
+            upper = int(PREDICT_DEFAULTS.get("max_groups", 200))
+            if isinstance(groups, bool) or not isinstance(groups, int) or not (1 <= groups <= upper):
+                return jsonify({"error": f"号码组数需在 1-{upper} 之间（留空则按出号数量滑轨）: {groups}"}), 400
         mode = data.get("mode", "fresh")
         if mode not in ("fresh", "trained", "rule", "high_freq", "missing", "balanced"):
             return jsonify({"error": f"不支持的预测模式: {mode}"}), 400

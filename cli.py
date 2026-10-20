@@ -86,6 +86,11 @@ def main():
         action="store_true",
         help="跳过自动异常检测步骤（默认会跑 4 法异常检测并告警）",
     )
+    auto_parser.add_argument(
+        "--no-record",
+        action="store_true",
+        help="只算不落库：本次出号不写生产 pending（冒烟/验证专用，避免覆盖下一期生产预测）",
+    )
 
     # ----- lag -----
     lag_parser = subparsers.add_parser("lag", help="检查各彩种数据滞后天数（白天兜底用：按最近应开奖日 vs 数据最新日期）")
@@ -230,6 +235,11 @@ def main():
         type=int,
         default=None,
         help="输出号码组数（留空则按「出号数量」配置：固定/动态，见看板滑轨；显式给出则覆盖）",
+    )
+    pred_parser.add_argument(
+        "--no-record",
+        action="store_true",
+        help="只算不落库：不写生产 pending（冒烟/验证专用；robust 模式同样生效）",
     )
     pred_parser.add_argument(
         "--mode",
@@ -964,11 +974,14 @@ def _cmd_auto(args):
                     steps.append(f"重新生成(下期{target_issue}组数{_old_n}≠{groups_eff})")
                     log_lines.append(f"[{name}] 重新生成(下期{target_issue}组数{_old_n}≠{groups_eff})")
                 print(f"[4/6] 生成下一期预测 (mode={args.mode}, groups={groups_eff})...")
+                if args.no_record:
+                    print("[4/6] --no-record：仅试算，不写生产 pending")
                 try:
                     pred = predict(
                         lottery_name=name,
                         groups=groups_eff,
                         mode=args.mode,
+                        record_pending=not args.no_record,
                     )
                     path = save_prediction_record(pred)
                     predictions = (pred.get('预测号码') or [])[:groups_eff]
@@ -1380,7 +1393,10 @@ def _cmd_predict(args):
         lottery_name=args.lottery,
         groups=resolve_groups(args.lottery, args.groups),
         mode=args.mode,
+        record_pending=not getattr(args, "no_record", False),
     )
+    if getattr(args, "no_record", False):
+        print("提示：--no-record 已启用，本次结果不会写入生产 pending（仅试算）")
 
     path = save_prediction_record(result)
 
@@ -1449,12 +1465,14 @@ def _cmd_predict_robust(args):
     from prediction.reporter import save_prediction_record
 
     windows = tuple(int(x) for x in str(args.windows).split(",") if x.strip())
+    _no_record = getattr(args, "no_record", False)
     results = predict_tiered(
         lottery_name=args.lottery,
         groups=args.groups or 50,
         tier=args.tier,
         windows=windows,
         seeds=args.seeds,
+        record_pending=not _no_record,
     )
 
     print(f"\n===== {args.lottery} 三档鲁棒出号（tier={args.tier}） =====")
@@ -1466,7 +1484,10 @@ def _cmd_predict_robust(args):
         result = results
         _print_tier_result(result.get("档位", ""), result)
         save_prediction_record(result)
-    print("\n三档均已写入 pending（开奖后各档独立结算；策略权重学习仅由一般档驱动）")
+    if _no_record:
+        print("\n--no-record 已启用：三档结果均未写入 pending（仅试算）")
+    else:
+        print("\n三档均已写入 pending（开奖后各档独立结算；策略权重学习仅由一般档驱动）")
 
 
 def _cmd_robustness(args):

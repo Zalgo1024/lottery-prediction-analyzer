@@ -17,6 +17,37 @@ from web.utils import get_data_status
 
 logger = logging.getLogger(__name__)
 
+# ------------------------------------------------------------
+# 单飞与去重（2026-10-21）
+# ------------------------------------------------------------
+# 事故背景：冷启时三条路径几乎同时开火 —— 启动恢复的 recover_lottery、
+# 紧接着的 ensure_pipelines_fresh、以及 worker 的「数据变更」事件触发。
+# 实测同一轮冷启对双色球触发 2 次流水线、七星彩 3 次：重复抓取、重复出号、
+# 重复写自动化简报（status.json 里能看到同时刻两条几乎相同的记录）。
+#
+# 这次加两道闸：
+#   1) _startup_lock/_started —— 整个进程生命周期内启动恢复只跑一次；
+#   2) _triggered —— 同一轮恢复里每个彩种最多触发一次流水线（跨函数共享）。
+_startup_lock = threading.Lock()
+_started = False
+_pass_lock = threading.Lock()
+_triggered: set = set()
+
+
+def _reset_trigger_registry() -> None:
+    """开始新一轮启动恢复前清空「本轮已触发」集合。"""
+    with _pass_lock:
+        _triggered.clear()
+
+
+def _claim_trigger(lottery_name: str) -> bool:
+    """抢占某彩种本轮的流水线触发权；已抢过则返回 False（调用方应跳过）。"""
+    with _pass_lock:
+        if lottery_name in _triggered:
+            return False
+        _triggered.add(lottery_name)
+        return True
+
 
 def _needs_recovery(lottery_name: str, status: dict, now: Optional[datetime] = None) -> bool:
     """判断该彩种是否需要启动时补数据。now 可注入（测试不得依赖真实时钟）。"""
@@ -76,6 +107,9 @@ def _trigger_pipeline_if_needed(lottery_name: str):
     """
     if _is_daily(lottery_name):
         return
+    if not _claim_trigger(lottery_name):
+        logger.info(f"启动恢复：{lottery_name} 本轮已触发过流水线，跳过重复触发")
+        return
     try:
         from config import resolve_groups
         from web.utils import start_auto_pipeline
@@ -85,6 +119,9 @@ def _trigger_pipeline_if_needed(lottery_name: str):
         )
         logger.info(f"启动恢复：{lottery_name} 触发完整流水线补齐下一期预测 (task={tid})")
     except Exception as e:
+        # 触发失败要归还触发权，否则本轮再没有机会补
+        with _pass_lock:
+            _triggered.discard(lottery_name)
         logger.warning(f"启动恢复触发流水线失败 {lottery_name}: {e}")
 
 
@@ -167,6 +204,55 @@ def ensure_pipelines_fresh() -> dict:
     return triggered
 
 
+def ensure_pending_groups() -> dict:
+    """启动时核对「下一期 pending 组数 == 当前出号数量」，不一致或缺失就补跑流水线。
+
+    为什么这条比补数据更重要（2026-10-21 事故）：
+      看板「一键自动化」曾把 `groups:5` 写死发给后端，把 6 彩种的生产 pending
+      从 200/38/50/44 覆盖成 5 注——**机器照跑、日志全绿、报表照长**，页面上没有
+      一个字提示。这类失真的唯一可靠判据是「滑轨 == 实际组数」。
+      而 `_needs_recovery` 只看数据滞后：数据新鲜时启动恢复什么都不做，
+      错误的 pending 会原样留存到当天 22:05 之后。故这里做一次**结构自愈**。
+
+    返回 {彩种: {"滑轨", "原组数", "目标期号", "动作"}}（仅列出需要处理的彩种）。
+    """
+    from config import resolve_groups
+    from data.feedback import _next_issue, load_pending
+    from web.utils import start_auto_pipeline
+
+    fixed: dict = {}
+    for lottery_name in LOTTERY_CONFIG:
+        try:
+            slide = int(resolve_groups(lottery_name))
+            next_issue = _next_issue(lottery_name)
+            pend = [p for p in load_pending(lottery_name)
+                    if str(p.get("目标期号") or "") == str(next_issue)]
+            if pend:
+                actual = len(pend[0].get("预测号码") or [])
+                if actual == slide:
+                    continue
+                reason = f"组数 {actual} ≠ 滑轨 {slide}"
+            else:
+                reason = "下一期无 pending"
+            if not _claim_trigger(lottery_name):
+                logger.info(f"启动自愈：{lottery_name} 本轮已有流水线任务，交由它修复（{reason}）")
+                continue
+            tid = start_auto_pipeline(
+                lottery_name,
+                {"mode": "fresh", "groups": slide, "skip_predict": False},
+            )
+            logger.warning(f"启动自愈：{lottery_name} {reason} → 已触发流水线重生成 (task={tid})")
+            fixed[lottery_name] = {
+                "滑轨": slide,
+                "原组数": actual if pend else 0,
+                "目标期号": next_issue,
+                "动作": "重新生成下一期预测",
+            }
+        except Exception as e:
+            logger.warning(f"启动自愈检查失败 {lottery_name}: {e}")
+    return fixed
+
+
 def recover_all_lotteries(force: bool = False) -> dict:
     """遍历所有彩种，补滞后数据并评估反馈。返回汇总结果。"""
     results = {}
@@ -186,17 +272,35 @@ def recover_all_lotteries(force: bool = False) -> dict:
 
 
 def run_startup_recovery():
-    """在后台线程运行启动恢复，避免阻塞 Flask 启动。"""
+    """在后台线程运行启动恢复，避免阻塞 Flask 启动。
+
+    单飞：整个进程只跑一次。run.py 看门狗热重启会拉起新进程 ⇒ 自然重置。
+    """
+    global _started
+    with _startup_lock:
+        if _started:
+            logger.info("启动恢复已在进行或已完成，跳过重复启动")
+            return None
+        _started = True
+
     def _run():
         # 稍微等待，让 scheduler 和缓存预热先启动
         import time
         time.sleep(2)
+        _reset_trigger_registry()
         results = recover_all_lotteries(force=False)
         # 再兜一层：数据已同步但流水线没跑过（简报停在旧期）→ 补跑
         try:
             ensure_pipelines_fresh()
         except Exception as e:
             logger.warning(f"启动检查简报新鲜度异常: {e}")
+        # 结构自愈：下一期 pending 组数 ≠ 出号数量（被覆盖/引擎少注）→ 重生成
+        try:
+            fixed = ensure_pending_groups()
+            if fixed:
+                results["_注数自愈"] = fixed
+        except Exception as e:
+            logger.warning(f"启动检查注数一致性异常: {e}")
         # 启动自检推送（2026-09-18）：补数据结果推一次；未启用/失败一律降级。
         try:
             from data.push_notify import push_recovery_summary

@@ -2,7 +2,7 @@
 
 > **带严格统计检验的时间序列分析框架（彩票作为示例场景）**
 
-![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB) ![Tests](https://img.shields.io/badge/pytest-851%20passed-3B6D11) ![Lotteries](https://img.shields.io/badge/%E5%BD%A9%E7%A7%8D-6-854F0B) ![License](https://img.shields.io/badge/License-AGPL--3.0-blue)
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB) ![Tests](https://img.shields.io/badge/pytest-915%20passed-3B6D11) ![Lotteries](https://img.shields.io/badge/%E5%BD%A9%E7%A7%8D-6-854F0B) ![License](https://img.shields.io/badge/License-AGPL--3.0-blue)
 
 **为什么用彩票做示例场景？** 开奖数据足够纯——无协变量、无趋势、大样本、完全随机。这是检验一套时序分析方法"是否真有预测力"的最严苛测试场：任何看似有效的策略都要在这里接受检验。本框架的价值不在于"预测中了多少"，而在于**给出可复现的检验结论**。
 
@@ -16,8 +16,9 @@
 
 - 📊 **6 彩种数据管道**：双色球/大乐透/排列5/福彩3D/排列3/七星彩——500.com 抓取、清洗、完整性体检、外部逐期核对
 - 🖥️ **Web 看板（14 页面）+ CLI 双入口**：统计/训练/预测/命中历史/期望时机/数据体检看板
-- 🎯 **预测-评估闭环**：多策略出号（每期 100 组）→ 开奖自动评估命中/奖级（含单注奖金）→ 策略权重自适应
+- 🎯 **预测-评估闭环**：按滑轨注数出号（看板可调；默认数字型 5 / 乐透型 100）→ 开奖自动评估命中/奖级（含单注奖金）→ 策略权重自适应
 - ⚖️ **数据体检看板**：开奖质量监控、EV 看板（限号/撞号修正）、P/L 反馈、鲁棒性三档
+- 🔬 **机制缝隙测量**（`ev/mechanism/`）：四轨量「开奖是否偏离等可能」——只给效应量/CI/判定，写死「未检出 ≠ 已证明公平」，见下文
 - 📈 **期望时机**：Rollover-EV 分析——奖池滚存是本场景中唯一的真实数学杠杆
 - 🤖 **自动流水线**：三路触发（调度/事件/自愈）全程无人值守，见下文「自动化」
 
@@ -38,7 +39,7 @@ python run.py                # 看门狗模式，访问 http://127.0.0.1:5000
 # 3. 或者只用 CLI
 python cli.py --help
 
-# 4. 跑测试套件（全量 851 例）
+# 4. 跑测试套件（全量 915 例）
 pytest -q
 ```
 
@@ -73,6 +74,9 @@ pytest -q
 ├── ev/                      # 结构性边建模：rulebook/crowd/rollover/kelly/bankroll
 │   │                          + total_ev（三口径 EV 对照）/ threshold（奖池参与门槛）
 │   │                          + stake（Kelly 纪律仓位）/ popularity（冷热门流行度）
+│   ├── mechanism/           # 机制缝隙四轨测量（A 注数比 / A′ 数字型 / B 开出号分位 / C 结构 / D 派奖期）
+│   │                          + gap_select（倾斜红线：γ 不显著 ⇒ 恒等映射）/ snapshot（只读缓存 + 状态卡）
+│   └── trials.py            # 前瞻 A/B 对照（A=按实得排序 vs B=同池随机，等价性检验）
 ├── combo/                   # 覆盖设计（保底地板）+ 共形预测（K 注保证）
 │
 ├── web/                     # Flask 看板
@@ -85,7 +89,7 @@ pytest -q
 │   └── utils.py             # run_auto_pipeline_core（三路流水线统一入口）
 │
 ├── scripts/                 # 运维工具（体检/审计/修复/回归，见下文）
-├── tests/                   # pytest 测试套件（842 例；另有 9 例在 scripts/ 下）
+├── tests/                   # pytest 测试套件（881 例；另有 9 例在 scripts/ 下）
 ├── logs/logger.py           # 分级日志模块（运行时依赖，入 git）
 │
 ├── lottery_data/            # ★ 历史开奖数据（入 git 做备份，见「数据文件详解」）
@@ -172,6 +176,36 @@ python scripts/scan_data_integrity.py    # 缺期/号码越界/空值/重复期�
 python scripts/verify_draws_vs_source.py # 与 500.com 逐期外部核对
 python scripts/audit_records.py          # 命中记录审计（命中/奖级 vs 真实开奖）
 python scripts/repair_records.py         # 记录修复（默认 dry-run，--apply 自动备份）
+```
+
+---
+
+## 机制缝隙测量（`ev/mechanism/`）
+
+> **测的是"开奖是否偏离等可能"，不是"能不能预测号码"。**
+
+四条轨里只有 **A / A′**（一等奖注数比 R，免票量口径、模型无关）与 **B**（真实开出号流行度分位均值 ū）
+参与判定；**C**（结构偏差）与 **D**（派奖期）只作诊断。产出只有**效应量、CI 与判定**，
+并写死一条纪律：**「未检出 ≠ 已证明公平」**。
+
+| 彩种 | 判定轨 | 测量结果（2026-10-18 快照） | 裁决 |
+|---|---|---|---|
+| 双色球 | A/B | R=0.99391 [0.9640,1.0252]、ū=0.50135 [0.4908,0.5121]、γ=−0.0185（CI 含 0） | 未检出 |
+| 大乐透 | A/B | R=0.97591 [0.9416,1.0108]、ū=0.49581 | 未检出（B 轨模型未过 Go，功效低） |
+| 排列5 / 七星彩 | A′ | R=1.03052 / 0.99115 | 未检出 |
+| 排列3 / 福彩3D | 无 | 销售额覆盖全部玩法，Σ注数/Σ(N·p) 量的是投注结构占比 | 无判定轨（结构上不可判定，非"测过没测到"） |
+
+- **选号倾斜红线**：`ev/gap.py::mechanism_gamma` 只在 γ 通过显著门时才允许倾斜；当前各彩种 γ 均未过门
+  ⇒ 倾斜**未激活 = 恒等映射**（进出号逐位一致）。
+- **2026-10-13 实测附带结论**：`ev/selection` 的排序键（一等奖实得）与机制打分是同一流行度维度的严格单调函数
+  （2 万候选上 Spearman ρ=−1.000000）⇒ 乘 `exp(-γ·ss)` 不改变排序，**倾斜即使显著也不改变选出的号**；
+  因此前瞻对照改由 `ev/trials`（A=按实得排序 vs B=同池随机）承担，战绩页 `/records` 有「状态卡 + 前瞻对照」区块。
+- 缓存与自检：结果落 `cache/mechanism/`（指纹含阈值，改 `--min-effect/--min-train/--step` 自动重算）；
+  B 轨 walk-forward 的 `n_leak` 自检为 0；看板 `/audit` 第 ⑧ 卡与 `/api/audit/gap/<彩种>` 只读缓存、不触发测量。
+
+```bash
+python cli.py gap all --out output/机制缝隙测量报告_四轨.md   # 六彩种一次出报告
+python cli.py gap 双色球 --no-cache                          # 强制重算（约 15~30s/彩种）
 ```
 
 ---
@@ -290,7 +324,11 @@ POST /api/settings/push-notify/test     # 发一条测试消息（未配置返�
 | `predict 彩种 --mode fresh` | 预测（fresh/high_freq/missing/balanced/trained/rule） |
 | `anomaly 彩种 --threshold all` | 异常检测（strict/normal/loose 三档对比） |
 | `rolling 彩种` | 滚动回测（含三策略泛化评估） |
+| `gap [彩种|all] --out PATH` | **机制缝隙四轨测量**（A/A′ 注数比 R、开出号分位 ū、γ、裁决），`--no-cache` 强制重算 |
 | `history / logs` | 历史记录 / 日志摘要 |
+
+> ⚠️ 冒烟/验证出号请加 `--no-record`（`predict`/`auto` 均支持）：只算不落库，**不覆盖**生产 pending。
+> 同理 Web API `/api/auto`、`/api/predict` 支持 `{"record_pending": false}`。
 
 ---
 
@@ -304,9 +342,9 @@ POST /api/settings/push-notify/test     # 发一条测试消息（未配置返�
 | 训练工作台 / 滚动训练 | `/train` `/rolling` | 模型训练与滚动回测 |
 | 号码预测 | `/predict` | 多策略出号 |
 | 命中历史 | `/hits` | 中奖记录 + **单注奖金**（固定奖级官方金额，浮动奖级读当期实际值）+ **「第 X 批 · 第 Y 注」标注**（可看出这条中奖号码是当时第几次出号、该批第几注） |
-| 策略战绩 | `/records` | 各策略胜率/盈亏 |
+| 策略战绩 | `/records` | 各策略胜率/盈亏 + **机制缝隙状态卡与前瞻对照实验区块** |
 | 期望时机 | `/ev` | EV 序列 + 当期购买建议（Rollover 信号） |
-| 数据体检看板 | `/audit` | 开奖质量 + EV 看板 + P/L 反馈 |
+| 数据体检看板 | `/audit` | 开奖质量 + EV 看板 + P/L 反馈 + **第 ⑧ 卡：机制缝隙四轨测量**（未测量/未检出/已激活三态，绝不写"已证明公平"） |
 | 鲁棒性 | `/robustness` | 三档判定卡片 + 趋势图 |
 
 ---
@@ -314,8 +352,8 @@ POST /api/settings/push-notify/test     # 发一条测试消息（未配置返�
 ## 测试
 
 ```bash
-pytest -q              # 851 passed（全量；含奖金表 33 例、写保护/分区归一化回归、撞号度量与中奖归因、批次契约、出号数量固定/动态、消息推送：图片渲染/发送节流/降级/全入口接线、随机锚点走前验证与持续训练循环、休市日历与真实开奖数据一致性、三口径 EV 对照/冷门口径 rollover/奖池门槛/Kelly 纪律仓位/限号前置与组合方差指标、策略历史实测命中统计（归一/过滤/基线/样本不足）、休市期全链路感知（看板滞后/下一期 + 调度器排班 + 启动自愈 + cli lag + 体检脚本 + 销量模型前瞻 + 休市提示条）、机制缝隙四轨测量（A/A′注数比、开出号分位、结构偏差、派奖期）+ 缝隙内选号与反馈闭环、叙事解绑文案扫描）
-pytest tests/          # 842 passed（仅 tests/ 目录；另有 9 例在 scripts/ 下，故用 pytest -q 跑全量）
+pytest -q              # 915 passed（全量；含奖金表 33 例、写保护/分区归一化回归、撞号度量与中奖归因、批次契约、出号数量固定/动态、消息推送：图片渲染/发送节流/降级/全入口接线、随机锚点走前验证与持续训练循环、休市日历与真实开奖数据一致性、三口径 EV 对照/冷门口径 rollover/奖池门槛/Kelly 纪律仓位/限号前置与组合方差指标、策略历史实测命中统计（归一/过滤/基线/样本不足）、休市期全链路感知（看板滞后/下一期 + 调度器排班 + 启动自愈 + cli lag + 体检脚本 + 销量模型前瞻 + 休市提示条）、机制缝隙四轨测量（A/A′注数比、开出号分位、结构偏差、派奖期）+ 缝隙内选号与反馈闭环、机制缝隙策略层可见性与前瞻对照、叙事解绑文案扫描、生产 pending 防覆盖（record_pending 开关）、出号数量硬性拉平与注数一致性体检/启动自愈）
+pytest tests/          # 906 passed（仅 tests/ 目录；另有 9 例在 scripts/ 下，故用 pytest -q 跑全量）
 ```
 
 ## 备份
@@ -333,6 +371,9 @@ git bundle create E:/backups/707_<日期>.bundle --all   # git 全量备份
 ## 许可证
 
 本项目基于 [AGPL-3.0](LICENSE)（GNU Affero 通用公共许可证 v3.0）发布。
+
+> **仓库现状**：源码仓库当前为**私有（未公开发布）**，因此"以 AGPL-3.0 许可"指的是许可条款本身；
+> 是否公开托管与分发由作者决定。如需引用，请直接联系作者。
 
 - 任何基于本项目的修改版/衍生作品，**若作为网络服务提供**，也必须以 AGPL-3.0 开源其完整源代码（含修改部分）——这是 AGPL 区别于 GPL 的核心条款（第 13 条）。
 - 仅限个人本地学习研究使用不受影响。

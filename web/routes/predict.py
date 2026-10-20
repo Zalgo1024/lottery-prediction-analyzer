@@ -21,7 +21,12 @@ def api_predict():
     groups = data.get("groups")
     mode = data.get("mode", "fresh")
 
-    task_id = start_predict(lottery, {"groups": groups, "mode": mode})
+    task_id = start_predict(lottery, {
+        "groups": groups,
+        "mode": mode,
+        # ★ 验证/试算：{"record_pending": false} 只算不落库（默认 true=生产行为）
+        "record_pending": data.get("record_pending", True),
+    })
     return jsonify({"task_id": task_id})
 
 

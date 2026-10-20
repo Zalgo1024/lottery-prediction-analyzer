@@ -12,11 +12,20 @@
       <div class="form-group">
         <label>号码组数</label>
         <select id="pred-groups">
+          <option value="" selected>按出号数量（滑轨，推荐）</option>
           <option value="1">1 组</option>
           <option value="3">3 组</option>
-          <option value="5" selected>5 组（推荐）</option>
+          <option value="5">5 组</option>
           <option value="10">10 组</option>
         </select>
+        <div style="font-size:11px;color:var(--gray);margin-top:2px">显式注数 ≠ 滑轨时只会试算，不写生产 pending</div>
+      </div>
+      <div class="form-group">
+        <label>写入生产 pending</label>
+        <label style="font-size:13px;color:var(--gray);display:flex;align-items:center;gap:6px">
+          <input type="checkbox" id="pred-record" checked>
+          记账（覆盖下一期出号）
+        </label>
       </div>
       <div class="form-group">
         <label>预测模式</label>

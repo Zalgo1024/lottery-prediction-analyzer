@@ -105,3 +105,55 @@ def test_corrupted_file_returns_default(tmp_path):
     state = A._load()
     assert state["last_run"] is None
     assert state["last_run_per_lottery"] == {}
+
+def test_history_predictions_are_compacted(tmp_path):
+    """- 2026-10-21 瘦身：history 只留前 N 组号码，完整数据留在 last_run。
+
+    事故：status.json 涨到 2.45MB —— 50 条历史里双色球每条带全量 200 组预测
+    （≈80KB/条），而 history 的预测号码没有任何消费方（看板只用
+    last_run / last_run_per_lottery）。截断 history 后文件回落到 ~1/4。
+    """
+    f = Path(tmp_path / "status.json")
+    preds = [{"红球": [1, 2, 3, 4, 5, i % 33 + 1], "蓝球": [1], "策略": "高频策略"}
+             for i in range(200)]
+    A.record_run("双色球", True, "ok", predictions=preds)
+    state = json.loads(f.read_text(encoding="utf-8"))
+
+    hist = state["history"][0]
+    assert hist["预测组数"] == 200
+    assert len(hist["predictions"]) == A.HISTORY_PREDICTIONS_KEEP
+    assert hist["预测已截断"] is True
+    # 完整数据必须还在（看板数据源）
+    assert len(state["last_run"]["predictions"]) == 200
+    assert len(state["last_run_per_lottery"]["双色球"]["predictions"]) == 200
+
+
+def test_get_status_prefers_full_per_lottery_entry(tmp_path):
+    """- 历史里的截断副本绝不能覆盖持久映射里的完整 entry。"""
+    preds = [{"红球": [1, 2, 3, 4, 5, i % 33 + 1], "蓝球": [1]} for i in range(30)]
+    A.record_run("大乐透", True, "ok", predictions=preds)
+    status = A.get_status()
+    got = status["last_run_by_lottery"]["大乐透"]
+    assert len(got["predictions"]) == 30, "被 history 的截断副本覆盖了完整数据"
+
+
+def test_legacy_history_is_compacted_on_next_write(tmp_path):
+    """- 一次性迁移：旧文件里已有的全量 predictions 会在下次写入时被压掉。"""
+    f = Path(tmp_path / "status.json")
+    big = [{"红球": [1, 2, 3, 4, 5, 6], "蓝球": [1]} for _ in range(80)]
+    f.write_text(json.dumps({
+        "last_run": None, "history": [
+            {"time": "2026-08-01T22:00:00", "lottery": "双色球", "success": True,
+             "message": "old", "steps": [], "duration_sec": 1,
+             "predictions": big, "draw_numbers": {}, "hit_summary": "",
+             "hit_records": [], "anomaly_flags": [], "retrain": None},
+        ],
+        "failed_count": 0, "last_success": None, "last_failed": None,
+        "last_run_per_lottery": {},
+    }, ensure_ascii=False), encoding="utf-8")
+
+    A.record_run("七星彩", True, "ok", predictions=[])
+    state = json.loads(f.read_text(encoding="utf-8"))
+    old = [h for h in state["history"] if h["lottery"] == "双色球"][0]
+    assert len(old["predictions"]) == A.HISTORY_PREDICTIONS_KEEP
+    assert old["预测组数"] == 80

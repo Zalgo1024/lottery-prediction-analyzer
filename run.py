@@ -85,9 +85,16 @@ def spawn_child(port):
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
     logf.write(f"\n===== flask spawned at {ts} (PID will be set) =====\n")
     logf.flush()
+    # ★ 2026-10-21：子进程 stdout 必须强制 UTF-8。
+    #   以前没设 → 子进程按 Windows 本地代码页（cp936/GBK）把中文写进上面这个
+    #   UTF-8 文件，flask_stdout.log 就变成整片乱码（"锟斤拷"），排查只能靠猜。
+    child_env = os.environ.copy()
+    child_env["PYTHONUTF8"] = "1"
+    child_env["PYTHONIOENCODING"] = "utf-8"
     child = subprocess.Popen(
         [sys.executable, "web/app.py", "--port", str(port)],
         cwd=BASE_DIR,
+        env=child_env,
         stdout=logf,
         stderr=subprocess.STDOUT,
         # 新建进程组，便于用 taskkill /T 一次杀掉整棵树

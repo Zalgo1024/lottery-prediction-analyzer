@@ -10,6 +10,19 @@ import os
 # 确保项目根目录在 Python 路径中
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# ★ 2026-10-21：stdout/stderr 一律 UTF-8。
+#   本进程的输出通常被 run.py 重定向进 logs/flask_stdout.log（以 UTF-8 打开）。
+#   Windows 下 Python 默认按本地代码页（cp936）写 fd 1 ⇒ 中文变乱码、emoji 直接
+#   抛 UnicodeEncodeError（日志里表现为半截堆栈）。这里显式改 UTF-8 并容错降级，
+#   不再依赖启动器是否传了 PYTHONIOENCODING。
+for _stream_name in ("stdout", "stderr"):
+    _stream = getattr(sys, _stream_name, None)
+    if _stream is not None and hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
 from flask import Flask, send_from_directory, request
 from pathlib import Path
 

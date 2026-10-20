@@ -148,6 +148,9 @@ def api_auto():
         "mode": data.get("mode", "fresh"),
         # None → 由 resolve_groups 按「出号数量配置(固定/动态)」解析
         "groups": data.get("groups"),
+        # ★ 验证/试算出号：传 false 只算不落库，绝不覆盖生产 pending
+        #   （默认 true = 生产行为不变；对应 web/utils.py::_record_pending）
+        "record_pending": data.get("record_pending", True),
     }
     is_batch = (lottery == "__all__") or (isinstance(modes, (list, str)) and (modes == "__all__" or modes == ["__all__"]))
     if is_batch:
