@@ -7,3 +7,6 @@ optuna>=3.6.2
 lightgbm>=3.3.5
 chinese_calendar>=1.8.0
 flask>=3.0
+# 测试本身是交付物的一部分（900+ 例），不是可选工具 —— 所以放主依赖而不是 dev 依赖，
+# 这样 requirements.lock.txt 能一起锁住，CI 装完 lock 就能直接跑。
+pytest>=7.4

@@ -1,0 +1,53 @@
+# requirements.lock.txt —— 可复现环境（由 scripts/sync_lock.py 生成，勿手改）
+#
+# 生成机器：DESKTOP-MSG9JRB   Python 3.10.11
+# 顶层来源：requirements.txt（10 个直接依赖）
+# 内容：顶层包 + 其传递依赖的精确版本（共 42 个）
+#
+# 复现：pip install -r requirements.lock.txt
+# 升级：改 requirements.txt → 重跑 scripts/sync_lock.py → 跑全量测试 → 一起提交
+#
+# ⚠️ 上游声明但本机未安装（未入锁，相关可选功能不可用）：alembic
+
+blinker==1.9.0
+chinese-calendar==1.11.0
+click==8.1.8
+colorama==0.4.6
+colorlog==6.9.0
+contourpy==1.3.1
+cycler==0.12.1
+exceptiongroup==1.3.0
+flask==3.0.0
+fonttools==4.57.0
+greenlet==3.1.1
+iniconfig==2.1.0
+itsdangerous==2.2.0
+jinja2==3.1.6
+joblib==1.4.2
+kiwisolver==1.4.8
+lightgbm==3.3.5
+markupsafe==3.0.2
+matplotlib==3.10.1
+numpy==1.24.3
+optuna==3.6.2
+packaging==24.2
+pandas==2.2.3
+pillow==10.0.0
+pluggy==1.6.0
+pygments==2.19.1
+pyparsing==3.2.3
+pytest==8.4.1
+python-dateutil==2.9.0.post0
+pytz==2025.2
+pyyaml==6.0.2
+scikit-learn==1.6.1
+scipy==1.15.2
+six==1.17.0
+sqlalchemy==2.0.38
+threadpoolctl==3.7.0
+tomli==2.2.1
+tqdm==4.67.1
+typing-extensions==4.16.0
+tzdata==2025.2
+werkzeug==3.0.6
+wheel==0.45.1

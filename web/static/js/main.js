@@ -658,6 +658,32 @@ async function loadInvariants() {
     }
 }
 
+// ★ 2026-10-21：离线体检摘要（近 7 天）。
+// 为什么要有消费方：`scripts/health_check.py` 写得很完整却长期零调用，
+// 只能靠人手动叫醒 —— 接口没人读，就是下一个孤儿脚本。
+async function loadDigestBrief() {
+    const el = $('digest-brief');
+    if (!el) return;
+    let d;
+    try {
+        d = await api('/api/system/digest?days=7');
+    } catch (e) {
+        return; // 静默降级：体检失败绝不能干扰看板
+    }
+    const pl = (d && d.流水线) || {};
+    const probs = (d && d.问题) || [];
+    const note = pl.计数可能偏少 ? '（日志窗口已满，计数可能偏少）' : '';
+    const base = 'padding:2px 10px;border-radius:10px;font-size:12px;margin-left:6px;cursor:help';
+    const tint = probs.length
+        ? ';background:#fdeaea;color:#c62828'
+        : ';background:#eef2f6;color:#5f6b7a';
+    const text = `近 7 天：流水线 ${pl.总次数 || 0} 次 · 失败 ${pl.失败 || 0} · 待处理 ${probs.length} 项`;
+    const tip = probs.length
+        ? probs.map(p => `${p.彩种}：${p.项} — ${p.详情}`).join('；')
+        : '近 7 天未发现异常' + note;
+    el.innerHTML = `<span style="${base}${tint}" title="${_escAttr(tip)}">${_escAttr(text)}</span>`;
+}
+
 async function loadAutomationStatus() {
     const el = $('auto-status-content');
     if (!el) return;
@@ -680,6 +706,9 @@ async function loadAutomationStatus() {
 
     // 出号数量一致性徽章（独立请求，失败静默）
     loadInvariants();
+    // 离线体检摘要（近 7 天）—— 与「离线体检」推送同源，
+    // 不加这块的话 /api/system/digest 就没有任何消费方，等于下一个没人叫的 health_check。
+    loadDigestBrief();
 
     // 失败告警徽标（综合全部彩种）
     // 失败告警徽标：以「最近一次事件是不是失败」为准。

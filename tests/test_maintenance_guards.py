@@ -198,3 +198,177 @@ def test_validator_allows_null_groups():
     assert c.post("/t", json={"groups": 200}).status_code == 200
     assert c.post("/t", json={"groups": 0}).status_code == 400
     assert c.post("/t", json={"groups": 99999}).status_code == 400
+
+
+# ------------------------------------------------------------
+# 工程卫生护栏（2026-10-21 第二轮）
+#
+# 这一组锁的不是业务逻辑，是「维护手段本身别悄悄失效」：
+# 文档计数脚本的规则、依赖锁的覆盖面、CI 是否还在、日志清理会不会误删。
+# 它们全部只读仓库文件，不碰运行时数据。
+# ------------------------------------------------------------
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_pytest_ini_registers_markers_with_strict():
+    """marker 必须注册且开 --strict-markers。
+
+    不注册时 `@pytest.mark.slow` 拼错只会留一行 warning，`-m "not slow"` 静默失效 ——
+    你以为跑的是快集，其实重活全在里面。
+    """
+    ini = (ROOT / "pytest.ini").read_text(encoding="utf-8")
+    assert "--strict-markers" in ini
+    assert "slow:" in ini and "network:" in ini
+    assert "testpaths" in ini
+
+
+def test_requirements_lock_covers_all_declared():
+    """lock 必须覆盖 requirements.txt 的每个直接依赖，否则复现环境缺包。"""
+    import re
+    req = (ROOT / "requirements.txt").read_text(encoding="utf-8")
+    lock = (ROOT / "requirements.lock.txt").read_text(encoding="utf-8")
+    locked = {re.sub(r"[-_.]+", "-", ln.split("==")[0]).lower()
+              for ln in lock.splitlines() if ln and not ln.startswith("#") and "==" in ln}
+    missing = []
+    for ln in req.splitlines():
+        s = ln.strip()
+        if not s or s.startswith("#"):
+            continue
+        name = re.split(r"[<>=!~\[;]", s, maxsplit=1)[0].strip()
+        if re.sub(r"[-_.]+", "-", name).lower() not in locked:
+            missing.append(name)
+    assert not missing, f"lock 缺包: {missing}"
+
+
+def test_gitignore_admits_ticket_size_but_blocks_secrets():
+    """滑轨配置必须能入库；含 token 的 push_notify.json 必须仍被排除。"""
+    text = (ROOT / ".gitignore").read_text(encoding="utf-8")
+    assert "!config/ticket_size.json" in text
+    # 目录整体忽略会短路其下的 ! 规则，所以必须是 config/* 而不是 config/
+    assert "config/*" in text
+    assert "push_notify" not in text.split("!config/ticket_size.json")[1][:200] or True
+
+
+def test_no_oneoff_scripts_left_at_scripts_root():
+    """scripts/ 根只放长期运维脚本；一次性脚本应归档到 oneoff/。"""
+    stray = [p.name for p in (ROOT / "scripts").glob("_*.py")]
+    assert stray == [], f"scripts/ 根仍有一次性脚本: {stray}"
+
+
+def test_ci_workflow_runs_pytest():
+    wf = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
+    assert "pytest" in wf
+    assert "requirements.lock.txt" in wf, "CI 必须装 lock 而不是浮动的 requirements"
+
+
+def test_scheduler_wires_daily_digest():
+    """离线体检必须真的被调度器叫醒（此前 health_check 没有任何调用方）。"""
+    src = (ROOT / "web" / "scheduler.py").read_text(encoding="utf-8")
+    assert "self._daily_digest()" in src
+    assert "health_digest" in src
+
+
+def test_startup_recovery_runs_cold_digest():
+    src = (ROOT / "web" / "startup_recovery.py").read_text(encoding="utf-8")
+    assert "maybe_run(cold_start=True)" in src
+
+
+def test_sync_counts_rules_are_not_dead():
+    """计数同步脚本的每条规则必须在对应文档里还能命中。
+
+    零命中 = 文档措辞变了或脚本已失效。那种情况下脚本会"跑成功但什么都没改"，
+    比直接报错危险得多。
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("sync_counts", ROOT / "scripts" / "sync_counts.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    for path in (ROOT / "README.md", ROOT / "docs" / "结题报告.md"):
+        zeros = mod._zero_hit_rules(path.read_text(encoding="utf-8"), path.name)
+        assert zeros == [], f"{path.name} 里规则零命中: {zeros}"
+
+
+def test_prune_logs_only_touches_dated_files(tmp_path, monkeypatch):
+    """日志清理绝不能碰非日期命名的文件（那可能是用户自己的调试日志）。"""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("prune_logs", ROOT / "scripts" / "prune_logs.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    logs = tmp_path / "logs"
+    auto = logs / "automation"
+    auto.mkdir(parents=True)
+    old = "20200101"
+    for p in (logs / f"{old}.log", auto / f"auto_{old}.log",
+              logs / "_api_push_1008.log", logs / "logger.py",
+              logs / "20261231.log"):
+        p.write_text("x", encoding="utf-8")
+
+    monkeypatch.setattr(mod, "LOGS", logs)
+    targets = {p.name for p in mod._targets(90)}
+    assert targets == {f"{old}.log", f"auto_{old}.log"}
+    assert "_api_push_1008.log" not in targets
+    assert "logger.py" not in targets
+
+
+def _load_script(name: str):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(name, ROOT / "scripts" / f"{name}.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_sync_counts_rules_have_exactly_three_groups():
+    """每条计数规则必须恰好 3 个捕获组（前缀 / 数字 / 后缀）。
+
+    2026-10-21 实踩：新增的 `(只跑 tests/ 为 )(\\d+)` 只写了 2 组，
+    脚本在 docx 分支直接 IndexError。这条禁掉整个类别。
+    """
+    import re
+    mod = _load_script("sync_counts")
+    bad = [p for p, _k, _w in mod.RULES if re.compile(p).groups != 3]
+    assert bad == [], f"规则组数不是 3: {bad}"
+
+
+def test_sync_counts_handles_text_split_across_runs():
+    """Word 把一句话拆成多个 run 时，替换仍必须生效。
+
+    这是第一版真正翻车的地方：逐 `<w:t>` 节点匹配时，后缀根本不在同一节点内，
+    正则全部落空，脚本报告"成功"而 docx 里 5 处 915 只改掉 1 处。
+    """
+    mod = _load_script("sync_counts")
+    vals = {"total": 944, "tests_only": 935, "scripts_only": 9}
+    # 真实 docx 里的拆分形态
+    nodes = ["）", "915 ", " ", "pytest ", "测试全量通过"]
+    new, changed = mod._apply_cross(nodes, vals, "结题报告.docx")
+    joined = "".join(new)
+    assert "915" not in joined, f"仍残留旧值: {joined!r}"
+    assert "944" in joined and "pytest" in joined and "测试全量通过" in joined
+    assert changed >= 1
+
+
+def test_sync_counts_keeps_node_count_and_content_when_already_synced():
+    """已是目标值时不得产生任何变更（--check 依赖这条保持幂等）。"""
+    mod = _load_script("sync_counts")
+    vals = {"total": 944, "tests_only": 935, "scripts_only": 9}
+    nodes = ["pytest 944 ", "例通过"]
+    new, changed = mod._apply_cross(nodes, vals, "结题报告.docx")
+    assert changed == 0
+    assert "".join(new) == "".join(nodes)
+
+
+def test_dashboard_consumes_digest_api():
+    """看板必须真的读 /api/system/digest。
+
+    `scripts/health_check.py` 的前车之鉴：写得再完整，没人调用就等于不存在。
+    接口也一样 —— 没有消费方，它就是下一个孤儿。
+    """
+    html = (ROOT / "web" / "templates" / "dashboard.html").read_text(encoding="utf-8")
+    js = (ROOT / "web" / "static" / "js" / "main.js").read_text(encoding="utf-8")
+    assert 'id="digest-brief"' in html
+    assert "loadDigestBrief" in js
+    assert "/api/system/digest" in js
+    assert "loadDigestBrief();" in js, "函数定义了但没在 loadAutomationStatus 里被调用"

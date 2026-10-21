@@ -1,0 +1,75 @@
+name: tests
+
+# 2026-10-21 新增。动机很朴素：这个项目 900+ 例测试此前**只在一台机器上跑过**。
+# 一个人维护、Windows 本地跑、靠手工记得"改完要跑测试"——这三条任意一条松了，
+# 测试就从"防线"变成"文档里的一句自夸"。CI 的唯一职责是把这句话变成可验证的。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      # 项目全程 UTF-8（数据 CSV 含中文列名、日志按 UTF-8 写）
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      # 用 lock 而不是 requirements.txt：requirements 全是 `>=`，
+      # 每次 CI 都可能装出不同的 numpy/lightgbm，红线测试会在某天毫无缘由地红。
+      - name: Install dependencies (locked)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.lock.txt
+
+      - name: Verify lockfile is in sync with requirements.txt
+        # 只做「lock 覆盖了 requirements 声明的每个包」这一条弱检查。
+        # 不做 --check 严格比对：CI 是干净环境，逐版本比对需要 pyproject，
+        # 而本项目有意不用 pyproject（见 pytest.ini 的说明）。
+        run: |
+          python - <<'PY'
+          import re, pathlib, sys
+          req = pathlib.Path("requirements.txt").read_text(encoding="utf-8")
+          lock = pathlib.Path("requirements.lock.txt").read_text(encoding="utf-8")
+          locked = set()
+          for line in lock.splitlines():
+              if line and not line.startswith("#") and "==" in line:
+                  locked.add(re.sub(r"[-_.]+", "-", line.split("==")[0]).lower())
+          missing = []
+          for line in req.splitlines():
+              s = line.strip()
+              if not s or s.startswith("#"):
+                  continue
+              name = re.split(r"[<>=!~\[;]", s, maxsplit=1)[0].strip()
+              if re.sub(r"[-_.]+", "-", name).lower() not in locked:
+                  missing.append(name)
+          if missing:
+              print("requirements.txt 声明但 lock 里没有:", missing)
+              sys.exit(1)
+          print(f"lock 覆盖 {len(locked)} 个包，requirements 顶层依赖全部在内")
+          PY
+
+      - name: Run test suite
+        # 不设 -m "not slow"：CI 是唯一能承受全量的地方。本地要快，CI 要全。
+        run: pytest -q
+
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-logs
+          path: |
+            logs/*.log
+          retention-days: 7

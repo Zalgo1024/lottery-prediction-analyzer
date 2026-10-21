@@ -830,6 +830,58 @@ def push_health_summary(
         return {"ok": False, "detail": str(e)[:200]}
 
 
+def push_digest(
+    digest: Optional[Dict[str, Any]] = None,
+    *,
+    only_on_problem: bool = True,
+    cfg: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """`web/health_digest.py` 的离线体检日报推送。
+
+    **默认只在有问题时推送**（`only_on_problem=True`）。理由：这个项目的用户
+    已经不能保证天天开机，一条每天都说"一切正常"的消息只会被静音，
+    真正出问题时反而看不见。正常时返回值里 `skipped=True`，不消耗推送配额。
+    """
+    try:
+        d = digest or {}
+        problems = d.get("问题") or []
+        if only_on_problem and not problems:
+            return {"ok": True, "skipped": True, "detail": "无问题，静默不推送"}
+
+        cfg = cfg if cfg is not None else sanitize(load_config())
+        if not effective_ready(cfg):
+            return None
+
+        pl = d.get("流水线") or {}
+        inv = d.get("注数一致性") or {}
+        lag = d.get("数据滞后") or []
+        lag_bad = [r for r in lag if isinstance(r.get("滞后天数"), int) and r["滞后天数"] > 0]
+
+        lines = [
+            f"**离线体检** 过去 {d.get('窗口天数', '?')} 天 · {d.get('结论', '')}",
+            f"- 流水线：{pl.get('总次数', 0)} 次（成功 {pl.get('成功', 0)} / 失败 {pl.get('失败', 0)}）",
+            f"- 注数：{'全部一致' if inv.get('全部一致') else '存在不一致'}"
+            + (f"（{'; '.join(inv.get('不一致') or [])}）" if inv.get("不一致") else ""),
+            f"- 数据滞后：{len(lag_bad)} 个彩种"
+            + (f"（{'; '.join(str(r['彩种']) + ' ' + str(r['滞后天数']) + '天' for r in lag_bad[:3])}）"
+               if lag_bad else ""),
+        ]
+        if problems:
+            lines.append(f"- 待处理 **{len(problems)} 项**：")
+            for p in problems[:HEALTH_MAX_ITEMS]:
+                lines.append(f"  - **{p.get('彩种', '-')}**：{p.get('项', '')} — {p.get('详情', '')}")
+            if len(problems) > HEALTH_MAX_ITEMS:
+                lines.append(f"  - …另有 {len(problems) - HEALTH_MAX_ITEMS} 项")
+
+        res = send("彩票助手｜离线体检", "\n".join(lines), cfg)
+        _mark_pushed(cfg, res.get("ok", False), res.get("detail", ""))
+        logger.info(f"离线体检推送: ok={res.get('ok')} 问题 {len(problems)} 项")
+        return res
+    except Exception as e:  # pragma: no cover - 推送失败绝不影响体检
+        logger.warning(f"离线体检推送异常: {e}")
+        return {"ok": False, "detail": str(e)[:200]}
+
+
 def push_recovery_summary(
     results: Optional[Dict[str, Any]] = None,
     *,

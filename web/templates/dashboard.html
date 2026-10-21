@@ -14,7 +14,7 @@
 
 <!-- 自动化运行状态 -->
 <div class="card" style="margin-bottom:15px">
-  <h3><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="8" width="14" height="11" rx="2"/><path d="M12 4v4M9 13h.01M15 13h.01M9 16h6"/><path d="M3 12v3M21 12v3"/></svg>自动化运行状态 <span id="auto-status-badge"></span> <span id="invariant-badge" title="出号数量一致性：滑轨设定值 vs 下一期实际出号组数"></span></h3>
+  <h3><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="8" width="14" height="11" rx="2"/><path d="M12 4v4M9 13h.01M15 13h.01M9 16h6"/><path d="M3 12v3M21 12v3"/></svg>自动化运行状态 <span id="auto-status-badge"></span> <span id="invariant-badge" title="出号数量一致性：滑轨设定值 vs 下一期实际出号组数"></span> <span id="digest-brief" title="离线体检：过去 7 天的流水线次数 / 失败数 / 待处理项"></span></h3>
   <div id="auto-status-content" style="font-size:13px"><div class="alert alert-info">加载中...</div></div>
   <div style="margin-top:8px">
     <button class="btn btn-sm btn-info" onclick="try{showAutoDetail();}catch(e){alert('页面脚本未加载，请刷新页面（Ctrl/Cmd+Shift+R）');}" title="查看自动流水线最近一次做了什么：抓到的开奖号、生成的预测、异常告警、命中情况、执行步骤"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="4" width="12" height="17" rx="2"/><path d="M9 4V3h6v1"/></svg>查看上次运行明细</button>

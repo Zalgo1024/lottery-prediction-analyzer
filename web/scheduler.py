@@ -80,6 +80,7 @@ class AutoScheduler:
         self.state = {}  # lottery -> {last_run, last_task_id, last_status, running}
         self._thread = None
         self._stop = threading.Event()
+        self._digest_running = False
         self._load()
 
     # ---------- 持久化 ----------
@@ -294,6 +295,39 @@ class AutoScheduler:
         except Exception as e:
             logger.warning(f"七星彩每日补抓失败: {e}")
 
+    def _daily_digest(self):
+        """离线体检：到点跑日报，周日加一次全量扫描。
+
+        跑在独立线程里：周日那份会做六彩种全量扫描（数十秒），
+        占着 tick 线程会让当天的流水线触发整体顺延一分钟 —— 不值得。
+        先用 is_due() 在主线程做一次毫秒级判断，避免每 60s 无谓地起线程。
+        """
+        if self._digest_running:
+            return
+        try:
+            from web.health_digest import is_due
+            if not is_due():
+                return
+        except Exception as e:
+            logger.warning(f"离线体检判定异常(降级): {e}")
+            return
+
+        self._digest_running = True
+
+        def _run():
+            try:
+                from web.health_digest import maybe_run
+                res = maybe_run()
+                if res:
+                    logger.info(f"离线体检已执行: {res.get('已执行')}")
+            except Exception as e:
+                # 体检自身绝不能让调度循环挂掉
+                logger.warning(f"离线体检异常(降级): {e}")
+            finally:
+                self._digest_running = False
+
+        threading.Thread(target=_run, name="health-digest", daemon=True).start()
+
     def run_now(self, lottery=None):
         """手动立即运行：指定彩种或（默认）全部。返回成功触发的彩种列表。
         手动触发无视锁（用户明确要跑），且不阻塞等待。"""
@@ -360,6 +394,9 @@ class AutoScheduler:
                             self._launch(lot, respect_lock=True)
                     # 七星彩每日补抓（纯数据，压滞后用；与开奖日流水线互不冲突）
                     self._daily_qxc_supplement()
+                    # 离线体检日报/周检（2026-10-21）：到点才跑，一天只跑一次。
+                    # 只在有问题时推送 —— 你不开机的时候，它就是那个替你看着的人。
+                    self._daily_digest()
             except Exception as e:
                 logger.warning(f"调度器循环异常: {e}")
             self._stop.wait(60)

@@ -59,6 +59,26 @@ def system_invariants():
         return jsonify({"ok": False, "msg": str(e)}), 500
 
 
+@bp.route("/api/system/digest")
+def system_digest():
+    """离线体检周报（只读）：过去 N 天的运行事实汇总。
+
+    2026-10-21：此前 `scripts/health_check.py` 写得很完整却**没有任何调用方**，
+    等于只能靠人手动叫醒 —— 这恰好把维护绑死在"人得在线"上。现在它由
+    `web/health_digest.py` 在调度器 tick 里到点触发，本接口负责把同一份事实
+    给页面看（与推送同源，口径不会分叉）。
+    """
+    try:
+        days = request.args.get("days", default=7, type=int) or 7
+        from web.health_digest import cached_digest
+        # 浅拷贝：缓存对象不能被接口层塞字段（否则下一次请求读到的就是上一条的 ok）
+        rep = dict(cached_digest(days))
+        rep["ok"] = True
+        return jsonify(rep)
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
+
 @bp.route("/api/system/restart", methods=["POST"])
 def system_restart():
     """触发重启：写入 restart_flag，由 run.py 看门狗接管实际重启。"""

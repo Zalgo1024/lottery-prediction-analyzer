@@ -2,7 +2,7 @@
 
 > **带严格统计检验的时间序列分析框架（彩票作为示例场景）**
 
-![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB) ![Tests](https://img.shields.io/badge/pytest-915%20passed-3B6D11) ![Lotteries](https://img.shields.io/badge/%E5%BD%A9%E7%A7%8D-6-854F0B) ![License](https://img.shields.io/badge/License-AGPL--3.0-blue)
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB) ![Tests](https://img.shields.io/badge/pytest-950%20passed-3B6D11) ![Lotteries](https://img.shields.io/badge/%E5%BD%A9%E7%A7%8D-6-854F0B) ![License](https://img.shields.io/badge/License-AGPL--3.0-blue)
 
 **为什么用彩票做示例场景？** 开奖数据足够纯——无协变量、无趋势、大样本、完全随机。这是检验一套时序分析方法"是否真有预测力"的最严苛测试场：任何看似有效的策略都要在这里接受检验。本框架的价值不在于"预测中了多少"，而在于**给出可复现的检验结论**。
 
@@ -30,7 +30,10 @@
 
 ```bash
 # 1. 安装依赖（Python 3.10+）
-pip install -r requirements.txt
+#    推荐用 lock：版本已钉死，保证你跑出来的数字和报告里的一致
+pip install -r requirements.lock.txt
+#    或者不限版本（`requirements.txt` 全是 >=，可能拉到大版本，数值会漂）
+# pip install -r requirements.txt
 
 # 2. 启动 Web 看板
 #    Windows：双击 启动项目.bat（等价于下面的命令，自动清残留进程 + 开浏览器）
@@ -39,8 +42,8 @@ python run.py                # 看门狗模式，访问 http://127.0.0.1:5000
 # 3. 或者只用 CLI
 python cli.py --help
 
-# 4. 跑测试套件（全量 915 例）
-pytest -q
+# 4. 跑测试套件（全量 950 例）
+pytest -q                    # 约 6~7 分钟（慢点集中在真实 predict 全流程的契约测试）
 ```
 
 > 改代码后刷新生效：点网页右上角「重启服务」，或写 `config/restart_flag` 由看门狗热重启。
@@ -352,8 +355,34 @@ POST /api/settings/push-notify/test     # 发一条测试消息（未配置返�
 ## 测试
 
 ```bash
-pytest -q              # 915 passed（全量；含奖金表 33 例、写保护/分区归一化回归、撞号度量与中奖归因、批次契约、出号数量固定/动态、消息推送：图片渲染/发送节流/降级/全入口接线、随机锚点走前验证与持续训练循环、休市日历与真实开奖数据一致性、三口径 EV 对照/冷门口径 rollover/奖池门槛/Kelly 纪律仓位/限号前置与组合方差指标、策略历史实测命中统计（归一/过滤/基线/样本不足）、休市期全链路感知（看板滞后/下一期 + 调度器排班 + 启动自愈 + cli lag + 体检脚本 + 销量模型前瞻 + 休市提示条）、机制缝隙四轨测量（A/A′注数比、开出号分位、结构偏差、派奖期）+ 缝隙内选号与反馈闭环、机制缝隙策略层可见性与前瞻对照、叙事解绑文案扫描、生产 pending 防覆盖（record_pending 开关）、出号数量硬性拉平与注数一致性体检/启动自愈）
-pytest tests/          # 906 passed（仅 tests/ 目录；另有 9 例在 scripts/ 下，故用 pytest -q 跑全量）
+pytest -q              # 950 passed（全量；含奖金表 33 例、写保护/分区归一化回归、撞号度量与中奖归因、批次契约、出号数量固定/动态、消息推送：图片渲染/发送节流/降级/全入口接线、随机锚点走前验证与持续训练循环、休市日历与真实开奖数据一致性、三口径 EV 对照/冷门口径 rollover/奖池门槛/Kelly 纪律仓位/限号前置与组合方差指标、策略历史实测命中统计（归一/过滤/基线/样本不足）、休市期全链路感知（看板滞后/下一期 + 调度器排班 + 启动自愈 + cli lag + 体检脚本 + 销量模型前瞻 + 休市提示条）、机制缝隙四轨测量（A/A′注数比、开出号分位、结构偏差、派奖期）+ 缝隙内选号与反馈闭环、机制缝隙策略层可见性与前瞻对照、叙事解绑文案扫描、生产 pending 防覆盖（record_pending 开关）、出号数量硬性拉平与注数一致性体检/启动自愈）
+pytest tests/          # 941 passed（仅 tests/ 目录；另有 9 例在 scripts/ 下，故用 pytest -q 跑全量）
+```
+
+## 维护（放着不管时会发生什么）
+
+这个项目的设计前提是「不必天天开机」。开机后它会自己按顺序做：
+抓数 → 补齐漏结算的期 → 核对简报新鲜度 → 核对注数并修复 → 推一条自检摘要。
+
+之后每日本地生成一份**离线体检**（`logs/automation/digest_<日期>.json`，接口
+`GET /api/system/digest?days=7`，看板「自动化运行状态」旁有摘要徽章）：
+
+- **只在有问题时才推送**。正常静默 —— 每天一条"一切正常"只会被静音，
+  真出问题时反而看不见。
+- 检查项：流水线成功/失败次数、注数是否等于滑轨、各彩种数据滞后天数、
+  下一期是否有预测。日志窗口写满时会标「计数可能偏少」，不把"至少这么多次"说成全量。
+- 每周日额外跑一次六项全量体检（`scripts/health_check.py`）+ 清理 90 天前日志。
+
+日常只需看一处：**看板标题旁的一致性徽章**。绿色 = 滑轨与实际出号对得上；
+变红 = 有旁路改了注数。
+
+维护动作的完整清单与"为什么这么改"见
+[维护清单](docs/维护清单_20261008.md)；常用脚本：
+
+```bash
+python scripts/sync_counts.py --check   # 文档里的测试数是否与真实一致
+python scripts/sync_lock.py --check     # 依赖锁是否与环境一致
+python scripts/prune_logs.py            # 预览可清理的旧日志（加 --apply 才删）
 ```
 
 ## 备份

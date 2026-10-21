@@ -307,6 +307,13 @@ def run_startup_recovery():
             push_recovery_summary(results)
         except Exception as e:
             logger.warning(f"启动自检推送失败(降级): {e}")
+        # 离线体检补报（2026-10-21）：开机第一眼就能看到「过去 N 天怎么样」，
+        # 不用自己去翻六个页面。只在有问题时推送，正常静默。
+        try:
+            from web.health_digest import maybe_run
+            maybe_run(cold_start=True)
+        except Exception as e:
+            logger.warning(f"离线体检补报失败(降级): {e}")
 
     t = threading.Thread(target=_run, name="startup-recovery", daemon=True)
     t.start()

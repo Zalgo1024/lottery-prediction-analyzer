@@ -43,8 +43,13 @@ reasonix.toml
 *.bak_*
 
 # ===== 一次性运维脚本（探测/临时推送/数据探针，用完即弃，不入库） =====
-# 注：历史已入库的 46 个 scripts/_*.py 仍留在版本里，本规则只拦「以后新增的」。
+# scripts/ 根目录的 `_*.py` 一律拦：根目录只放长期运维脚本（export_pdf /
+# rebuild_market_closure / sync_* / prune_logs 等），别再堆临时文件。
+# 2026-10-21 已把 43 个历史 `_*.py` 移入 scripts/oneoff/（那几个仍在版本里，
+# 因为要保留当时怎么验的痕迹）；一次性脚本以后直接写进 oneoff/，
+# 下面这条规则保证它们不会意外入库。
 scripts/_*.py
+scripts/oneoff/_*.py
 
 # ===== 文档/工具中间产物（docx 改写临时文件、探针输出） =====
 *.tmp
@@ -68,7 +73,14 @@ docs/_backup/求职*
 求职*
 
 # ===== 运行时状态（看门狗/调度器/worker 状态、重启标志，不入库） =====
-config/
+# 必须是 config/* 而不是 config/：目录被整体忽略后，Git **不允许**再用 `!`
+# 放行其中的文件（忽略目录会短路其下所有规则），那样 ticket_size.json 永远进不来。
+# 放行 ticket_size.json 的理由：它存的是用户亲手设的「每次出号几注」
+# （2026-10 为 双色球 200 / 大乐透 38 / 排列3 50 / 七星彩 44），
+# 属于**业务配置**而非运行时状态 —— 丢了无法重建，换机/回滚就还原不出同一套出号量。
+# push_notify.json 含企业微信 webhook token，必须继续排除。
+config/*
+!config/ticket_size.json
 logs/flask_stdout.log
 logs/run_supervisor.log
 

@@ -21,6 +21,11 @@ _TARGETS = (
     # ev/mechanism/gap_cache.py 的磁盘缓存目录（测量结果 JSON）。
     # 不加这一条，用例一旦走 measure_gap(use_cache=True) 就会把真实 cache/mechanism 写脏。
     ("ev.mechanism.gap_cache", "CACHE_DIR", "mechanism"),
+    # 离线体检日报的「今天跑过没」状态（web/health_digest.py）。
+    # 不加这一条，用例调用 maybe_run() 会把真实 config/digest_state.json 写成今天已跑，
+    # 导致当晚真实日报被静默跳过。
+    ("web.health_digest", "STATE_PATH", "digest_state.json"),
+    ("web.health_digest", "DIGEST_DIR", "automation"),
 )
 
 
