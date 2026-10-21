@@ -33,12 +33,14 @@ LOCK = BASE / "requirements.lock.txt"
 _HEADER = """\
 # requirements.lock.txt —— 可复现环境（由 scripts/sync_lock.py 生成，勿手改）
 #
-# 生成机器：{machine}   Python {py}
-# 顶层来源：requirements.txt（{n} 个直接依赖）
+# Python {py} ｜ 顶层来源：requirements.txt（{n} 个直接依赖）
 # 内容：顶层包 + 其传递依赖的精确版本（共 {total} 个）
 #
 # 复现：pip install -r requirements.lock.txt
 # 升级：改 requirements.txt → 重跑 scripts/sync_lock.py → 跑全量测试 → 一起提交
+#
+# 刻意不记主机名/生成时间：否则换机或在 CI 里重新生成时头部天天变，
+# 每次 diff 都有一堆无意义噪声，真正的版本变化反而被淹掉。
 """
 
 
@@ -99,8 +101,7 @@ def _render(pkgs: dict[str, str], missing: list[str] | None = None) -> str:
     import platform
 
     tops = _top_level()
-    head = _HEADER.format(machine=platform.node() or "?", py=platform.python_version(),
-                          n=len(tops), total=len(pkgs))
+    head = _HEADER.format(py=platform.python_version(), n=len(tops), total=len(pkgs))
     if missing:
         # 如实记录：这些包被上游声明为依赖，但本机没装。
         # 不补装、不假装完整 —— 装上可能改变现有数值，属于需要单独决策的变更。
