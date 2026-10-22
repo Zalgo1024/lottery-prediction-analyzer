@@ -65,7 +65,7 @@ def diff_record(name, rec, draw, schema):
             patch["红球命中"], patch["蓝球命中"] = rh, bh
         if rec.get("总命中") != rh + bh:
             patch["总命中"] = rh + bh
-        exp = expected_grade(name, hits, schema)
+        exp = expected_grade(name, hits, schema, rec.get("期号"))
     else:
         if canon(name, rec.get("分区命中") or {}) != hits:
             patch["分区命中"] = hits

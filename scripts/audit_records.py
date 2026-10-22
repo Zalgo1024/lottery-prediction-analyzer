@@ -99,11 +99,16 @@ def check_numbers(name, zones, schema):
     return bad
 
 
-def expected_grade(name, hits, schema):
-    """红蓝型按官方规则独立判级。"""
+def expected_grade(name, hits, schema, issue=None):
+    """红蓝型按官方规则独立判级。
+
+    大乐透必须按 issue 选规则版本（2026-02 起九级→七级），否则会拿现行版本
+    去「纠正」历史期，把 2023 的九等误改成七等。
+    """
     if name in ("双色球", "大乐透"):
         rh, bh = hits.get("红球", 0), hits.get("蓝球", 0)
-        return _classify_dlt_prize(rh, bh) if name == "大乐透" else _classify_prize(rh, bh)
+        return (_classify_dlt_prize(rh, bh, issue=issue) if name == "大乐透"
+                else _classify_prize(rh, bh))
     return None
 
 
@@ -177,7 +182,7 @@ def audit_history(name, draws, records):
             # 非法票（红/蓝个数不符 schema）根本不判奖级 → 期望「未中」，
             # 与 data/feedback.py 生产口径一致（否则会误报"奖级不符"）。
             illegal = any("个数=" in b for b in bad)
-            exp_grade = "未中" if illegal else expected_grade(name, hits, schema)
+            exp_grade = "未中" if illegal else expected_grade(name, hits, schema, issue)
         else:
             exp_grade = group_expected(name, pred_zones, act_zones, issue) or "未中"
         if (r.get("中奖等级") or "未中") != exp_grade:

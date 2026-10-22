@@ -1219,9 +1219,12 @@ def evaluate_pending_predictions(lottery_name: str) -> dict:
                     pass
                 if _illegal:
                     is_valid = False
+                # ★ 大乐透奖级必须按 **本期期号** 选规则版本：2026-02 起由九级改七级
+                #   （0+2/2+1/3+0 由「九等」变「七等」）。此前漏传 issue ⇒ 按现行版本
+                #   误判历史期、且与按版本取的奖金对不上（页面出现「九等奖 + 未中」）。
                 _grade = ("未中" if _illegal else
-                          (_classify_dlt_prize(red_hits, blue_hits) if lottery_name == "大乐透"
-                           else _classify_prize(red_hits, blue_hits)))
+                          (_classify_dlt_prize(red_hits, blue_hits, issue=actual.期号)
+                           if lottery_name == "大乐透" else _classify_prize(red_hits, blue_hits)))
                 feedback = {
                     "期号": actual.期号,
                     "开奖日期": str(actual.开奖日期) if actual.开奖日期 else pred.get("预测日期", ""),

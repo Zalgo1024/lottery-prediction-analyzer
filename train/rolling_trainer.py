@@ -144,7 +144,8 @@ def _evaluate_hit(pred: dict, actual: DrawRecord, schema, is_rb: bool,
         blue_hits = len(pred_blue_set & actual_blue_set)
         # 判级复用 data.feedback 官方规则（双色球六等级 / 大乐透2023九级），
         # 此前本文件的复制版按双色球规则"近似"大乐透，产生系统性误判。
-        level = (_classify_dlt_prize(red_hits, blue_hits)
+        # 大乐透按本期期号选规则版本（2026-02 起九级→七级），漏传 issue 会误判历史期。
+        level = (_classify_dlt_prize(red_hits, blue_hits, issue=getattr(actual, "期号", None))
                  if lottery_name == "大乐透" else _classify_prize(red_hits, blue_hits))
         return {
             "策略": pred["策略"],

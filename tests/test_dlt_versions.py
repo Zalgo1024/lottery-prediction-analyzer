@@ -156,3 +156,47 @@ def test_issue_key_shared_implementation():
     from ev.profit.pit import issue_key as pit_key
     for s in ("3001", "9001", "10001", "26120", "2026120", "07001"):
         assert issue_key("双色球", s) == pit_key("双色球", s)
+
+
+# ---------------------------------------------------------------- 回调点必须传 issue（版本感知回归锁）
+
+def test_classify_dlt_prize_is_issue_aware():
+    """★ 回归锁：feedback 判级包装器必须按**本期期号**选版本，不能落回现行版本。
+
+    2026-02 起大乐透九级→七级：0+2 / 2+1 / 3+0 从「九等」变「七等」。
+    此前 data/feedback.py 调用 `_classify_dlt_prize(rh, bh)` 漏传 issue，
+    用现行（2026 七级）表去判历史期，把 2023 的九等也污染成七等；
+    反之若用旧默认则把 2026 的七等误标成九等（页面出现「九等奖 + 未中」）。
+    """
+    from data.feedback import _classify_dlt_prize
+
+    # 2026（dlt-2026-02，七级）
+    assert _classify_dlt_prize(0, 2, issue="26120") == "七等"
+    assert _classify_dlt_prize(2, 1, issue="26120") == "七等"
+    assert _classify_dlt_prize(3, 0, issue="26120") == "七等"
+    assert _classify_dlt_prize(3, 1, issue="26120") == "六等"
+    # 2019（dlt-2019-02，九级）—— 历史期必须仍判九等，不能被现行版本改写
+    assert _classify_dlt_prize(0, 2, issue="2023001") == "九等"
+    assert _classify_dlt_prize(2, 1, issue="2023001") == "九等"
+    assert _classify_dlt_prize(3, 1, issue="2023001") == "八等"
+
+
+def test_expected_grade_repair_helper_is_issue_aware():
+    """★ 回归锁：审计/修复脚本的 expected_grade 必须传 issue（否则修复会把历史期改错）。"""
+    from data.schema import get_schema
+    from scripts.audit_records import expected_grade
+
+    schema = get_schema("大乐透")
+    hits_02 = {"红球": 0, "蓝球": 2}
+    assert expected_grade("大乐透", hits_02, schema, "26120") == "七等"
+    assert expected_grade("大乐透", hits_02, schema, "2023001") == "九等"
+
+
+def test_prize_payout_matches_grade_version():
+    """展示层奖金与奖级必须同版本一致：2026 的七等 = 5 元；九等在该版本不存在（未中）。"""
+    from data.prize_table import prize_payout
+
+    assert prize_payout("大乐透", "七等", "26120")["金额"] == 5.0
+    # 九等只在 2019 九级段存在
+    assert prize_payout("大乐透", "九等", "26120")["金额"] == 0.0
+    assert prize_payout("大乐透", "九等", "2023001")["金额"] == 5.0
