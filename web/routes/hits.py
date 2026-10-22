@@ -3,7 +3,7 @@
 
 - GET /hits                  命中历史页面
 - GET /api/hits              查询命中记录（支持 lottery / limit / min_prize / type /
-                             red_hits / blue_hits / total_hits / min_amount 过滤）
+                             red_hits / blue_hits / total_hits / min_amount / strategy 过滤）
 
 返回里除 `records` 外还带三个计数，供页面渲染「xx 注 / xxxx（总数）注」：
 
@@ -35,6 +35,9 @@ def api_hits():
       limit:      最多返回条数（默认 100，0=不限；可选 5/10/20/50/100/200/500/0）
       min_prize:  最小中奖等级（默认"全部"，可填 一等|二等|三等|四等|五等|六等）
       type:       全部 | 预测 | 训练
+      strategy:   策略名（默认"全部" ⇒ 逐位保持既有行为）。
+                  按 normalize_strategy_name 归一时比对（ML(logistic)/统计训练(Wxx) → ML策略），
+                  便于「低拥挤策略」这类研究性独立入口单独筛出来看。
       red_hits:   最小红球命中数（仅对双色球/大乐透生效；数字型恒为真）
       blue_hits:  最小蓝球命中数（仅对双色球/大乐透生效；数字型恒为真）
       total_hits: 最小总命中数（对所有彩种生效，红蓝型=红+蓝）
@@ -50,7 +53,7 @@ def api_hits():
     from datetime import datetime
     import calendar
 
-    from data.feedback import load_feedback_history
+    from data.feedback import load_feedback_history, normalize_strategy_name
     from data.prize_table import prize_payout
     from data.schema import is_redblue
     from ev.batch import batch_fields, group_batches
@@ -59,6 +62,7 @@ def api_hits():
     limit = request.args.get("limit", 100, type=int)
     min_prize = request.args.get("min_prize", "全部")
     type_filter = request.args.get("type", "全部")
+    strategy = request.args.get("strategy", "全部")
     red_hits_min = request.args.get("red_hits", "", type=str)
     blue_hits_min = request.args.get("blue_hits", "", type=str)
     total_hits_min = request.args.get("total_hits", "", type=str)
@@ -160,6 +164,10 @@ def api_hits():
                     continue
                 if date_to and rec_day > date_to:
                     continue
+            # 策略筛选：默认「全部」⇒ 与加这个参数之前逐位一致。
+            # 用归一后的名字比对，ML(logistic)/统计训练(Wxx) 才会并进 ML策略。
+            if strategy != "全部" and normalize_strategy_name(h.get("策略", "")) != strategy:
+                continue
             grp = rec_group.get(id(h))
             if min_rank and prize_rank.get(prize, 99) > min_rank:
                 continue
@@ -214,6 +222,9 @@ def api_hits():
                 "机制倾斜": h.get("机制倾斜"),
                 "机制测量时间": (h["缝隙快照"].get("测量时间")
                                 if isinstance(h.get("缝隙快照"), dict) else None),
+                # 低拥挤策略元数据：出号当时的 λ / 门控分位 / 覆盖键 / 循环性声明。
+                # 旧记录没有这个键 ⇒ 前端隐藏该行，不粉饰。
+                "低拥挤": h.get("低拥挤"),
                 "预测红球": h.get("预测红球", []),
                 "预测蓝球": h.get("预测蓝球", []),
                 "实际红球": h.get("实际红球", []),
@@ -258,6 +269,7 @@ def api_hits():
         "limit": limit,
         "amount_unknown": amount_unknown,
         "lottery": lottery,
+        "strategy": strategy,
         "sort_by": sort_by,
         "sort_order": sort_order,
         "date_from": date_from,

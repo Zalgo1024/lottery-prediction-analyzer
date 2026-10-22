@@ -41,6 +41,10 @@ function _strategyBadge(name) {
         const robotSvg = ico('robot').replace('class="ico"', 'style="width:14px;height:14px;margin-right:0;vertical-align:middle;flex-shrink:0"');
         return '<span title="训练好的机器学习/统计模型，按反馈权重参与预测" style="display:inline-flex;align-items:center;gap:4px;padding:2px 9px;border-radius:11px;font-size:12px;font-weight:700;background:#eef2ff;color:#4338ca;border:1px solid #c7d2fe">' + robotSvg + ' ML策略</span>';
     }
+    if (n === '低拥挤策略') {
+        // 研究性独立入口：不参与生产轮换/权重学习/动态注数安全阀，拥挤度是代理分数而非真实购买量
+        return '<span title="研究性独立入口：默认不参与生产出号轮换、权重学习与动态注数安全阀；拥挤度是由中奖注数反推的代理分数，不是真实购买量" style="display:inline-flex;align-items:center;gap:4px;padding:2px 9px;border-radius:11px;font-size:12px;font-weight:700;background:#f3e8ff;color:#6b21a8;border:1px solid #e9d5ff">低拥挤策略</span>';
+    }
     return '<strong>' + n + '</strong>';
 }
 
@@ -107,6 +111,22 @@ function _mechanismHitSpan(r) {
     const g = (r.机制γ === null || r.机制γ === undefined) ? '—' : Number(r.机制γ).toFixed(4);
     const when = r.机制测量时间 ? ` · 测量于 ${String(r.机制测量时间).replace('T', ' ').slice(0, 16)}` : '';
     return `<span title="${_escAttr(tilt.说明 || tilt.原因 || '')}">机制缝隙：<strong style="color:${active ? '#2e7d32' : '#8a6d00'}">${active ? '已激活' : '未激活'}</strong>（γ=${g}）${when}</span>`;
+}
+
+// 低拥挤策略命中详情：出号当时的 λ / 门控分位 / ≥10 元覆盖键。
+// 循环性声明必须挂在 title 上 —— 页面上只要出现「拥挤度」就得同时能看到它。
+function _lowcrowdHitSpan(r) {
+    const lc = r.低拥挤;
+    if (!lc || typeof lc !== 'object') return '';
+    const g = lc.门控 || {};
+    const cov = lc.覆盖 || {};
+    const bits = [];
+    if (lc.λ !== undefined && lc.λ !== null) bits.push(`λ=${Number(lc.λ).toFixed(2)}`);
+    if (g.生效分位 !== undefined && g.生效分位 !== null) bits.push(`门控分位=${Number(g.生效分位).toFixed(2)}`);
+    if (cov.选中覆盖键 !== undefined && cov.选中覆盖键 !== null) bits.push(`≥10元覆盖键 ${cov.选中覆盖键}/${cov.理论上限}`);
+    if (!bits.length) return '';
+    const tip = lc.循环性声明 || '拥挤度代理分数，不是购彩偏好的直接测量';
+    return `<span title="${_escAttr(tip)}">低拥挤：<strong style="color:#6b21a8">${bits.join(' · ')}</strong></span>`;
 }
 
 // 内联 SVG 图标库（不依赖系统 emoji 字体，任何环境都能渲染）
@@ -3005,6 +3025,7 @@ async function loadHits() {
     const lottery = $('hits-lottery') ? $('hits-lottery').value : '全部';
     const prize = $('hits-prize') ? $('hits-prize').value : '全部';
     const type = $('hits-type') ? $('hits-type').value : '全部';
+    const strategy = $('hits-strategy') ? $('hits-strategy').value : '全部';
     const limitSel = $('hits-limit');
     const limit = limitSel ? limitSel.value : '100';
     const redHits = (lottery === '双色球' || lottery === '大乐透') && $('hits-red') ? $('hits-red').value : '';
@@ -3023,6 +3044,7 @@ async function loadHits() {
 
     try {
         let url = `/api/hits?lottery=${encodeURIComponent(lottery)}&min_prize=${encodeURIComponent(prize)}&type=${encodeURIComponent(type)}&limit=${encodeURIComponent(limit)}&sort_by=${encodeURIComponent(sortBy)}&sort_order=${encodeURIComponent(sortOrder)}`;
+        if (strategy && strategy !== '全部') url += `&strategy=${encodeURIComponent(strategy)}`;
         if (redHits !== '') url += `&red_hits=${encodeURIComponent(redHits)}`;
         if (blueHits !== '') url += `&blue_hits=${encodeURIComponent(blueHits)}`;
         if (totalHits !== '') url += `&total_hits=${encodeURIComponent(totalHits)}`;
@@ -3042,7 +3064,11 @@ async function loadHits() {
         _renderHitsStat(universe);
         _renderHitsCount(matched, universe);
         if (!data.records || !data.records.length) {
-            html('hits-result', `<div class="alert alert-info">筛出 <strong>0</strong> 注 / <strong>${universe}</strong> 注（总数）——没有符合条件的命中记录。${lottery !== '全部' ? `（${lottery}）` : ''} 预测开奖并评估后即可在此看到。</div>`);
+            const scopeTxt = [lottery !== '全部' ? lottery : '', strategy !== '全部' ? strategy : ''].filter(Boolean).join(' · ');
+            const tail = strategy === '低拥挤策略'
+                ? '该策略是<strong>研究性独立入口，默认不参与生产出号</strong>，只有显式调用并开奖评估后才会出现记录。'
+                : '预测开奖并评估后即可在此看到。';
+            html('hits-result', `<div class="alert alert-info">筛出 <strong>0</strong> 注 / <strong>${universe}</strong> 注（总数）——没有符合条件的命中记录。${scopeTxt ? `（${scopeTxt}）` : ''} ${tail}</div>`);
             return;
         }
 
@@ -3133,7 +3159,8 @@ async function loadHits() {
                     <div class="hit-detail">
                         ${payDetail}
                         <span>分区命中：<strong>${hitParts}</strong></span>
-                        <span>策略：<strong>${r.策略 || '-'}</strong></span>
+                        <span>策略：${r.策略 ? _strategyBadge(r.策略) : '<strong>-</strong>'}</span>
+                        ${_lowcrowdHitSpan(r)}
                         ${_mechanismHitSpan(r)}
                         <span>来源：<strong>${r.来源 || '-'}</strong></span>
                         <span>预测日期：<strong>${r.预测日期}</strong></span>
@@ -3817,22 +3844,31 @@ async function loadRecords(lottery) {
     html('records-result', '<div class="spinner"></div> 加载战绩中...');
     const data = await api(`/api/records/${encodeURIComponent(lottery)}`);
     const isRb = data.is_redblue;
+    // 策略下拉 = 纯前端筛选，只决定本页显示哪些行，不改后端聚合口径
+    const stratFilter = $('rec-strategy') ? $('rec-strategy').value : '全部';
+    const _pick = (obj) => stratFilter === '全部'
+        ? (obj || {})
+        : Object.fromEntries(Object.entries(obj || {}).filter(([n]) => n === stratFilter));
+    const stratNote = stratFilter === '全部' ? '' : `（已按策略筛选：<strong>${stratFilter}</strong>，下方只列该策略）`;
 
     let htmlStr = '';
 
     // ===== 实盘战绩 =====
     const fb = data.feedback || {};
+    const fbStrat = _pick(fb.strategies);
     htmlStr += `<div class="card"><h3>${ico('board')} 实盘战绩（开奖后真实对比）</h3>`;
     htmlStr += `<p style="font-size:12px;color:var(--gray);margin:4px 0 10px">${ico('robot')} <strong>ML策略</strong> = 训练好的机器学习/统计模型，按反馈权重参与预测；其余为规则策略。早期标签 ML(logistic)/统计训练(Wxx) 已自动归并到此处。</p>`;
-    if (fb.total === 0 || Object.keys(fb.strategies || {}).length === 0) {
-        htmlStr += `<div class="alert alert-warning">暂无实盘数据。跑一次「一键更新+评估」后，这里会记录每个策略的真实命中表现。</div>`;
+    if (fb.total === 0 || Object.keys(fbStrat).length === 0) {
+        htmlStr += stratFilter === '全部'
+            ? `<div class="alert alert-warning">暂无实盘数据。跑一次「一键更新+评估」后，这里会记录每个策略的真实命中表现。</div>`
+            : `<div class="alert alert-warning">「${stratFilter}」暂无实盘战绩——该策略需要被显式调用、且对应期号已开奖评估后才会出现记录。</div>`;
     } else {
-        htmlStr += `<p style="font-size:12px;color:var(--gray)">共 ${fb.total} 条反馈 | 最近评估: ${fb.last_evaluated || '未知'}</p>`;
+        htmlStr += `<p style="font-size:12px;color:var(--gray)">共 ${fb.total} 条反馈 | 最近评估: ${fb.last_evaluated || '未知'} ${stratNote}</p>`;
         const headerCols = isRb
             ? '<th>策略</th><th>样本数</th><th>平均红球命中</th><th>平均蓝球命中</th><th>中奖次数</th><th>中奖率</th><th>趋势</th>'
             : '<th>策略</th><th>样本数</th><th>平均总命中</th><th>中奖次数</th><th>中奖率</th><th>趋势</th>';
         htmlStr += `<table><tr>${headerCols}</tr>`;
-        for (const [name, s] of Object.entries(fb.strategies)) {
+        for (const [name, s] of Object.entries(fbStrat)) {
             const gradeStr = Object.entries(s.中奖等级分布 || {})
                 .filter(([k]) => k !== '未中')
                 .map(([k, v]) => `${k}:${v}`).join(' ') || '—';
@@ -3876,16 +3912,19 @@ async function loadRecords(lottery) {
     // ===== 回测战绩 =====
     const rl = data.rolling;
     htmlStr += `<div class="card" style="margin-top:15px"><h3><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M6 20h12"/><path d="M12 4l4 7-5 3-4-7z"/><path d="M12 14l-3 6"/></svg> 回测战绩（历史滚动预测）</h3>`;
-    if (!rl) {
-        htmlStr += `<div class="alert alert-warning">暂无回测数据。在「滚动训练」页面跑一次即可生成各策略的历史回测表现。</div>`;
+    const rlStrat = rl ? _pick(rl.strategy_stats) : {};
+    if (!rl || Object.keys(rlStrat).length === 0) {
+        htmlStr += stratFilter === '全部'
+            ? `<div class="alert alert-warning">暂无回测数据。在「滚动训练」页面跑一次即可生成各策略的历史回测表现。</div>`
+            : `<div class="alert alert-warning">「${stratFilter}」暂无回测数据——回测走的是既有滚动训练通道，研究性独立入口不在其中。</div>`;
     } else {
-        htmlStr += `<p style="font-size:12px;color:var(--gray)">窗口 ${rl.window_size} 期 × 评估 ${rl.eval_periods} 期，共 ${rl.total_predictions} 次预测 | ${rl.training_time || ''}</p>`;
+        htmlStr += `<p style="font-size:12px;color:var(--gray)">窗口 ${rl.window_size} 期 × 评估 ${rl.eval_periods} 期，共 ${rl.total_predictions} 次预测 | ${rl.training_time || ''} ${stratNote}</p>`;
         const rHeaderCols = isRb
             ? '<th>策略</th><th>样本数</th><th>平均红球命中</th><th>平均蓝球命中</th><th>平均总命中</th><th>中奖率</th>'
             : '<th>策略</th><th>样本数</th><th>平均总命中</th><th>中奖率</th>';
         const colSpan = isRb ? 5 : 3;
         htmlStr += `<table><tr>${rHeaderCols}</tr>`;
-        for (const [name, s] of Object.entries(rl.strategy_stats || {})) {
+        for (const [name, s] of Object.entries(rlStrat)) {
             if (s.error) {
                 htmlStr += `<tr><td>${name}</td><td colspan="${colSpan}">无数据</td></tr>`;
                 continue;

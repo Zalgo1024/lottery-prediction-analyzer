@@ -40,11 +40,19 @@ def _record_pending(params: Optional[dict]) -> bool:
     """解析 record_pending 参数（缺省 True = 保持既有生产行为）。
 
     兼容 Web JSON 的字符串表达（"false"/"0"/"no"/"off"）。
+
+    ★ 唯一例外：`mode="lowcrowd"` 且**没有显式**给 record_pending 时，默认 False。
+      研究入口默认不入账 —— 手工用小组数跑会按 (期号, 一般, 研究) 替换掉
+      调度器已写的 200 注研究批，打断台账序列。要入账必须显式传 true。
     """
-    v = params.get("record_pending", True) if isinstance(params, dict) else True
-    if isinstance(v, str):
-        return v.strip().lower() not in ("0", "false", "no", "off", "")
-    return bool(v)
+    if not isinstance(params, dict):
+        return True
+    if "record_pending" in params:
+        v = params.get("record_pending")
+        if isinstance(v, str):
+            return v.strip().lower() not in ("0", "false", "no", "off", "")
+        return bool(v)
+    return params.get("mode") != "lowcrowd"
 
 
 def groups_invariant(lottery_names: Optional[list] = None) -> dict:
@@ -64,7 +72,7 @@ def groups_invariant(lottery_names: Optional[list] = None) -> dict:
     返回 {"全部一致": bool, "不一致": [彩种...], "彩种": [逐条明细]}
     """
     from config import LOTTERY_CONFIG, resolve_groups
-    from data.feedback import _next_issue, load_pending
+    from data.feedback import _next_issue, load_pending, latest_production_pending
 
     names = list(lottery_names) if lottery_names else list(LOTTERY_CONFIG)
     rows: list = []
@@ -73,14 +81,14 @@ def groups_invariant(lottery_names: Optional[list] = None) -> dict:
         try:
             slide = int(resolve_groups(lot))
             target = _next_issue(lot)
-            pend = [p for p in load_pending(lot)
-                    if str(p.get("目标期号") or "") == str(target)]
-            if not pend:
+            # ★ 只看**生产批**：研究批（低拥挤台账）是 200 注、且后写，
+            #   混进来会拿它和滑轨比，滑轨恰好 200 时还会「假通过」不再自愈。
+            p = latest_production_pending(load_pending(lot), target_issue=target)
+            if p is None:
                 rows.append({"彩种": lot, "滑轨": slide, "组数": 0,
                              "目标期号": target, "状态": "无预测", "一致": None,
                              "说明": "下一期还没有 pending（开奖后的正常空窗）"})
                 continue
-            p = pend[0]
             actual = len(p.get("预测号码") or [])
             ok = (actual == slide)
             if not ok:
@@ -1150,7 +1158,7 @@ def run_auto_pipeline_core(lottery_name: str, params: dict, task_id: Optional[st
         # 智能跳过：下一期若已有 pending 预测则不重复生成（与 cli auto 口径一致）。
         # 三条触发路径（调度器 22:05 / worker 事件驱动 / 启动恢复）可能几乎同时到达，
         # 没有这道闸门就会为同一目标期号写入多份 pending，污染后续反馈结算。
-        from data.feedback import _next_issue, load_pending
+        from data.feedback import _next_issue, load_pending, latest_production_pending
         target_issue = _next_issue(lottery_name)
         groups_eff = resolve_groups(lottery_name, params.get("groups"))
         # ★ 2026-10-18：显式注数 ≠ 看板滑轨时留痕（验证出号会覆盖生产 pending 的入口）
@@ -1161,18 +1169,20 @@ def run_auto_pipeline_core(lottery_name: str, params: dict, task_id: Optional[st
                        f"本次生成会覆盖下一期生产 pending；仅验证请传 record_pending=false")
                 logger.warning(msg)
                 steps.append(f"注数 {groups_eff} ≠ 滑轨 {_slide_groups}（显式指定）")
-        existing = [p for p in load_pending(lottery_name) if p.get("目标期号") == target_issue]
+        # ★ 只看**生产批**：研究批是 200 注且后写，若被当成「已有预测」复用，
+        #   整期生产台账会被静默跳过（滑轨恰好 200 时尤其危险）。
+        existing = latest_production_pending(load_pending(lottery_name), target_issue=target_issue)
         # ★ 2026-10-11：出号数量 = 最终注数 → 已有预测的组数须与当前出号数量**一致**
         #   才复用；不一致（用户改了滑轨 / 历史 pending 口径不同）则按新数量重新生成，
-        #   覆盖旧 pending（同 (目标期号,档位) 去重，不叠加）。
-        if existing and len(existing[0].get("预测号码") or []) == groups_eff:
-            predictions = (existing[0].get("预测号码") or [])
+        #   覆盖旧 pending（同 (目标期号,档位,台账域) 去重，不叠加）。
+        if existing and len(existing.get("预测号码") or []) == groups_eff:
+            predictions = (existing.get("预测号码") or [])
             pred_info = f"复用下一期 {target_issue} 已有预测 {len(predictions)}组"
             steps.append(f"跳过预测(下期{target_issue}已预测)")
         else:
             if existing:
                 steps.append(f"重新生成(下期{target_issue}已有预测"
-                             f"{len(existing[0].get('预测号码') or [])}组 ≠ 出号数量{groups_eff})")
+                             f"{len(existing.get('预测号码') or [])}组 ≠ 出号数量{groups_eff})")
             pred = predict(
                 lottery_name=lottery_name,
                 groups=groups_eff,
@@ -1187,6 +1197,24 @@ def run_auto_pipeline_core(lottery_name: str, params: dict, task_id: Optional[st
             if not _record_pending(params):
                 pred_info += "（仅试算，未写 pending）"
             steps.append(f"{pred_info} ({pred['预测模式']})")
+
+            # ③a 低拥挤研究台账（平行批次，默认关闭，见 config/lowcrowd.json）
+            #   为什么放这里：调度器 / worker / 启动恢复三条路径都经过本函数，
+            #   一处接入即全覆盖；且位置在生产出号之后 ⇒ 研究侧任何失败都不影响生产。
+            #   试算 / 验证（record_pending=False）不落研究批，避免打断台账序列。
+            if _record_pending(params):
+                try:
+                    from prediction.engine import maybe_run_lowcrowd_parallel_batch
+                    _lc = maybe_run_lowcrowd_parallel_batch(
+                        lottery_name, target_issue=target_issue)
+                    _lc_state = _lc.get("状态")
+                    if _lc_state == "已生成":
+                        steps.append(f"研究批 {_lc.get('注数')} 注"
+                                     f"（独立台账域，不参与轮播/权重/滑轨）")
+                    elif _lc_state == "拒绝":
+                        steps.append(f"研究批未出号：{_lc.get('原因')}")
+                except Exception as e:  # noqa: BLE001 - 研究侧绝不阻塞主流程
+                    logger.warning(f"低拥挤研究批接入失败（不影响主流程）: {e}")
 
     # ③b 前瞻 A/B 对照实验（NetPayout WP3）
     #   先结算已开奖期次（开奖数据刚在①更新），再为下一期记录 A/B 两组号码。
@@ -1441,16 +1469,23 @@ def run_auto_batch_task(task_id: str, lotteries: list, modes: list, params: dict
     )
 
 
-def build_pending_with_weights(lottery_name: str) -> dict:
+def build_pending_with_weights(lottery_name: str, domain: Optional[str] = None) -> dict:
     """加载待开奖预测并附策略权重/推荐分/推荐使用标记。
 
-    返回 {total, strategy_weights, records}，records 内每组带 策略权重/推荐分/recommended。
-    供 feedback 页与 EV 页复用，避免逻辑漂移。
+    返回 {total, strategy_weights, records, research_total}，
+    records 内每组带 策略权重/推荐分/recommended。供 feedback 页与 EV 页复用，避免逻辑漂移。
+
+    ★ domain：默认 None = 只看**生产批**（研究台账批不参与生产决策，且它是 200 注
+      的低拥挤组合，混进来会让「待开奖注数」翻倍）。传 "研究" 可单独查看研究批。
+      research_total 始终回传研究批条数，供页面提示「另有 N 条研究批」。
     """
-    from data.feedback import load_pending
+    from data.feedback import DOMAIN_PROD, DOMAIN_RESEARCH, _domain_of, load_pending
     from prediction.optimizer import get_strategy_weights
 
-    pending = load_pending(lottery_name)
+    want = domain if domain in (DOMAIN_PROD, DOMAIN_RESEARCH) else DOMAIN_PROD
+    _all = load_pending(lottery_name)
+    research_total = sum(1 for r in _all if _domain_of(r) == DOMAIN_RESEARCH)
+    pending = [r for r in _all if _domain_of(r) == want]
     weights = get_strategy_weights(lottery_name)
     if not weights:
         weights = {"高频策略": 0.25, "遗漏值策略": 0.25, "区间均衡策略": 0.25, "ML策略": 0.25}
@@ -1479,7 +1514,8 @@ def build_pending_with_weights(lottery_name: str) -> dict:
         rec["预测号码"] = [g for _, g in scored]
         enriched.append(rec)
 
-    return {"total": len(enriched), "strategy_weights": weights, "records": enriched}
+    return {"total": len(enriched), "strategy_weights": weights, "records": enriched,
+            "domain": want, "research_total": research_total}
 
 
 def get_training_honesty(lottery_name: str) -> dict:

@@ -57,8 +57,33 @@ def _is_prod_feedback_path(path) -> bool:
 # 默认策略权重（均分）
 DEFAULT_STRATEGIES = ["高频策略", "遗漏值策略", "区间均衡策略"]
 
+# 研究性出号入口：默认不参与轮转 / 权重学习 / 动态注数安全阀。
+# ★ 为什么必须显式排除（不是"不学习"这么简单）：
+#   _gate_survived_strategies 返回的通过集合里不会有它们 ⇒ 一旦进了 raw_weights，
+#   就会被当成「未通过闸门者」参与「均分剩余权重」，把三个生产策略的权重从 1/3
+#   稀释到 1/6。这是一条**静默回归**，必须靠下面的 continue 挡掉。
+#   （策略名不得含「ML」/「统计训练」，否则被 normalize_strategy_name 归并。）
+NON_LEARNING_STRATEGIES = frozenset({"低拥挤策略"})
+
 # 训练模型（ML / 统计训练）归一化后的统一策略名，参与反馈权重分配
 ML_STRATEGY = "ML策略"
+
+# 低拥挤策略挂进 pending / feedback 的元数据键（仅供归因与展示）
+LOWCROWD_KEYS = ("低拥挤",)
+
+# ---- 台账域：这条记录是否参与生产决策（与「档位」正交）----
+# ★ 为什么不给 VALID_TIERS 加第 4 个档位：
+#   · tier_comparison() 用 VALID_TIERS 遍历产出「三档对比」⇒ 会直接多一行；
+#   · 前端 loadTierComparison 的 order 只有三档、会把它过滤掉（接口 4 行 / 页面 3 行，口径不一致）；
+#   · renderPendingRecords 的 tierOrder 把未识别档位一律归「一般」⇒ 研究批反而混进一般档 Tab。
+#   档位回答「用哪套选号流程」，台账域回答「是否参与生产决策」，两者正交，不能压成一个枚举。
+DOMAIN_PROD = "生产"
+DOMAIN_RESEARCH = "研究"
+DOMAIN_KEY = "台账域"
+DOMAINS = (DOMAIN_PROD, DOMAIN_RESEARCH)
+
+# 研究性入口 == 不参与学习。两者必须是**同一集合**，禁止各写一份（否则迟早漂移）。
+RESEARCH_STRATEGIES = NON_LEARNING_STRATEGIES
 
 # 闸门联动：通过闸门的策略（有 proven edge）可分配的权重质量上限比例，
 # 剩余 (1-GATE_WINNER_MASS) 由未通过闸门的策略均分。
@@ -83,18 +108,44 @@ def _make_batch_id(lottery_name: str, prediction: dict) -> str:
     """
     生成批次号：一次出号 = 一条 pending = 一个批次，组内所有注共用同一个号。
 
-    形如 `双色球-26106-一般-20260913-214858`（彩种-目标期号-档位-时间戳）。
+    形如 `双色球-26106-一般-生产-20260913-214858-123`
+    （彩种-目标期号-档位-台账域-时间戳到毫秒）。
+
     带上档位是因为三档管线（一般/稳健/高鲁棒）会各自对同一期出号，
     它们票面可能完全相同，但属于三次独立的出号任务，不该并成一个批次。
+
+    带上台账域 + 毫秒是因为生产批与研究批（低拥挤研究台账）会同为「一般」档、
+    同一期、同一秒落账 —— 只用「期号+档位+秒」**必然撞号**，撞号会让
+    `_last_compress_kpi`（按批次号取最新批）与 `ev/batch.group_batches` 把两批并成一批。
+
     2026-09-14 之前的历史记录没有这个字段，查询侧由 ev/batch.py 按评估时间聚簇回推。
     """
     raw = prediction.get("记录时间") or datetime.now().isoformat()
     try:
-        ts = datetime.fromisoformat(str(raw)).strftime("%Y%m%d-%H%M%S")
+        ts = datetime.fromisoformat(str(raw)).strftime("%Y%m%d-%H%M%S-%f")[:-3]
     except (ValueError, TypeError):
         ts = str(raw)[:19].replace("-", "").replace(":", "").replace(" ", "-").replace("T", "-")
     tier = _tier_of(prediction)
-    return f"{lottery_name}-{prediction.get('目标期号')}-{tier}-{ts}"
+    tag = "研究" if _domain_of(prediction) == DOMAIN_RESEARCH else "生产"
+    return _unique_batch_id(f"{lottery_name}-{prediction.get('目标期号')}-{tier}-{tag}-{ts}")
+
+
+# 同进程内连续取号的状态（同一毫秒 / 同一固定「记录时间」时的兜底）
+_BATCH_SEQ: Dict[str, Any] = {"base": "", "n": 0}
+
+
+def _unique_batch_id(base: str) -> str:
+    """同一 base 在同一进程内再次取号时追加 -2/-3…，避免同毫秒撞号。
+
+    跨进程撞号由「台账域标签 + 毫秒」压到可忽略；这里兜底同进程连续调用
+    （测试用固定「记录时间」就能稳定触发）。批次号内部结构没有任何消费方解析。
+    """
+    if base == _BATCH_SEQ["base"]:
+        _BATCH_SEQ["n"] += 1
+        return f"{base}-{_BATCH_SEQ['n'] + 1}"
+    _BATCH_SEQ["base"] = base
+    _BATCH_SEQ["n"] = 0
+    return base
 
 
 def normalize_strategy_name(name: str) -> str:
@@ -108,6 +159,68 @@ def normalize_strategy_name(name: str) -> str:
     if name == ML_STRATEGY or "ML" in name or "统计训练" in name:
         return ML_STRATEGY
     return name
+
+
+def _domain_of(record: dict) -> str:
+    """台账域：显式字段优先；否则由策略推导；旧记录默认「生产」。
+
+    pending 顶层可能没有「策略」（低拥挤的历史形态：策略只写在每注票面上），
+    所以推导要带票面回退。
+
+    ★ 刻意不要求调用方显式传字段：`record_pending_prediction` 的注释里已经记过
+    两次「漏传」事故，5 个调用点必然会漏第三次。由策略推导 + 写入时固化，
+    旧记录天然落「生产」，新增调用点也漏不掉。
+    """
+    r = record or {}
+    d = r.get(DOMAIN_KEY)
+    if d in DOMAINS:
+        return d
+    strat = r.get("策略")
+    if not strat:
+        tickets = r.get("预测号码") or []
+        if isinstance(tickets, list) and tickets and isinstance(tickets[0], dict):
+            strat = tickets[0].get("策略")
+    return (DOMAIN_RESEARCH
+            if normalize_strategy_name(strat or "") in RESEARCH_STRATEGIES
+            else DOMAIN_PROD)
+
+
+def _pending_key(record: dict) -> tuple:
+    """pending 的去重/共存键：同一期、同一档位、同一台账域各留一条。
+
+    为什么必须带台账域：生产批与研究批同为「一般」档、同一目标期号，
+    只用 (期号, 档位) 会让后写的一批把另一批删掉。
+    """
+    return ((record or {}).get("目标期号"), _tier_of(record), _domain_of(record))
+
+
+def _recency_key(record: dict) -> str:
+    """可比的新旧字符串：记录时间 > 生成时间 > 预测日期（缺字段时退化为空串）。"""
+    r = record or {}
+    return str(r.get("记录时间") or r.get("生成时间") or r.get("预测日期") or "")
+
+
+def latest_production_pending(pending: List[dict],
+                              target_issue: Any = None) -> Optional[dict]:
+    """从 pending 列表里挑出「生产批」的最新一条；没有则返回 None。
+
+    ★ 为什么需要它：低拥挤研究台账会往同一期写一条 200 注的记录，而且**后写**。
+      所有「取 pending[0] 当本期出号」的地方（组数核对、复用闸门、启动恢复、
+      微信推送、压缩 KPI）都必须先按台账域过滤，否则会把研究票当生产票。
+      只排序是不够的 —— 研究批按时间必然排最前。
+
+    优先取「一般」档：三档管线会给同一期写 一般/稳健/高鲁棒 三条，
+    生产决策与滑轨核对看的都是一般档；没有一般档才回退到其它生产档。
+
+    target_issue=None 表示不按期号过滤。
+    """
+    rows = [p for p in (pending or []) if _domain_of(p) == DOMAIN_PROD]
+    if target_issue is not None:
+        rows = [p for p in rows if str(p.get("目标期号") or "") == str(target_issue)]
+    if not rows:
+        return None
+    general = [p for p in rows if _tier_of(p) == TIER_GENERAL]
+    return max(general or rows, key=_recency_key)
 
 
 def normalize_weights(weights: Dict[str, float]) -> Dict[str, float]:
@@ -133,6 +246,37 @@ def _history_path(lottery_name: str) -> Path:
 
 def _weights_path(lottery_name: str) -> Path:
     return FEEDBACK_DIR / f"{lottery_name}_strategy_weights.json"
+
+
+def _pending_lock_path(lottery_name: str) -> Path:
+    """pending 锁文件的**实际**路径。
+
+    `data.file_lock` 会对 target 追加 `.lock`，所以这里要按它的规则算一遍，
+    否则会出现 `xxx_pending.lock.lock` 这种双重后缀。
+    """
+    p = _pending_path(lottery_name)
+    return p.with_suffix(p.suffix + ".lock")
+
+
+def pending_lock(lottery_name: str, timeout: float = 5.0):
+    """pending 文件的进程级互斥锁。
+
+    ★ 为什么现在必须有：生产批与低拥挤研究批会在同一个 tick 里先后落账。
+      `record_pending_prediction` 是「读全量 → 去重 → 追加 → 回写」，
+      没有锁时后写者会拿旧快照覆盖前一批 —— 这正好是「研究批把生产批抹掉」
+      的复现路径，也正是本次要修的 bug 的另一种形态。
+
+    ★ pytest 进程内不锁生产目录：与 `_safe_write_json` 的写保护保持一致
+      （那里对生产路径直接 no-op），否则测试会往 training/feedback 里丢锁文件。
+    """
+    import contextlib
+
+    if _is_pytest() and _is_prod_feedback_path(_pending_path(lottery_name)):
+        return contextlib.nullcontext()
+
+    from data.file_lock import file_lock
+
+    return file_lock(_pending_path(lottery_name), timeout=timeout)
 
 
 # ============================================================
@@ -209,8 +353,9 @@ def save_pending(lottery_name: str, pending: List[dict]):
 
 def dedupe_pending(lottery_name: str) -> int:
     """
-    一次性清理 pending：同一 (目标期号, 档位) 只保留记录时间最新的一条。
-    档位化后三档（一般/稳健/高鲁棒）同期待开奖共存，去重键必须是期号+档位。
+    一次性清理 pending：同一 (目标期号, 档位, 台账域) 只保留记录时间最新的一条。
+    档位化后三档（一般/稳健/高鲁棒）同期待开奖共存，去重键必须是期号+档位；
+    低拥挤研究台账再叠加一个「台账域」⇒ 生产批与研究批同期待开奖也互不删除。
     返回实际删除的条数。
     """
     pending = load_pending(lottery_name)
@@ -219,7 +364,7 @@ def dedupe_pending(lottery_name: str) -> int:
     best_by_key = {}
     for r in pending:
         issue = r.get("目标期号")
-        key = (issue, _tier_of(r))
+        key = _pending_key(r)
         if issue is None:
             # 无目标期号的孤立记录，保留最后一条
             best_by_key.setdefault(key, r)
@@ -308,6 +453,33 @@ def _carry_mechanism_fields(pred: dict, feedback: dict) -> None:
             feedback[_pk] = pred[_pk]
 
 
+def _carry_lowcrowd_fields(pred: dict, feedback: dict) -> None:
+    """
+    把 pending 上的低拥挤策略参数带进反馈记录（λ / 门控分位 / 覆盖键 / 循环性声明）。
+
+    照抄 `_carry_mechanism_fields` 的范式：调用点必须放在 `_fb_key` **之后**，
+    新增字段**绝不进**去重键，否则同批会重复入账。
+    """
+    for _pk in LOWCROWD_KEYS:
+        if pred.get(_pk) is not None:
+            feedback[_pk] = pred[_pk]
+
+
+def _upsert_pending(lottery_name: str, prediction: dict) -> None:
+    """把一条预测并入 pending：同一 (目标期号, 档位, 台账域) 只保留最新一条。
+
+    读-改-写在锁内完成（见 `pending_lock` 的说明）。去重键带台账域 ⇒
+    生产批与研究批同期待开奖各自留一条，互不删除。
+    """
+    with pending_lock(lottery_name):
+        pending = load_pending(lottery_name)
+        key = _pending_key(prediction)
+        if key[0] is not None:
+            pending = [r for r in pending if _pending_key(r) != key]
+        pending.append(prediction)
+        save_pending(lottery_name, pending)
+
+
 def record_pending_prediction(lottery_name: str, prediction: dict):
     """
     记录一次新预测到 pending 列表（等待开奖后对比）
@@ -324,9 +496,12 @@ def record_pending_prediction(lottery_name: str, prediction: dict):
         "状态": "pending"
     }
     """
-    pending = load_pending(lottery_name)
     prediction["状态"] = "pending"
     prediction["记录时间"] = datetime.now().isoformat()
+    # —— 台账域：写入时**固化**，不依赖调用方显式传 ——
+    # 由策略（顶层或首注票面）推导：低拥挤策略 → 研究，其余 → 生产。旧记录无此字段时
+    # `_domain_of()` 也走同一条推导，天然落「生产」。
+    prediction.setdefault(DOMAIN_KEY, _domain_of(prediction))
     # 来源：显式传入优先，否则按是否带训练标记推断，再回退 predict
     if not prediction.get("来源"):
         prediction["来源"] = "train" if prediction.get("训练标记") else "predict"
@@ -371,17 +546,12 @@ def record_pending_prediction(lottery_name: str, prediction: dict):
     # 契约保护：三个字段都不进「预测号码」，故 len(预测号码) 与 号码组数 不受影响。
     _attach_mechanism_snapshot(lottery_name, prediction)
 
-    # —— 去重：同一 (目标期号, 档位) 只保留最新一条预测 ——
+    # —— 去重/共存：同一 (目标期号, 档位, 台账域) 只保留最新一条 ——
     # auto 流水线每次运行都会写入一组新预测，若开奖前不清理，
     # pending 会无限累积同一期号码（双色球曾堆积 67 条同期）。
-    # 三档管线（robust_tiers）后，同期待开奖存在 一般/稳健/高鲁棒 三条记录，
-    # 去重键必须带上档位，否则三档会互相覆盖。
-    # 这里在写入前移除同 (目标期号, 档位) 的旧记录，保证列表清爽。
-    target_issue = prediction.get("目标期号")
-    tier = _tier_of(prediction)
-    if target_issue is not None:
-        pending = [r for r in pending
-                   if not (r.get("目标期号") == target_issue and _tier_of(r) == tier)]
+    # 三档管线（robust_tiers）后，同期待开奖存在 一般/稳健/高鲁棒 三条记录；
+    # 低拥挤研究台账再叠加一个「台账域」⇒ 生产批与研究批同期待开奖也互不删除。
+    # 实际去重在 `_upsert_pending()` 的锁内完成（这里只做马后炮防御）。
 
     # —— 防御：马后炮（目标期实际已开奖，开奖后才生成的号码不入账）——
     # 两道闸（来源='train' 的训练回测刻意预测已开奖期号，放行）：
@@ -440,9 +610,9 @@ def record_pending_prediction(lottery_name: str, prediction: dict):
                     "生成时间": gen_dt.isoformat(timespec="seconds"),
                 }
 
-    pending.append(prediction)
-    save_pending(lottery_name, pending)
-    logger.info(f"已记录 pending 预测: {lottery_name}, 预测日期={prediction.get('预测日期')}, 目标期号={prediction.get('目标期号')}")
+    _upsert_pending(lottery_name, prediction)
+    logger.info(f"已记录 pending 预测: {lottery_name}, 预测日期={prediction.get('预测日期')}, "
+                f"目标期号={prediction.get('目标期号')}, 台账域={_domain_of(prediction)}")
 
 
 # ============================================================
@@ -968,10 +1138,13 @@ def evaluate_pending_predictions(lottery_name: str) -> dict:
     # 档位化后不同档位可能生成完全相同的票面（如一般档与稳健档撞号），
     # 去重键必须带档位，否则后结算的档位会被误判重复而丢账。
     def _fb_key(fb):
+        # 首位加「台账域」：生产批与研究批可能同档位、同期号、甚至同样的票面，
+        # 但不该被当成重复而丢掉一条。旧记录无该字段 → 推导为「生产」，键值与以前一致。
+        _dom = _domain_of(fb)
         if "红球命中" in fb:
-            return (_tier_of(fb), "RB", fb.get("期号"), fb.get("策略"),
+            return (_dom, _tier_of(fb), "RB", fb.get("期号"), fb.get("策略"),
                     tuple(fb.get("预测红球") or []), tuple(fb.get("预测蓝球") or []))
-        return (_tier_of(fb), "NUM", fb.get("期号"), fb.get("策略"),
+        return (_dom, _tier_of(fb), "NUM", fb.get("期号"), fb.get("策略"),
                 json.dumps(fb.get("预测号码"), ensure_ascii=False, sort_keys=True))
 
     seen_keys = {_fb_key(h) for h in history}
@@ -1066,6 +1239,8 @@ def evaluate_pending_predictions(lottery_name: str) -> dict:
                     "预测日期": pred.get("预测日期", ""),
                     "来源": pred.get("来源", "predict"),
                     "档位": _tier_of(pred),
+                    # 台账域：生产/研究。写入时固化，后续聚合据此排除研究批
+                    "台账域": _domain_of(pred),
                     "策略": ps.get("策略", ""),
                     # 出号时的置信度评分：入账留存，供事后 lift 检验（推荐分分档 vs 实际命中）
                     "置信度": ps.get("置信度"),
@@ -1096,6 +1271,8 @@ def evaluate_pending_predictions(lottery_name: str) -> dict:
                     "预测日期": pred.get("预测日期", ""),
                     "来源": pred.get("来源", "predict"),
                     "档位": _tier_of(pred),
+                    # 台账域：生产/研究。写入时固化，后续聚合据此排除研究批
+                    "台账域": _domain_of(pred),
                     "策略": ps.get("策略", ""),
                     # 出号时的置信度评分：入账留存，供事后 lift 检验（推荐分分档 vs 实际命中）
                     "置信度": ps.get("置信度"),
@@ -1132,6 +1309,7 @@ def evaluate_pending_predictions(lottery_name: str) -> dict:
             # —— P5：把出号时的机制快照带进反馈记录 ——
             # ★ 放在 _fb_key **之后**：新增字段不得改变去重键，否则同批会重复入账。
             _carry_mechanism_fields(pred, feedback)
+            _carry_lowcrowd_fields(pred, feedback)
             if _k in seen_keys:
                 # 重复(期号,策略,预测号码)不再入账，仅消费 pending
                 logger.info(f"跳过重复反馈: {lottery_name} 期{feedback.get('期号')} 策略{feedback.get('策略')}")
@@ -1197,7 +1375,14 @@ def _last_compress_kpi(lottery_name: str) -> Optional[Dict[str, Any]]:
     history = load_feedback_history(lottery_name)
     if not history:
         return None
-    recent = history[-500:]
+    # 研究性入口不驱动动态注数滑轨（否则它的压缩 KPI 会改写下一期注数）。
+    # ★ 必须**先过滤再截断**：研究批每期 200 行，先取 history[-500:] 再过滤会把生产样本
+    #   挤到个位数甚至清空 ⇒ 这里返回 None ⇒ 滑轨永远不再更新。
+    recent = [fb for fb in history
+              if _domain_of(fb) == DOMAIN_PROD
+              and normalize_strategy_name(fb.get("策略", "")) not in NON_LEARNING_STRATEGIES][-500:]
+    if not recent:
+        return None
     last_batch = None
     for fb in reversed(recent):
         b = fb.get("批次号")
@@ -1231,7 +1416,12 @@ def _last_compress_kpi(lottery_name: str) -> Optional[Dict[str, Any]]:
 def _recent_hit_stats(lottery_name: str, lookback: int = 500) -> Dict[str, Any]:
     """近期命中统计：(命中注数, 总注数, 命中率)。用于动态策略的偏离安全阀。"""
     history = load_feedback_history(lottery_name)
-    recent = history[-lookback:] if history else []
+    # 研究性入口不进命中率安全阀；★ 过滤后必须**重新计数**，不能用过滤前的 len。
+    # ★ 并且必须先过滤再截断：研究批每期 200 行，先 history[-lookback:] 再过滤
+    #   会把生产样本挤到个位数 ⇒ 命中率失真 ⇒ 安全阀按假信号改注数。
+    recent = [fb for fb in (history or [])
+              if _domain_of(fb) == DOMAIN_PROD
+              and normalize_strategy_name(fb.get("策略", "")) not in NON_LEARNING_STRATEGIES][-int(lookback):]
     n = len(recent)
     if n == 0:
         return {"hit_n": 0, "hit_rate": None}
@@ -1354,7 +1544,15 @@ def update_strategy_weights(lottery_name: str, lookback: int = None,
         # 三档的命中对比见 tier_comparison()。
         if _tier_of(f) != TIER_GENERAL:
             continue
+        # 台账域隔离：研究批不参与权重学习。
+        # ★ 与下面按策略名的过滤是**双保险**：策略名过滤要求 NON_LEARNING_STRATEGIES
+        #   始终与「研究入口」一致；台账域是写入时固化的，改名/漏配也挡得住。
+        if _domain_of(f) != DOMAIN_PROD:
+            continue
         cname = normalize_strategy_name(f["策略"])
+        # 研究性入口不参与权重学习。★ 漏掉这行会让三策略权重被稀释到 1/6（见常量处注释）
+        if cname in NON_LEARNING_STRATEGIES:
+            continue
         if "红球命中" in f:
             # 双色球/大乐透：红蓝加权得分（回退命中率逻辑）
             score = f["红球命中"] * 0.6 + f["蓝球命中"] * 0.4
@@ -1528,6 +1726,12 @@ def tier_comparison(lottery_name: str, lookback: Optional[int] = None) -> dict:
 
     for f in history:
         if not f.get("valid_prediction", True):
+            continue
+        # 台账域隔离：研究批不进「三档对比」。
+        # ★ 这段是**最要紧**的一处：研究批是「一般」档，不排除会每期 200 注全部落进
+        #   一般档，把三档的中奖率/命中得分直接稀释掉（而 VALID_TIERS 仍是三档，
+        #   接口与前端看不出任何异常）。
+        if _domain_of(f) != DOMAIN_PROD:
             continue
         t = _tier_of(f)
         stat = tiers[t]

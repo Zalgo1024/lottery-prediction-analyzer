@@ -217,7 +217,7 @@ def ensure_pending_groups() -> dict:
     返回 {彩种: {"滑轨", "原组数", "目标期号", "动作"}}（仅列出需要处理的彩种）。
     """
     from config import resolve_groups
-    from data.feedback import _next_issue, load_pending
+    from data.feedback import _next_issue, load_pending, latest_production_pending
     from web.utils import start_auto_pipeline
 
     fixed: dict = {}
@@ -225,10 +225,11 @@ def ensure_pending_groups() -> dict:
         try:
             slide = int(resolve_groups(lottery_name))
             next_issue = _next_issue(lottery_name)
-            pend = [p for p in load_pending(lottery_name)
-                    if str(p.get("目标期号") or "") == str(next_issue)]
-            if pend:
-                actual = len(pend[0].get("预测号码") or [])
+            # ★ 只看生产批：研究批（200 注）若被算进来，滑轨恰好 200 时会「一致」而跳过自愈，
+            #   真正的生产批缺失反而修不上；只有研究批时必须视为「无 pending」并触发补跑。
+            p = latest_production_pending(load_pending(lottery_name), target_issue=next_issue)
+            if p is not None:
+                actual = len(p.get("预测号码") or [])
                 if actual == slide:
                     continue
                 reason = f"组数 {actual} ≠ 滑轨 {slide}"
@@ -244,7 +245,7 @@ def ensure_pending_groups() -> dict:
             logger.warning(f"启动自愈：{lottery_name} {reason} → 已触发流水线重生成 (task={tid})")
             fixed[lottery_name] = {
                 "滑轨": slide,
-                "原组数": actual if pend else 0,
+                "原组数": actual if p is not None else 0,
                 "目标期号": next_issue,
                 "动作": "重新生成下一期预测",
             }

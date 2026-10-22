@@ -11,6 +11,9 @@
      以及下方的「目前已中奖 xx 注」常驻行；
   6. **HTML 页面必须禁浏览器缓存**（`Cache-Control: no-store`）——否则浏览器会对
      /hits 这类动态页做启发式缓存，改了模板刷新后仍是旧版。
+  7. `strategy` 筛选：**默认「全部」= 逐位保持加参数前的行为**；指定了才按
+     `normalize_strategy_name` 归一名比对（ML(logistic) → ML策略），
+     便于「低拥挤策略」这类研究性独立入口被单独筛出来看。
 
 为了确定性，测试隔离掉 feedback 读取、奖金表与记录视图，全部用合成数据。
 """
@@ -197,6 +200,104 @@ def test_time_filter_narrow_window_and_invalid_values(client):
               "?date_from=&date_to=&limit=0"):
         d2 = _get(client, q)
         assert d2["total"] == 4, q
+
+
+# ------------------------------------------------------------
+# 3.8 策略筛选（strategy）
+# ------------------------------------------------------------
+
+# 三条双色球命中：高频策略 / 低拥挤策略 / ML(logistic)（归一后 = ML策略）
+FAKE_HISTORY_STRAT = {
+    "双色球": [
+        _win("双色球", "六等"),
+        dict(_win("双色球", "六等"), 策略="低拥挤策略"),
+        dict(_win("双色球", "六等"), 策略="ML(logistic)"),
+    ],
+}
+
+
+@pytest.fixture
+def client_strat(monkeypatch):
+    monkeypatch.setattr(fb, "load_feedback_history",
+                        lambda name, lookback=None: FAKE_HISTORY_STRAT.get(name, []))
+
+    def _fake_payout(lottery, grade, issue=None):
+        return {"金额": 5.0, "浮动": False, "来源": "当期实际单注奖金", "文本": "¥5", "备注": ""}
+
+    monkeypatch.setattr(pt, "prize_payout", _fake_payout)
+    monkeypatch.setattr(hits_route, "feedback_record_view",
+                        lambda name, h: {"zones": [], "total_hit": 0, "total_choose": 0})
+    app.config["TESTING"] = True
+    return app.test_client()
+
+
+def test_strategy_default_is_bitwise_noop(client_strat):
+    """默认「全部」与不传 strategy 必须逐位一致——加参数不能改既有行为。"""
+    a = _get(client_strat, "?limit=0")
+    b = _get(client_strat, "?strategy=全部&limit=0")
+    assert a["total"] == b["total"] == 3
+    assert [r["策略"] for r in a["records"]] == [r["策略"] for r in b["records"]]
+
+
+def test_strategy_filter_picks_only_that_strategy(client_strat):
+    d = _get(client_strat, "?strategy=低拥挤策略&limit=0")
+    assert d["total"] == 1
+    assert d["universe"] == 3              # 策略是筛选，分母不动
+    assert d["records"][0]["策略"] == "低拥挤策略"
+    assert d["strategy"] == "低拥挤策略"
+
+
+def test_strategy_filter_uses_normalized_name(client_strat):
+    """ML(logistic) 必须归一成 ML策略，否则同名策略会被拆成两拨。"""
+    d = _get(client_strat, "?strategy=ML策略&limit=0")
+    assert d["total"] == 1
+    # 返回体里仍是原始票面名，前端展示不改写事实
+    assert d["records"][0]["策略"] == "ML(logistic)"
+
+
+def test_record_carries_lowcrowd_metadata_when_present(client_strat, monkeypatch):
+    """低拥挤元数据（λ / 门控 / 覆盖键 / 循环性声明）要随记录返回，否则命中页无从展示。
+
+    用户要的是「记录每期拥挤度分数、策略参数」—— 光能筛出来还不够，参数得看得见。
+    """
+    meta = {"λ": 0.5, "门控": {"生效分位": 0.3},
+            "覆盖": {"选中覆盖键": 6868, "理论上限": 7000},
+            "循环性声明": "代理分数"}
+    hist = {"双色球": [
+        dict(_win("双色球", "六等"), 策略="低拥挤策略", 低拥挤=meta),
+        dict(_win("双色球", "六等"), 策略="高频策略"),
+    ]}
+    monkeypatch.setattr(fb, "load_feedback_history",
+                        lambda name, lookback=None: hist.get(name, []))
+    d = _get(client_strat, "?strategy=低拥挤策略&limit=0")
+    assert d["total"] == 1
+    assert d["records"][0]["低拥挤"]["λ"] == 0.5
+    assert d["records"][0]["低拥挤"]["覆盖"]["选中覆盖键"] == 6868
+    # 没有该字段的记录必须是 None（旧记录不粉饰成 0 分）
+    d2 = _get(client_strat, "?limit=0")
+    assert [r.get("低拥挤") for r in d2["records"]].count(None) == 1
+
+
+def test_strategy_filter_misses_are_zero_not_error(client_strat):
+    d = _get(client_strat, "?strategy=规则优选&limit=0")
+    assert d["total"] == 0
+    assert d["universe"] == 3
+    assert d["records"] == []
+
+
+def test_page_has_strategy_filter(client):
+    """命中页 + 战绩页都要有「策略」下拉，且前端真的把参数发出去。"""
+    hits_html = client.get("/hits").get_data(as_text=True)
+    assert 'id="hits-strategy"' in hits_html
+    assert "低拥挤策略" in hits_html
+    rec_html = client.get("/records").get_data(as_text=True)
+    assert 'id="rec-strategy"' in rec_html
+    js = client.get("/static/js/main.js").get_data(as_text=True)
+    assert "hits-strategy" in js and "rec-strategy" in js
+    assert "&strategy=" in js                       # loadHits 真的拼进 URL
+    assert js.count("_strategyBadge") >= 2          # 定义 + 战绩榜真调用
+    # 低拥挤策略要有自己的徽标分支（研究入口，需注明不参与生产轮换）
+    assert "低拥挤策略" in js
 
 
 # ------------------------------------------------------------

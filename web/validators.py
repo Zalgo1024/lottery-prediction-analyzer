@@ -45,7 +45,8 @@ def validate_predict_body(f):
             if isinstance(groups, bool) or not isinstance(groups, int) or not (1 <= groups <= upper):
                 return jsonify({"error": f"号码组数需在 1-{upper} 之间（留空则按出号数量滑轨）: {groups}"}), 400
         mode = data.get("mode", "fresh")
-        if mode not in ("fresh", "trained", "rule", "high_freq", "missing", "balanced"):
+        if mode not in ("fresh", "trained", "rule", "high_freq", "missing", "balanced",
+                        "lowcrowd"):
             return jsonify({"error": f"不支持的预测模式: {mode}"}), 400
         return f(*args, **kwargs)
     return wrapper

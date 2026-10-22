@@ -24,8 +24,10 @@ def api_predict():
     task_id = start_predict(lottery, {
         "groups": groups,
         "mode": mode,
-        # ★ 验证/试算：{"record_pending": false} 只算不落库（默认 true=生产行为）
-        "record_pending": data.get("record_pending", True),
+        # ★ 验证/试算：{"record_pending": false} 只算不落库（默认 true=生产行为）。
+        # ★ 研究性入口（lowcrowd）例外：默认不落账 —— 手工用小组数跑会按
+        #   (期号, 一般, 研究) 替换掉调度器已写的 200 注研究批，打断台账序列。
+        "record_pending": data.get("record_pending", mode != "lowcrowd"),
     })
     return jsonify({"task_id": task_id})
 

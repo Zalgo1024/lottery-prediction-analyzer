@@ -56,7 +56,13 @@ def check_pending_freshness():
         latest = max((r.期号 for r in load_lottery(name).records if r.期号), default=None)
         pf = FB / f"{name}_pending.json"
         pend = json.load(open(pf, encoding="utf-8")) if pf.exists() else []
-        active = [p for p in pend if p.get("状态") == "pending"]
+        # ★ 只看生产批：研究台账批（低拥挤 200 注）会把「出号注数」抬高，
+        #   触发「出号 N 注（期望 M）」的假告警。
+        from data.feedback import DOMAIN_PROD, DOMAIN_RESEARCH, _domain_of
+
+        pending_all = [p for p in pend if p.get("状态") == "pending"]
+        active = [p for p in pending_all if _domain_of(p) == DOMAIN_PROD]
+        research_n = sum(1 for p in pending_all if _domain_of(p) == DOMAIN_RESEARCH)
         targets = sorted({p.get("目标期号") for p in active if p.get("目标期号") is not None})
         groups = sum(len(p.get("预测号码") or []) for p in active)
         issues = []
@@ -84,6 +90,7 @@ def check_pending_freshness():
                 issues.append(
                     f"乐透型出号仅 {groups} 注（低于每策略保底 {PRUNE_MIN_PER_STRATEGY}）")
         out.append({"彩种": name, "本地最新期": latest, "pending条数": len(active),
+                    "研究批条数": research_n,
                     "目标期": targets, "出号注数": groups, "问题": issues})
     return out
 

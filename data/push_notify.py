@@ -978,12 +978,18 @@ def digest_payload(lottery: str) -> Optional[Dict[str, Any]]:
     """
     from data import feedback as fb
     lottery = canonical_lottery(lottery)   # 「排列三」→「排列3」，否则读不到文件
+    # ★ 只推生产批：研究台账批（低拥挤 200 注）后写且注数大，
+    #   取 pending[0] 会把 200 注研究票当成「本期出号」推到微信。
     pending = fb.load_pending(lottery)
-    predictions = (pending[0].get("预测号码") or []) if pending else []
-    pred_info = f"目标期号 {pending[0].get('目标期号')}" if pending else ""
+    prod = fb.latest_production_pending(pending)
+    predictions = (prod.get("预测号码") or []) if prod else []
+    pred_info = f"目标期号 {prod.get('目标期号')}" if prod else ""
     draw_numbers = _latest_draw(lottery)
 
-    hist = fb.load_feedback_history(lottery, lookback=200)
+    # 中奖历史同样排除研究域；且必须**先过滤再截断**（load_feedback_history 的
+    # lookback 是先截断，研究批一开就会把生产中奖记录挤出窗口）。
+    hist = [r for r in fb.load_feedback_history(lottery)
+            if fb._domain_of(r) == fb.DOMAIN_PROD][-200:]
     wins = [r for r in hist if _grade_of(r) and _grade_of(r) != "未中"]
     hit_records = [{
         "num": _fmt_feedback_ticket(r),

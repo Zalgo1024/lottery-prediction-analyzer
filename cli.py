@@ -242,10 +242,17 @@ def main():
         help="只算不落库：不写生产 pending（冒烟/验证专用；robust 模式同样生效）",
     )
     pred_parser.add_argument(
+        "--record-pending",
+        action="store_true",
+        help="lowcrowd 专用：显式写入**研究台账**（台账域=研究）。"
+             "不加则只算不落库——研究入口默认不入账，且手工跑会用小组数"
+             "替换掉调度器已写的研究批，污染台账序列",
+    )
+    pred_parser.add_argument(
         "--mode",
-        choices=["fresh", "trained", "rule", "robust"],
+        choices=["fresh", "trained", "rule", "robust", "lowcrowd"],
         default=None,
-        help="预测模式：fresh 即时统计 / trained 加载训练参数 / rule 规则优选 / robust 三档鲁棒出号",
+        help="预测模式：fresh 即时统计 / trained 加载训练参数 / rule 规则优选 / robust 三档鲁棒出号 / lowcrowd 低拥挤策略（研究性独立入口，默认不参与轮转）",
     )
     pred_parser.add_argument(
         "--tier",
@@ -796,7 +803,8 @@ def _cmd_gap(args):
 def _cmd_auto(args):
     """自动流水线：抓取 → 评估 → 异常检测 → 预测 → 期望 →（可选）重训"""
     from data.fetcher import update_lottery_data
-    from data.feedback import evaluate_pending_predictions, load_pending, _next_issue
+    from data.feedback import (evaluate_pending_predictions, load_pending,
+                               latest_production_pending, _next_issue)
     from data.loader import load_lottery
     from prediction.engine import predict
     from prediction.reporter import save_prediction_record
@@ -959,17 +967,19 @@ def _cmd_auto(args):
             groups_eff = resolve_groups(name, args.groups)
             # 智能跳过：下一期若已有 pending 预测则不重复生成
             target_issue = _next_issue(name)
-            existing = [p for p in load_pending(name) if p.get('目标期号') == target_issue]
+            # ★ 只看生产批：研究台账批后写且 200 注，被当成「已有预测」复用会让整期
+            #   生产台账静默缺失（计划任务跑的就是这条路径）。
+            existing = latest_production_pending(load_pending(name), target_issue=target_issue)
             # ★ 2026-10-11：出号数量 = 最终注数 → 组数不一致则按当前出号数量重新生成
-            if existing and len(existing[0].get('预测号码') or []) == groups_eff:
+            if existing and len(existing.get('预测号码') or []) == groups_eff:
                 print(f"[4/6] 下一期 {target_issue} 已有预测且组数一致，跳过（避免重复 pending）")
                 steps.append(f"跳过预测(下期{target_issue}已预测)")
                 log_lines.append(f"[{name}] 跳过预测(下期{target_issue}已预测)")
-                predictions = (existing[0].get('预测号码') or [])
+                predictions = (existing.get('预测号码') or [])
                 pred_info = f"复用下一期 {target_issue} 已有预测 {len(predictions)}组"
             else:
                 if existing:
-                    _old_n = len(existing[0].get('预测号码') or [])
+                    _old_n = len(existing.get('预测号码') or [])
                     print(f"[4/6] 下一期 {target_issue} 已有预测（{_old_n}组）≠ 出号数量 {groups_eff}，重新生成")
                     steps.append(f"重新生成(下期{target_issue}组数{_old_n}≠{groups_eff})")
                     log_lines.append(f"[{name}] 重新生成(下期{target_issue}组数{_old_n}≠{groups_eff})")
@@ -996,6 +1006,25 @@ def _cmd_auto(args):
                     steps.append(err)
                     log_lines.append(f"[{name}] {err}")
                     any_failed = True
+
+            # ④a 低拥挤研究台账（平行批次，默认关闭）
+            #    Windows 计划任务跑的是 `cli auto`，不在这里接就会出现
+            #    「计划任务跑完没有研究批、Flask 调度器再跑才补上」的不一致。
+            if not args.no_record:
+                try:
+                    from prediction.engine import maybe_run_lowcrowd_parallel_batch
+                    _lc = maybe_run_lowcrowd_parallel_batch(name, target_issue=target_issue)
+                    _lc_state = _lc.get("状态")
+                    if _lc_state == "已生成":
+                        _line = (f"研究批 {_lc.get('注数')} 注"
+                                 f"（独立台账域，不参与轮播/权重/滑轨）")
+                        steps.append(_line)
+                        log_lines.append(f"[{name}] {_line}")
+                    elif _lc_state == "拒绝":
+                        steps.append(f"研究批未出号：{_lc.get('原因')}")
+                except Exception as e:  # noqa: BLE001 - 研究侧绝不阻塞主流程
+                    steps.append(f"研究批接入失败(降级): {e}")
+                    log_lines.append(f"[{name}] 研究批接入失败(降级): {e}")
 
         # ④b 前瞻 A/B 对照实验（NetPayout WP3；与 web/utils 流水线同一实现）
         #    只积累证据、不参与出号 → 失败一律降级，不阻塞主流水线。
@@ -1389,14 +1418,23 @@ def _cmd_predict(args):
 
     from prediction.engine import predict
     from config import resolve_groups
+    # ★ 研究性入口默认**不入账**：即使台账域已隔离，手工跑 `--groups 5` 也会按
+    #   (期号, 一般, 研究) 把调度器已写的 200 注研究批替换成 5 注，打断台账序列。
+    #   入账必须显式加 --record-pending。
+    record = not getattr(args, "no_record", False)
+    if args.mode == "lowcrowd":
+        record = record and bool(getattr(args, "record_pending", False))
     result = predict(
         lottery_name=args.lottery,
         groups=resolve_groups(args.lottery, args.groups),
         mode=args.mode,
-        record_pending=not getattr(args, "no_record", False),
+        record_pending=record,
     )
     if getattr(args, "no_record", False):
         print("提示：--no-record 已启用，本次结果不会写入生产 pending（仅试算）")
+    elif args.mode == "lowcrowd" and not record:
+        print("提示：研究入口默认不落账。如需写入本期研究台账，加 --record-pending"
+              "（会替换本期已有研究批）")
 
     path = save_prediction_record(result)
 

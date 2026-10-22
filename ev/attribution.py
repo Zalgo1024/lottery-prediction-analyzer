@@ -128,10 +128,14 @@ def latest_batch_coverage(lottery: str) -> Dict[str, Any]:
     try:
         from ev.coverage import prune_predicted_sets
 
-        pend = [p for p in fb.load_pending(lottery) if p.get("状态") == "pending"]
+        # ★ 只看生产批：研究台账批（低拥挤 200 注）同期共存且注数更大，
+        #   混进来会让「当前批次覆盖 KPI」取到研究票的名义/等效注数。
+        pend = [p for p in fb.load_pending(lottery)
+                if p.get("状态") == "pending" and fb._domain_of(p) == fb.DOMAIN_PROD]
         if not pend:
             return {}
-        latest = max(pend, key=lambda p: _as_int_issue(p.get("目标期号")))
+        general = [p for p in pend if fb._tier_of(p) == fb.TIER_GENERAL]
+        latest = max(general or pend, key=lambda p: _as_int_issue(p.get("目标期号")))
         tickets = latest.get("预测号码") or []
         if not tickets:
             return {}

@@ -159,9 +159,13 @@ def api_feedback_history(lottery):
 @api_error_handler
 @validate_lottery
 def api_feedback_pending(lottery):
-    """待开奖预测列表（附带每组策略权重与推荐分，标出 Top1 推荐使用）"""
+    """待开奖预测列表（附带每组策略权重与推荐分，标出 Top1 推荐使用）
+
+    ?domain=研究 可单独查看低拥挤研究台账批；默认只看生产批（研究批 200 注，
+    混进「待开奖注数」会让生产口径翻倍）。`research_total` 始终回传，供页面提示。
+    """
     from web.utils import build_pending_with_weights
-    return jsonify(build_pending_with_weights(lottery))
+    return jsonify(build_pending_with_weights(lottery, domain=request.args.get("domain")))
 
 
 @bp.route("/api/feedback/<lottery>/tier-comparison")

@@ -14,9 +14,10 @@ import logging
 import math
 import pickle
 import random
+import zlib
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -1284,6 +1285,195 @@ def _window_candidates(lottery_name: str, records: list, k: int, seed: int) -> L
     return out
 
 
+LOWCROWD_STRATEGY = "低拥挤策略"
+
+
+def _stable_seed(lottery_name: str, issue: Any) -> int:
+    """跨进程稳定的整数 seed。
+
+    内置 `hash()` 对 str 走 PYTHONHASHSEED 加盐 ⇒ 同一个 (彩种, 期号) 在不同进程里
+    得到不同的值。低拥挤策略是「同一期给同一套号」的语义（便于复盘与台账去重），
+    所以必须用 crc32 这种确定性摘要。
+    """
+    return zlib.crc32(f"{lottery_name}|{issue}".encode("utf-8")) & 0xFFFFFFFF
+
+
+def _predict_lowcrowd(lottery_name: str, groups: int, schema, cfg: dict, data,
+                      freqs: dict, missing: dict, historical_hit_rate: float,
+                      record_pending: bool = True) -> Dict[str, Any]:
+    """
+    低拥挤目标策略 —— 与高频 / 遗漏 / 区间均衡**并列**的独立研究性入口。
+
+    ★ 独立性：放在三策略轮转之前直接 return ⇒ 天然跳过轮转、轮转补齐与 _apply_prune；
+      且 data/feedback.NON_LEARNING_STRATEGIES 已把它排除出权重学习与动态注数安全阀。
+      ⇒ 默认不影响当前预测；只有显式 mode="lowcrowd" 才出号。
+
+    ★ 与覆盖策略（ev/selection.select_coverage）是**两个独立入口**，不合并成一个指标：
+      select_coverage 只做后区分散（盯 ≥5 元通道），本策略盯 ≥10 元通道的覆盖 +
+      拥挤度门控，二者目标奖级与打分维度都不同。
+
+    ★ 诚实边界：换选号不改变单注中奖概率、也不改变平均中奖次数；
+      λ 与 gate_q 只改变「K 注之间中奖结果的重叠结构」与「奖级通道的覆盖结构」。
+    """
+    from datetime import datetime
+
+    from data.feedback import predict_target
+
+    from ev import lowcrowd_select as ls
+    from ev import popularity_proxy as pp
+    from ev.selection import _rand_tickets
+
+    params = ls.load_params()
+    pool_size = int(params.get("候选池", 20000))
+    cap = int(params.get("重叠上限", 3))     # ★ 生产口径：红球交集 ≤3
+    lam = float(params.get("λ", 0.5))
+    gate_q = float(params.get("gate_q", 0.30))
+
+    tgt_issue, predicted_date = predict_target(lottery_name)
+    if predicted_date is None:
+        predicted_date = next_draw_date(lottery_name)
+    # ★ 不能用内置 hash()：str 的 hash 受 PYTHONHASHSEED 加盐、**跨进程不稳定**
+    #   ⇒ 服务重启后同一期号会出另一套号码，而反馈去重键含预测号码 ⇒ 同一期被记成
+    #   两批 pending、两批都会评估 ⇒ 战绩翻倍。crc32 跨进程稳定，才是「同一期同一套号」。
+    seed = _stable_seed(lottery_name, tgt_issue)
+
+    if not pp.go_or_none(lottery_name):
+        return {
+            "lottery_name": lottery_name, "预测模式": "lowcrowd",
+            # 顶层「策略」：台账域靠它推导（写入 pending 前就成立，不用回退首注票面）
+            "策略": LOWCROWD_STRATEGY,
+            "拒绝": True, "号码组数": 0, "预测号码": [],
+            "原因": f"{lottery_name} 拥挤度代理不可用（首版仅双色球）→ 不出号，不静默降级",
+            "低拥挤": {"循环性声明": pp.CROWD_PROXY_CAVEAT},
+        }
+
+    pool = _rand_tickets(lottery_name, pool_size, np.random.default_rng(seed))
+    u = pp.crowd_quantiles(lottery_name, pool)
+    tickets, meta = ls.select_lowcrowd(
+        lottery_name, pool, groups, u, lam=lam, gate_q=gate_q, cap=cap,
+        beta_caliber="冻结β（与 ev/selection 同口径）")
+
+    # 选中的先，其余按冷→热补作 refill（保留策略标签，避免落到「随机补齐」稀释归因）
+    chosen_keys = {(tuple(t["红球"]), tuple(t["蓝球"])) for t in tickets}
+    order_all = np.argsort(np.where(np.isfinite(u), u, np.inf), kind="stable")
+    candidates = list(tickets)
+    for i in order_all:
+        if len(candidates) >= len(tickets) + max(groups * 2, 200):
+            break
+        t = pool[int(i)]
+        if (tuple(t["红球"]), tuple(t["蓝球"])) in chosen_keys:
+            continue
+        candidates.append(t)
+
+    existing: set = set()
+    predicted_sets: List[PredictSet] = []
+    refill: List[PredictSet] = []
+    for t in candidates:
+        r, b, ok = _dedup_and_record(sorted(int(x) for x in t["红球"]),
+                                     sorted(int(x) for x in t["蓝球"]),
+                                     existing, cfg)
+        if not ok:
+            continue
+        conf, detail = _compute_confidence_v2(
+            r, b, freqs["红球"]["freq"], freqs["蓝球"]["freq"],
+            missing["红球"], missing["蓝球"], data.total_records, historical_hit_rate)
+        ps = PredictSet(r, b, None, confidence=conf, score_detail=detail,
+                        strategy=LOWCROWD_STRATEGY)
+        if len(predicted_sets) < groups:
+            predicted_sets.append(ps)
+        elif len(refill) < groups:
+            refill.append(ps)
+        else:
+            break
+
+    predicted_sets, pad_kpi = _pad_to_groups(
+        predicted_sets, groups, schema, lottery_name=lottery_name,
+        refill_pool=refill, score_fn=lambda ps: ps.confidence)
+    predicted_sets.sort(key=lambda x: x.confidence, reverse=True)
+
+    meta["档位名"] = params.get("档位名")
+    meta["候选池"] = pool_size
+    if any(int((pad_kpi or {}).get(k) or 0) for k in ("回填剪枝票", "随机补齐", "截断")):
+        meta["补齐统计"] = pad_kpi
+
+    result = {
+        "lottery_name": lottery_name,
+        "预测日期": str(predicted_date),
+        "预测模式": "lowcrowd",
+        # 顶层「策略」：让 `_domain_of()` 不必回退到首注票面就能判定「研究域」
+        "策略": LOWCROWD_STRATEGY,
+        "号码组数": len(predicted_sets),
+        "预测号码": [ps.to_dict() for ps in predicted_sets],
+        "生成时间": datetime.now().isoformat(),
+        "目标期号": tgt_issue,
+        # ★ 必须写：否则 pending 组数 < 滑轨 ⇒ 复用判据永不成立
+        "目标注数": groups,
+        "低拥挤": meta,
+    }
+    if record_pending:
+        try:
+            from data.feedback import record_pending_prediction
+            record_pending_prediction(lottery_name, result)
+        except Exception as e:
+            logger.warning(f"记录 pending 预测失败: {e}")
+    return result
+
+
+def maybe_run_lowcrowd_parallel_batch(lottery_name: str, *,
+                                      target_issue: Any = None) -> Dict[str, Any]:
+    """低拥挤研究台账的「平行批次」：给同一目标期号额外写一条**研究域** pending。
+
+    ★ 这是研究台账，不是生产出号：
+      · 台账域=研究（由策略名推导、写入时固化），与生产批同期待开奖**共存**、互不删除；
+      · 不参与权重学习 / 命中率安全阀 / 动态注数滑轨（策略名 + 台账域双保险）；
+      · 注数固定 `config/lowcrowd.json` 的 200，**不跟看板滑轨** ——
+        与回测口径（K=200）可比，跟滑轨会让 K 逐期漂移、台账序列失去可比性；
+      · 只对拥挤度代理可用的彩种（首版双色球）；其它彩种显式跳过，不静默出号；
+      · 任何异常一律吞掉并返回状态 —— 绝不阻塞、不回滚生产流程。
+
+    幂等：同一 (目标期号, 研究域) 已有且注数一致就跳过。三条触发路径
+    （调度器 / worker / 启动恢复）都经过同一调用点，靠这个闸门去重；
+    即使闸门失效，pending 去重键带台账域，最终也只留一条（替换而非追加）。
+    """
+    try:
+        from ev import lowcrowd_select as ls
+        from ev import popularity_proxy as pp
+
+        spec = (ls.load_params().get("调度器平行批次") or {})
+        if not spec.get("启用"):
+            return {"状态": "未启用"}
+        if not pp.go_or_none(lottery_name):
+            return {"状态": "不支持彩种", "原因": "拥挤度代理仅双色球可用"}
+
+        n = int(spec.get("注数") or 200)
+        from data.feedback import (DOMAIN_RESEARCH, _domain_of, _next_issue,
+                                   load_pending)
+
+        issue = target_issue or _next_issue(lottery_name)
+
+        def _already() -> bool:
+            for p in load_pending(lottery_name):
+                if (str(p.get("目标期号")) == str(issue)
+                        and _domain_of(p) == DOMAIN_RESEARCH
+                        and len(p.get("预测号码") or []) == n):
+                    return True
+            return False
+
+        if _already():
+            return {"状态": "已存在", "注数": n, "目标期号": issue}
+
+        pred = predict(lottery_name=lottery_name, groups=n,
+                       mode="lowcrowd", record_pending=True)
+        if pred.get("拒绝") or not pred.get("预测号码"):
+            return {"状态": "拒绝", "目标期号": issue,
+                    "原因": pred.get("原因") or "低拥挤未出号"}
+        return {"状态": "已生成", "注数": len(pred.get("预测号码") or []),
+                "目标期号": issue}
+    except Exception as e:  # noqa: BLE001 - 研究侧失败绝不外溢
+        logger.warning(f"低拥挤研究批失败（已降级，不影响生产）: {lottery_name} -> {e}")
+        return {"状态": "失败", "原因": str(e)[:200]}
+
+
 def _score_candidates(lottery_name: str, records: list, zones_list: List[dict]) -> List[float]:
     """用给定历史切片的统计量，对一组**已有票面**重算置信度（无副作用）。
 
@@ -1418,6 +1608,13 @@ def predict(
 
     # 三种生成策略
     strategies = [_strategy_high_freq, _strategy_missing_value, _strategy_balanced]
+
+    # 低拥挤目标策略：独立研究性入口。放在三策略轮转之前直接 return ⇒
+    # 天然跳过轮转补齐与 _apply_prune，且不参与权重学习 / 动态注数安全阀。
+    if mode == "lowcrowd":
+        return _predict_lowcrowd(lottery_name, groups, schema, cfg, data,
+                                 freqs, missing, historical_hit_rate,
+                                 record_pending=record_pending)
 
     existing = set()
     predicted_sets = []
@@ -1662,7 +1859,8 @@ def predict(
         predicted_date = next_draw_date(lottery_name)
 
     # 预测模式标签：单策略模式保持原值，便于前端/战绩识别具体策略
-    mode_label = mode if mode in ("fresh", "trained", "rule", "high_freq", "missing", "balanced") else "trained"
+    mode_label = mode if mode in ("fresh", "trained", "rule", "high_freq", "missing",
+                                  "balanced", "lowcrowd") else "trained"
 
     result = {
         "lottery_name": lottery_name,

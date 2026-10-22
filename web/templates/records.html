@@ -1,11 +1,21 @@
 {% extends "base.html" %}
 {% block content %}
 <h2><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M8 4h8v4a4 4 0 0 1-8 0V4z"/><path d="M8 5H5v2a3 3 0 0 0 3 3M16 5h3v2a3 3 0 0 1-3 3"/><path d="M12 12v4M9 20h6M10 16h4l-1 4h-2z"/></svg> 策略战绩榜</h2>
-<p style="color:var(--gray);margin-bottom:15px">所有策略公开比命中：实盘战绩（开奖后真实对比） + 回测战绩（历史滚动预测）。表下方的「机制缝隙（四轨测量）」是<strong>状态卡而非战绩行</strong>——γ=0 时出号与基础策略逐位相同，故无独立战绩样本；再下方的「机制缝隙·前瞻对照实验」才是让机制相关策略<strong>真正产生独立战绩</strong>的地方（A=冷门偏好排序 / B=同池随机）。</p>
+<p style="color:var(--gray);margin-bottom:15px">所有策略公开比命中：实盘战绩（开奖后真实对比） + 回测战绩（历史滚动预测）。表下方的「机制缝隙（四轨测量）」是<strong>状态卡而非战绩行</strong>——γ=0 时出号与基础策略逐位相同，故无独立战绩样本；再下方的「机制缝隙·前瞻对照实验」才是让机制相关策略<strong>真正产生独立战绩</strong>的地方（A=冷门偏好排序 / B=同池随机）。<br>
+「低拥挤策略」是<strong>研究性独立入口</strong>：默认不参与生产出号轮换、权重学习与动态注数安全阀，只有被显式调用并开奖评估后才有战绩行；它用的拥挤度是<strong>代理分数</strong>（由中奖注数反推），不是真实购买量。用上方「策略」下拉可只筛它出来看。</p>
 
-<div style="margin:15px 0">
+<div style="margin:15px 0;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
   <select id="rec-lottery" style="padding:8px 15px;border:1px solid #ddd;border-radius:5px;font-size:14px">
     <option>双色球</option><option>大乐透</option><option>排列5</option><option>福彩3D</option><option>排列3</option><option>七星彩</option>
+  </select>
+  <select id="rec-strategy" onchange="loadRecords(document.getElementById('rec-lottery').value)" style="padding:8px 15px;border:1px solid #ddd;border-radius:5px;font-size:14px" title="只看某一个策略的战绩行（前端筛选，不改后端口径）">
+    <option value="全部" selected>全部策略</option>
+    <option value="高频策略">高频策略</option>
+    <option value="遗漏值策略">遗漏值策略</option>
+    <option value="区间均衡策略">区间均衡策略</option>
+    <option value="ML策略">ML策略</option>
+    <option value="规则优选">规则优选</option>
+    <option value="低拥挤策略">低拥挤策略（研究入口，默认不出号）</option>
   </select>
   <button class="btn btn-primary" onclick="loadRecords(document.getElementById('rec-lottery').value)"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M8 4h8v4a4 4 0 0 1-8 0V4z"/><path d="M8 5H5v2a3 3 0 0 0 3 3M16 5h3v2a3 3 0 0 1-3 3"/><path d="M12 12v4M9 20h6M10 16h4l-1 4h-2z"/></svg> 查看战绩</button>
 </div>

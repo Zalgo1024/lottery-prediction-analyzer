@@ -23,7 +23,9 @@ from data.schema import is_redblue, get_schema
 logger = logging.getLogger(__name__)
 
 # 战绩榜支持的策略显示顺序（ML策略 归一自 ML(logistic)/统计训练(Wxx)）
-STRATEGY_ORDER = ["高频策略", "遗漏值策略", "区间均衡策略", "ML策略", "规则优选"]
+# 「低拥挤策略」是研究性独立入口，默认不出号；一旦有战绩会自动出现在榜单，
+# 这里显式声明只影响**显示位置**（不写也会排到末尾）。
+STRATEGY_ORDER = ["高频策略", "遗漏值策略", "区间均衡策略", "ML策略", "规则优选", "低拥挤策略"]
 
 FEEDBACK_DIR = TRAINING_DIR / "feedback"
 
@@ -32,14 +34,38 @@ FEEDBACK_DIR = TRAINING_DIR / "feedback"
 # 实盘战绩（feedback_history）
 # ============================================================
 
-def _load_feedback_history(lottery_name: str) -> List[dict]:
-    """加载反馈历史（最近 500 条）"""
+# 每个台账域各取最近多少条。
+# ★ 为什么是 2000 而不是原来的 500：生产本身每期就写 200 行（一注一条），
+#   500 条只有 2.5 期；低拥挤研究批一开又是 200 行/期 ⇒ 窗口只剩 1.25 期，
+#   战绩榜的「样本数 / 中奖率」会随开关剧烈跳动，等于没有统计意义。
+FEEDBACK_LOOKBACK = 2000
+
+
+def _load_feedback_history(lottery_name: str,
+                           lookback: int = FEEDBACK_LOOKBACK) -> List[dict]:
+    """加载反馈历史：**按台账域分别取最近 N 条**再按原顺序合并。
+
+    不是「先取最近 N 条再分域」——那样研究批（200 行/期）会把生产样本挤掉，
+    而这正是战绩榜要展示的东西。
+
+    合并时保持文件内的原始顺序（`_trend_arrow` 与「最近评估时间」都依赖顺序）。
+    """
+    from data.feedback import DOMAIN_PROD, _domain_of
+
     path = FEEDBACK_DIR / f"{lottery_name}_feedback_history.json"
     if not path.exists():
         return []
     with open(path, encoding="utf-8") as f:
         history = json.load(f)
-    return history[-500:]
+    if not isinstance(history, list):
+        return []
+
+    res_idx = [i for i, r in enumerate(history) if _domain_of(r) != DOMAIN_PROD]
+    if not res_idx:
+        return history[-lookback:]
+    prod_idx = [i for i, r in enumerate(history) if _domain_of(r) == DOMAIN_PROD][-lookback:]
+    keep = sorted(set(prod_idx) | set(res_idx[-lookback:]))
+    return [history[i] for i in keep]
 
 
 def _trend_arrow(history: List[dict], strategy: str, metric_key: str = "总命中") -> str:
