@@ -1,0 +1,225 @@
+{% extends "base.html" %}
+
+{% block content %}
+{# ★ 标题并进工具栏一行：原来「大标题 + 两行说明 + 工具栏」占 145px，
+   这一段每多 10px 下面表格就少露半行。说明文字在 README / docs 里，这里只留一句话的 title 提示。 #}
+<div id="mk-toolbar" style="margin:0 0 6px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+  <b style="font-size:15px;margin-right:2px">开奖数据库</b>
+  <span id="mk-status" class="mk-badge mk-wait">检测中…</span>
+  <button class="btn btn-primary" onclick="mkReload()">刷新视图</button>
+  <button class="btn btn-info" id="mk-btn-update" onclick="mkUpdate()"
+          title="从福彩官方、体彩官方、中彩网重新抓取（约 3~5 分钟），每天 23:10 也会自动跑一次">更新数据</button>
+  <button class="btn btn-info" onclick="mkRebuild()" title="数据更新后重建查询缓存（约 3~10 秒）">重建缓存</button>
+  <a class="btn" id="mk-open" href="{{ viewer_base }}/" target="_blank" rel="noopener"
+     style="background:#fff;border:1px solid #ddd;color:#333;padding:8px 15px;border-radius:5px;display:inline-block">
+    新窗口打开
+  </a>
+  <span style="color:var(--gray);font-size:12.5px" id="mk-meta"></span>
+</div>
+
+<!-- 框架：外框固定高度，iframe 自己滚动，避免整页滚动把顶栏顶走。
+     ★ 高度按「主看板实际占位」倒算，不是拍脑袋：nav 50 + main 上下 padding 50
+       + 工具栏一行 38+6 + 外框 2 ≈ 146 ⇒ 减 96，实测页面不出外层滚动条。
+       原来这里是 160（还多算了标题行），白白少了 68px 的表格高度 = 一屏 2 行。 -->
+<div id="mk-frame-box" style="border:1px solid #e2e5eb;border-radius:8px;overflow:hidden;background:#fff;
+     height:calc(100vh - var(--nav-height) - 96px);position:relative">
+  <iframe id="mk-frame" title="开奖数据浏览器" style="width:100%;height:100%;border:0;display:block;background:#fff"></iframe>
+
+  <!-- 离线兜底：数据浏览器是独立进程，没起时不要给它一片空白 -->
+  <div id="mk-offline" class="hidden" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:#fafbfc">
+    <div style="max-width:560px;padding:26px 30px;text-align:center">
+      <div style="font-size:15px;font-weight:600;margin-bottom:8px">数据浏览器（127.0.0.1:{{ viewer_port }}）没有运行</div>
+      <p style="color:var(--gray);font-size:13px;line-height:1.8;margin-bottom:16px">
+        它是一个独立的只读进程，和主看板分开部署：即使它挂了，主看板也不受影响。<br>
+        点下面的按钮在这里直接拉起来（约 3~10 秒，首次要建查询缓存）。
+      </p>
+      <button class="btn btn-primary" id="mk-start" onclick="mkStart()">启动数据浏览器</button>
+      <div id="mk-offline-msg" style="margin-top:12px;font-size:12.5px;color:var(--gray)"></div>
+      <p style="color:var(--gray);font-size:12px;margin-top:18px">
+        也可以手动启动：<code style="background:#eef0f4;padding:2px 6px;border-radius:4px">python market/viewer.py</code>
+      </p>
+    </div>
+  </div>
+</div>
+
+<style>
+.mk-badge{font-size:12px;padding:3px 10px;border-radius:10px;border:1px solid transparent;white-space:nowrap}
+.mk-ok{color:#0f7b4f;background:#e7f6ef;border-color:#b7e2cd}
+.mk-wait{color:#8a6d00;background:#fff8e1;border-color:#f0e0a8}
+.mk-bad{color:#b91c1c;background:#fee2e2;border-color:#f5c2c2}
+</style>
+
+<script>
+(function () {
+  var BASE = {{ viewer_base | tojson }};
+  var frame = document.getElementById('mk-frame');
+  var offline = document.getElementById('mk-offline');
+  var badge = document.getElementById('mk-status');
+  var meta = document.getElementById('mk-meta');
+  var box = document.getElementById('mk-frame-box');
+
+  function setBadge(cls, text) {
+    badge.className = 'mk-badge ' + cls;
+    badge.textContent = text;
+  }
+
+  function showFrame() {
+    offline.classList.add('hidden');
+    frame.style.visibility = 'visible';
+  }
+
+  function showOffline(msg) {
+    offline.classList.remove('hidden');
+    frame.style.visibility = 'hidden';
+    if (msg) document.getElementById('mk-offline-msg').textContent = msg;
+  }
+
+  window.mkReload = function () {
+    frame.src = BASE + '/?embed=1&_t=' + Date.now();
+  };
+
+  window.mkStart = function () {
+    var btn = document.getElementById('mk-start');
+    btn.disabled = true;
+    btn.textContent = '启动中…';
+    document.getElementById('mk-offline-msg').textContent = '正在拉起进程并建缓存，请稍候…';
+    fetch('/api/market/start', { method: 'POST' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (d.ok) {
+          setTimeout(check, 600);
+          mkReload();
+        } else {
+          document.getElementById('mk-offline-msg').textContent = d.error || '启动失败';
+        }
+      })
+      .catch(function (e) {
+        document.getElementById('mk-offline-msg').textContent = '启动请求失败：' + e;
+      })
+      .finally(function () {
+        btn.disabled = false;
+        btn.textContent = '启动数据浏览器';
+      });
+  };
+
+  window.mkRebuild = function () {
+    meta.textContent = '正在重建查询缓存…';
+    fetch('/api/market/rebuild', { method: 'POST' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (d.cache) {
+          meta.textContent = '缓存已重建：' + d.cache.rows + ' 期（' + d.cache.built_at + '）';
+          mkReload();
+        } else {
+          meta.textContent = d.error || '重建失败';
+        }
+      })
+      .catch(function (e) { meta.textContent = '重建请求失败：' + e; });
+  };
+
+  // ---- 更新数据（抓官方源，3~5 分钟，异步 + 轮询） ----
+  function restoreUpdateBtn() {
+    var b = document.getElementById('mk-btn-update');
+    if (b) { b.disabled = false; b.textContent = '更新数据'; }
+  }
+
+  function pollUpdate(before) {
+    var tries = 0;
+    var timer = setInterval(function () {
+      tries++;
+      fetch('/api/market/status').then(function (r) { return r.json(); }).then(function (d) {
+        var u = d.update || {};
+        if (u.running) {
+          meta.textContent = '正在抓取官方源…已 ' + (tries * 3) + ' 秒（期间可继续浏览旧数据）';
+          return;
+        }
+        // 用 last_run 是否变化判断「这次」跑完了 —— 比看 running 稳：
+        // 线程刚起的那一瞬间 running 还没置位，容易误判成已结束。
+        if (u.last_run && u.last_run !== before) {
+          clearInterval(timer);
+          var failed = (u.last_failed || []);
+          var head = (u.last_status === 'ok') ? '更新完成' : ('更新部分失败：' + failed.join(','));
+          meta.textContent = head + ' · ' + (u.last_rows || 0) + ' 期 · ' + (u.last_elapsed || 0) + 's';
+          restoreUpdateBtn();
+          check().then(function () { mkReload(); });
+        } else if (tries > 150) {   // 7.5 分钟兜底，别让按钮永远灰着
+          clearInterval(timer);
+          meta.textContent = '更新状态未知，请点「刷新视图」或稍后重看';
+          restoreUpdateBtn();
+        }
+      }).catch(function () {
+        if (tries > 6) { clearInterval(timer); restoreUpdateBtn(); }
+      });
+    }, 3000);
+  }
+
+  window.mkUpdate = function () {
+    var btn = document.getElementById('mk-btn-update');
+    if (btn.disabled) return;
+    btn.disabled = true;
+    btn.textContent = '更新中…';
+    var before = null;
+    fetch('/api/market/status').then(function (r) { return r.json(); })
+      .then(function (d) { before = (d.update || {}).last_run || null; })
+      .finally(function () {
+        fetch('/api/market/update', { method: 'POST' })
+          .then(function (r) { return r.json(); })
+          .then(function (d) {
+            if (d.ok) {
+              meta.textContent = '已开始更新，约 3~5 分钟…';
+              pollUpdate(before);
+            } else {
+              meta.textContent = d.error || '触发失败';
+              restoreUpdateBtn();
+            }
+          })
+          .catch(function (e) {
+            meta.textContent = '触发请求失败：' + e;
+            restoreUpdateBtn();
+          });
+      });
+  };
+
+  function check() {
+    return fetch('/api/market/status')
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (d.online) {
+          setBadge('mk-ok', '在线 · ' + (d.cache ? d.cache.rows + ' 期' : '已连接'));
+          var u = d.update || {};
+          var tail = '';
+          if (u.last_run) {
+            tail = ' · 上次补库 ' + u.last_run.slice(5, 16)
+              + (u.last_status === 'ok' ? '' : '（' + (u.last_status || '未知') + '）');
+          } else {
+            tail = ' · 从未补库（每日 ' + (u.schedule || '23:10') + ' 自动）';
+          }
+          meta.textContent = 'market.db ' + (d.db_mb != null ? d.db_mb + ' MB' : '')
+            + (d.cache && d.cache.built_at ? ' · 缓存 ' + d.cache.built_at : '') + tail;
+          showFrame();
+        } else {
+          setBadge('mk-bad', '离线');
+          meta.textContent = d.db_exists
+            ? '库在（' + (d.db_mb != null ? d.db_mb + ' MB' : '') + '），但浏览器进程未运行'
+            : '连 market.db 都不存在，需要先建库';
+          showOffline(d.db_exists ? '' : '找不到 market.db，请先运行：python -m market.build');
+        }
+        return d;
+      })
+      .catch(function () {
+        setBadge('mk-bad', '状态未知');
+      });
+  }
+
+  // 先探测；在线就直接把 iframe 指过去（离线时 iframe 留空，避免浏览器报错页）
+  check().then(function (d) {
+    if (d && d.online) mkReload();
+  });
+
+  // 切回本标签页时轻量复核一次（比如用户在别处把进程关了）
+  document.addEventListener('visibilitychange', function () {
+    if (!document.hidden) check();
+  });
+})();
+</script>
+{% endblock %}

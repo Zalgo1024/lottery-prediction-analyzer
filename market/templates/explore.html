@@ -1,0 +1,896 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>开奖数据浏览器 · market.db</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='10' cy='16' r='6' fill='%23ef4444'/%3E%3Ccircle cx='22' cy='16' r='6' fill='%232563eb'/%3E%3C/svg%3E">
+<style>
+:root{
+  --bg:#f5f6f8; --card:#fff; --bd:#e2e5eb; --bd2:#eef0f4;
+  --tx:#171b23; --sub:#6b7280; --mut:#9aa1ad;
+  --acc:#2563eb; --acc-bg:#eff6ff;
+  --red:#b91c1c; --red-bg:#fee2e2;
+  --blue:#1d4ed8; --blue-bg:#dbeafe;
+  --dig:#3730a3; --dig-bg:#eef2ff;
+  --ok:#0f7b4f; --warm:#b45309;
+}
+*{box-sizing:border-box}
+/* 页面改成「应用外壳」布局：外层不滚动，只有表格区滚动。
+   ★ 为什么必须这样：`.scroll{overflow-x:auto}` 会让它自己成为滚动容器
+     （CSS 规范里 overflow-x 设成 auto 时 overflow-y 的计算值也变 auto），
+     而它的高度是 auto ⇒ 容器内部根本没有滚动量 ⇒ 里面的 position:sticky
+     **永远不会生效**。要让表头真的钉住，只能让表格区自己成为那个滚动容器。 */
+html,body{margin:0;padding:0;height:100%}
+body{background:var(--bg);color:var(--tx);
+  font:13.5px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;
+  -webkit-font-smoothing:antialiased;
+  display:flex;flex-direction:column;overflow:auto}
+button,input,select{font:inherit;color:inherit}
+
+/* ---------- 顶栏 ---------- */
+.top{flex:none;position:relative;z-index:30;background:rgba(255,255,255,.92);
+  backdrop-filter:blur(8px);border-bottom:1px solid var(--bd)}
+.top-in{max-width:1480px;margin:0 auto;padding:9px 20px 0}
+/* 标题行：彩种 chips 直接并进这一行 —— 原来 chips 独占一行（~34px），
+   加上标题行和它们之间的 gap，头部白吃 70 多像素的表格高度。 */
+.brand{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.brand h1{margin:0;font-size:16px;font-weight:650;letter-spacing:-.2px;white-space:nowrap}
+.brand .db{font-family:ui-monospace,Consolas,monospace;font-size:11.5px;color:var(--sub)}
+.brand .pipe{margin-left:auto;display:flex;gap:6px;align-items:center}
+.brand .chips{margin-left:6px}
+/* 标题行里的按钮压扁：默认 padding 会把这一行撑到 33px，而 chip 只有 25px */
+.brand .btn{padding:4px 10px;font-size:12px}
+
+/* ---------- 筛选 ---------- */
+.filters{padding:7px 0 8px;display:flex;flex-direction:column;gap:7px}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.chips{display:flex;gap:5px;flex-wrap:wrap}
+.chip{border:1px solid var(--bd);background:var(--card);border-radius:999px;
+  padding:2px 10px;font-size:12px;cursor:pointer;transition:.12s;
+  display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
+.chip:hover{border-color:#c7cdd8}
+.chip.on{background:var(--acc);border-color:var(--acc);color:#fff}
+.chip .n{font-size:11px;opacity:.65;font-variant-numeric:tabular-nums}
+.chip.on .n{opacity:.85}
+
+input[type=text],input[type=date],input[type=number],select{
+  border:1px solid var(--bd);background:var(--card);border-radius:7px;
+  padding:6px 10px;outline:none;transition:.12s}
+input:focus,select:focus{border-color:var(--acc);box-shadow:0 0 0 3px rgba(37,99,235,.12)}
+#q{flex:1;min-width:220px}
+.date-sep{color:var(--mut)}
+.btn{border:1px solid var(--bd);background:var(--card);border-radius:7px;
+  padding:6px 12px;cursor:pointer;transition:.12s;white-space:nowrap}
+.btn:hover{border-color:#c7cdd8;background:#fafbfc}
+.btn.pri{background:var(--acc);border-color:var(--acc);color:#fff}
+.btn.pri:hover{background:#1d4ed8}
+.btn.ghost{border-color:transparent;background:transparent;color:var(--sub)}
+.btn.ghost:hover{background:#eceff3}
+.adv{display:none;gap:14px;align-items:center;flex-wrap:wrap;
+  padding:10px 12px;background:#fafbfc;border:1px solid var(--bd2);border-radius:8px}
+.adv.on{display:flex}
+.adv label{display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--sub);cursor:pointer}
+.adv .grp{display:flex;align-items:center;gap:6px}
+.adv .grp span{font-size:12px;color:var(--mut)}
+.adv input[type=number]{width:96px;padding:4px 8px}
+.adv input[type=checkbox]{accent-color:var(--acc);width:14px;height:14px}
+
+/* ---------- 状态条 ---------- */
+.statbar{flex:none;max-width:1480px;margin:0 auto;padding:0 20px 7px;
+  display:flex;gap:18px;align-items:center;flex-wrap:wrap;font-size:12.5px;color:var(--sub)}
+.statbar b{color:var(--tx);font-weight:600;font-variant-numeric:tabular-nums}
+.statbar .btn{padding:1px 9px;font-size:12px;border-radius:6px}
+.statbar .dot{color:var(--bd);}
+
+/* ---------- 表格 ---------- */
+.wrap{flex:1;min-height:220px;display:flex;flex-direction:column;
+  max-width:1480px;margin:0 auto;padding:0 20px 12px;width:100%}
+.tablebox{flex:1;min-height:0;display:flex;flex-direction:column;
+  background:var(--card);border:1px solid var(--bd);border-radius:10px;
+  overflow:hidden;position:relative}
+/* 这里才是真正的滚动容器：表头 sticky 相对它定位才生效 */
+.scroll{flex:1;min-height:0;overflow:auto}
+table{width:100%;border-collapse:collapse;font-size:13px}
+thead th{position:sticky;top:0;z-index:5;background:#fbfcfd;
+  text-align:left;font-weight:500;color:var(--sub);font-size:12px;
+  padding:7px 12px;border-bottom:1px solid var(--bd);white-space:nowrap;
+  cursor:pointer;user-select:none;transition:.1s}
+thead th:hover{background:#f4f6f9;color:var(--tx)}
+thead th.no-sort{cursor:default}
+thead th.no-sort:hover{background:#fbfcfd;color:var(--sub)}
+th .arw{display:inline-block;margin-left:4px;color:var(--acc);font-size:10px}
+th .arw.off{color:#cdd3dc}
+tbody td{padding:6px 12px;border-bottom:1px solid var(--bd2);vertical-align:middle}
+tbody tr{cursor:pointer;transition:background .1s}
+tbody tr:hover{background:#f8fafd}
+tbody tr:last-child td{border-bottom:0}
+td.c{text-align:center}
+td.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+td.sub{color:var(--sub);font-size:12px}
+
+/* 彩种名与代码同行：column 排版把这列撑到 40px，整行跟着涨到 56px；
+   改成一行后行高由号码球（24px）决定，一屏多露 4 行。 */
+.lot{display:flex;align-items:baseline;gap:6px;white-space:nowrap}
+.lot b{font-weight:600;font-size:13px}
+.lot i{font-style:normal;font-size:10.5px;color:var(--mut);
+  font-family:ui-monospace,Consolas,monospace}
+.iss{font-family:ui-monospace,Consolas,monospace;font-size:12.5px;font-weight:600}
+.date{font-variant-numeric:tabular-nums;font-size:12.5px;color:var(--sub)}
+
+/* ---------- 按天分组：每一天一条明确的分界线 ----------
+   原来是一张平表：一天 6~8 期，「2026-10-20」在日期列里重复印 6~8 遍，
+   扫读时分不清哪天到哪天结束，同一期开奖的彩种也散落在各列之间。
+   现在按开奖日切成若干块，每块前面一条分组行（日期 + 星期 + 当天期数 + 当天彩种），
+   并把重复的「开奖日」列整列隐藏 —— 日期已经写在分界线上了，不需要每行再印一遍。
+   ★ 只按 CSS display:none 隐藏，不从 DOM 里删 ⇒ td:nth-child 的序号不变。 */
+table.grouped .col-date{display:none}
+tbody tr.dayhead{cursor:default}
+/* 分组行也钉住：往下滚到某一天中间时，仍然看得到「这是哪天、周几、共几期」。
+   top 用 JS 量出来的真实表头高度（见 syncTheadHeight），别写死 37px。 */
+tbody tr.dayhead td{
+  position:sticky;top:var(--thead-h,37px);z-index:4;
+  padding:9px 12px;
+  background:linear-gradient(180deg,#f4f8fd 0%,#e6edf7 100%);
+  border-top:2px solid #cbd6e4;
+  border-left:3px solid #7d8ea8;
+  border-bottom:1px solid var(--bd);
+  /* 吸顶后下面会压住半行号码，加一点投影，读起来才是"浮在上面"而不是"被切掉" */
+  box-shadow:0 2px 6px rgba(17,24,39,.07);
+}
+tbody tr.dayhead:first-child td{border-top-width:1px}
+tbody tr.dayhead:hover td{background:linear-gradient(180deg,#f4f8fd 0%,#e6edf7 100%)}
+/* 一天的最后一行补一条粗下线 ⇒ 每组上下都有界，扫读时"哪天到哪天"一眼切断 */
+tbody tr.dayend td{border-bottom:2px solid #cbd6e4}
+.dh{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.dh .d{font-family:ui-monospace,Consolas,monospace;font-size:14px;font-weight:700;
+  color:#0f172a;letter-spacing:.4px}
+.dh .w{font-size:11px;padding:0 6px;border-radius:4px;background:#e4e9f1;
+  color:#4b5563;line-height:17px}
+.dh .n{font-size:11.5px;font-weight:600;padding:0 8px;border-radius:999px;
+  background:var(--acc-bg);border:1px solid #cfe0ff;color:#1d4ed8;
+  font-variant-numeric:tabular-nums;line-height:17px}
+.dh .lots{font-size:11.5px;color:var(--sub)}
+.dh .split{margin-left:auto;font-size:11px;color:var(--mut)}
+.ghint{color:var(--warm);font-size:12px}
+
+/* ---------- 号码球：直接沿用原项目（5000 看板）的 .red-ball / .blue-ball 素材 ----------
+   原来是浅底深字的圆片，跟主看板放一起像两套系统。这里把原项目的实心渐变球
+   （radial-gradient + inset 高光 + 立体投影）搬过来，两边看到的是同一个球。
+   数字型走原项目 renderZoneBalls 的 ZONE_PALETTE，按「位」着色（每位一色）。 */
+.balls{display:flex;gap:4px;flex-wrap:wrap;max-width:340px;align-items:center}
+.ball{display:inline-flex;align-items:center;justify-content:center;
+  width:24px;height:24px;border-radius:50%;
+  font-size:11px;font-weight:700;font-variant-numeric:tabular-nums;flex:none;
+  color:#fff;border:1px solid rgba(255,255,255,.35);
+  text-shadow:0 1px 1px rgba(0,0,0,.25);
+  box-shadow:
+    inset -2px -2px 4px rgba(0,0,0,.18),
+    inset 2px 2px 4px rgba(255,255,255,.28),
+    0 2px 4px rgba(0,0,0,.14);
+  transition:transform .15s ease, box-shadow .15s ease}
+.ball:hover{transform:scale(1.12);
+  box-shadow:
+    inset -2px -2px 4px rgba(0,0,0,.18),
+    inset 2px 2px 4px rgba(255,255,255,.28),
+    0 4px 8px rgba(0,0,0,.18)}
+.ball.r{background:radial-gradient(circle at 32% 28%, #ff7e7e 0%, #e53935 55%, #b71c1c 100%)}
+.ball.b{background:radial-gradient(circle at 32% 28%, #64b5f6 0%, #1e88e5 55%, #0d47a1 100%)}
+/* 数字型按位调色板（原项目 ZONE_PALETTE 顺序） */
+.ball.p0{background:#E24B4A}.ball.p1{background:#1E90FF}.ball.p2{background:#2E9E5B}
+.ball.p3{background:#E0A020}.ball.p4{background:#8E44AD}.ball.p5{background:#16A085}
+.ball.p6{background:#D35400}.ball.p7{background:#34495E}
+.ball.small{width:19px;height:19px;font-size:9.5px}
+.sep{color:var(--mut);margin:0 2px;font-size:11px}
+/* 详情抽屉里的球略大，和原项目 .number-card 里的 34px 呼应 */
+.dball-row .ball{width:28px;height:28px;font-size:12.5px}
+.dball-row .ball.small{width:22px;height:22px;font-size:10px}
+.blabel{font-size:12px;color:var(--sub);white-space:nowrap;margin:0 2px 0 6px}
+
+.tag{display:inline-block;font-size:11px;padding:1px 7px;border-radius:5px;
+  border:1px solid var(--bd);color:var(--sub);white-space:nowrap}
+.tag.has{background:var(--acc-bg);border-color:#c7ddff;color:#1d4ed8}
+.tag.none{color:#c3c9d3;border-color:var(--bd2)}
+.tag.warm{background:#fffbeb;border-color:#fde68a;color:var(--warm)}
+
+/* ---------- 分页 ---------- */
+.pager{flex:none;display:flex;align-items:center;gap:10px;justify-content:flex-end;
+  padding:6px 4px 0;flex-wrap:wrap;font-size:12.5px;color:var(--sub)}
+.pager .pg{border:1px solid var(--bd);background:var(--card);border-radius:6px;
+  min-width:30px;height:28px;padding:0 8px;cursor:pointer;color:var(--tx)}
+.pager .pg:hover:not(:disabled){border-color:#c7cdd8}
+.pager .pg:disabled{color:#c3c9d3;cursor:not-allowed;background:#fafbfc}
+.pager .pg.on{background:var(--acc);border-color:var(--acc);color:#fff}
+.pager input{width:56px;text-align:center;padding:4px 6px;border-radius:6px;
+  border:1px solid var(--bd)}
+
+/* ---------- 空态 / 加载 ---------- */
+.empty{padding:56px 20px;text-align:center;color:var(--mut)}
+/* 空态浮在表格区上，别作为 flex 子项把滚动区挤小 */
+#empty{position:absolute;inset:0;padding-top:80px}
+.empty .big{font-size:15px;color:var(--sub);margin-bottom:6px}
+.loading{position:absolute;inset:0;background:rgba(255,255,255,.62);
+  display:none;align-items:center;justify-content:center;z-index:9}
+.loading.on{display:flex}
+.spin{width:22px;height:22px;border:2.5px solid #dbe2ee;border-top-color:var(--acc);
+  border-radius:50%;animation:sp .7s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
+
+/* ---------- 详情抽屉 ---------- */
+.mask{position:fixed;inset:0;background:rgba(17,24,39,.32);opacity:0;pointer-events:none;
+  transition:.2s;z-index:40}
+.mask.on{opacity:1;pointer-events:auto}
+.drawer{position:fixed;top:0;right:0;bottom:0;width:min(560px,94vw);background:var(--card);
+  box-shadow:-8px 0 32px rgba(17,24,39,.12);transform:translateX(102%);
+  transition:transform .24s cubic-bezier(.3,.8,.4,1);z-index:41;
+  display:flex;flex-direction:column}
+.drawer.on{transform:none}
+.dhead{padding:16px 20px;border-bottom:1px solid var(--bd);display:flex;
+  align-items:flex-start;gap:12px}
+.dhead h3{margin:0;font-size:16px;font-weight:650}
+.dhead .m{font-size:12px;color:var(--sub);margin-top:3px}
+.dhead .x{margin-left:auto;border:0;background:transparent;font-size:20px;
+  color:var(--mut);cursor:pointer;line-height:1;padding:2px 6px;border-radius:6px}
+.dhead .x:hover{background:#f1f3f7;color:var(--tx)}
+.dbody{padding:18px 20px 40px;overflow-y:auto;flex:1}
+.sect{margin-bottom:22px}
+.sect h4{margin:0 0 10px;font-size:12px;font-weight:600;color:var(--sub);
+  text-transform:uppercase;letter-spacing:.06em}
+.dball-row{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:4px}
+.kv{display:grid;grid-template-columns:88px 1fr;gap:6px 12px;font-size:13px}
+.kv dt{color:var(--sub);font-size:12.5px}
+.kv dd{margin:0;font-variant-numeric:tabular-nums}
+.mini{width:100%;border-collapse:collapse;font-size:12.5px}
+.mini th{text-align:left;color:var(--sub);font-weight:500;font-size:11.5px;
+  padding:5px 8px;border-bottom:1px solid var(--bd);position:static;cursor:default}
+.mini td{padding:5px 8px;border-bottom:1px solid var(--bd2)}
+.mini td.n{text-align:right;font-variant-numeric:tabular-nums}
+.mini tr:last-child td{border-bottom:0}
+.mini .bm{color:var(--warm);font-weight:600}
+.dtabs{display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap}
+.dtab{border:1px solid var(--bd);background:var(--card);border-radius:6px;
+  padding:3px 10px;font-size:12px;cursor:pointer;color:var(--sub);transition:.12s}
+.dtab:hover{border-color:#c7cdd8;color:var(--tx)}
+.dtab.on{background:var(--acc-bg);border-color:#c7ddff;color:#1d4ed8;font-weight:600}
+.dtab em{font-style:normal;opacity:.6;font-size:11px;margin-left:3px}
+.barline{display:flex;align-items:center;gap:8px;margin-bottom:4px;font-size:12.5px}
+.barline .r{width:58px;flex:none}
+.barline .t{flex:1;height:14px;background:#f1f3f7;border-radius:3px;overflow:hidden}
+.barline .t i{display:block;height:100%;background:linear-gradient(90deg,#3b82f6,#93c5fd)}
+.barline .v{width:44px;flex:none;text-align:right;color:var(--sub);font-size:11.5px}
+.hint{font-size:12px;color:var(--mut);margin-top:6px}
+.note{background:#fffbeb;border:1px solid #fde68a;color:#78350f;
+  border-radius:7px;padding:8px 12px;font-size:12.5px;margin-bottom:10px;line-height:1.55}
+kbd{font-family:ui-monospace,Consolas,monospace;font-size:11px;background:#eef1f5;
+  border:1px solid var(--bd);border-bottom-width:2px;border-radius:4px;padding:0 4px}
+
+@media(max-width:760px){
+  .top-in,.wrap,.statbar{padding-left:12px;padding-right:12px}
+  #q{min-width:100%;order:-1}
+  .balls{max-width:200px}
+}
+
+/* ---------- 内嵌模式（被主看板 5000 的 /market 用 iframe 载入，?embed=1） ----------
+   主看板已有顶栏和侧栏，本页再显示一次标题就成了「双层标题」，所以只藏标题文字
+   （h1 + market.db 徽标），保留「高级筛选／导出 CSV」按钮与全部筛选控件。 */
+body.embed .brand h1,
+body.embed .brand .db{display:none}
+body.embed .top{position:static;background:#fff}
+body.embed .filters{padding-top:2px}
+body.embed .wrap{padding-bottom:8px}
+</style>
+</head>
+<body class="{{ 'embed' if embed else '' }}">
+
+<div class="top"><div class="top-in">
+  <div class="brand">
+    <h1>开奖数据浏览器</h1>
+    <span class="db">market.db</span>
+    <div class="chips" id="lotChips"></div>
+    <span class="pipe">
+      <button class="btn" id="btnAdv">高级筛选</button>
+      <button class="btn" id="btnExport">导出 CSV</button>
+    </span>
+  </div>
+
+  <div class="filters">
+    <div class="row">
+      <input type="text" id="q" placeholder="搜索期号 / 日期 / 号码（多号码用逗号，如 13,14,16 表示同时包含）">
+      <input type="date" id="d0"><span class="date-sep">至</span><input type="date" id="d1">
+      <select id="source"><option value="all">全部数据源</option></select>
+      <select id="size">
+        <option value="30">每页 30</option>
+        <option value="50" selected>每页 50</option>
+        <option value="100">每页 100</option>
+        <option value="200">每页 200</option>
+      </select>
+      <button class="btn ghost" id="btnReset">重置</button>
+    </div>
+    <div class="adv" id="adv">
+      <label><input type="checkbox" id="has_region"> 仅有分省中奖</label>
+      <label><input type="checkbox" id="has_seq"> 仅有出球顺序</label>
+      <div class="grp"><span>销售额</span>
+        <input type="number" id="sales_min" placeholder="最小(万元)">
+        <span>—</span>
+        <input type="number" id="sales_max" placeholder="最大(万元)">
+      </div>
+      <div class="grp"><span>一等奖注数</span>
+        <input type="number" id="fw_min" placeholder="最小">
+        <span>—</span>
+        <input type="number" id="fw_max" placeholder="最大">
+      </div>
+    </div>
+  </div>
+</div></div>
+
+<div class="statbar" id="statbar">
+  <span>共 <b id="stTotal">—</b> 期</span>
+  <span class="dot">·</span>
+  <span>当前筛选 <b id="stFiltered">—</b> 期</span>
+  <span class="dot">·</span>
+  <span>库 <b id="stSize">—</b> MB</span>
+  <button class="btn ghost" id="btnDateOrder"
+    title="按开奖日分组显示。点击切换升序／降序">开奖日 ↓</button>
+  <span class="dot">·</span>
+  <span>点击任意行查看奖级明细与分省头奖　<kbd>/</kbd> 聚焦搜索</span>
+  <span class="ghint" id="groupHint"></span>
+</div>
+
+<div class="wrap">
+  <div class="tablebox">
+    <div class="loading" id="loading"><div class="spin"></div></div>
+    <div class="scroll">
+      <table>
+        <thead><tr>
+          <th data-sort="lottery" style="width:96px">彩种</th>
+          <th data-sort="issue" style="width:104px">期号</th>
+          <th data-sort="draw_date" class="col-date" style="width:104px">开奖日</th>
+          <th class="no-sort" style="min-width:250px">中奖号码</th>
+          <th data-sort="sales" style="width:104px">销售额</th>
+          <th data-sort="pool" style="width:104px">奖池</th>
+          <th data-sort="first_winners" style="width:86px">一等奖</th>
+          <th class="no-sort" style="width:82px">分省</th>
+          <th class="no-sort" style="width:90px">出球序</th>
+          <th class="no-sort" style="width:96px">数据源</th>
+        </tr></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+    <div id="empty" class="empty" style="display:none">
+      <div class="big">没有符合条件的期次</div>
+      <div>试试放宽日期范围，或清空号码检索</div>
+    </div>
+  </div>
+  <div class="pager" id="pager"></div>
+</div>
+
+<div class="mask" id="mask"></div>
+<aside class="drawer" id="drawer">
+  <div class="dhead">
+    <div>
+      <h3 id="dTitle">—</h3>
+      <div class="m" id="dSub">—</div>
+    </div>
+    <button class="x" id="dClose">×</button>
+  </div>
+  <div class="dbody" id="dBody"></div>
+</aside>
+
+<script>
+"use strict";
+
+const LOT_NAME = {}, LOT_FAMILY = {}, LOT_N = {};
+let META = null;
+
+const state = {
+  lots: new Set(),
+  q: "", d0: "", d1: "", source: "all",
+  has_region: false, has_seq: false,
+  sales_min: "", sales_max: "", fw_min: "", fw_max: "",
+  sort: "draw_date", order: "desc",
+  page: 1, size: 50, total: 0, pages: 0
+};
+
+const $ = id => document.getElementById(id);
+const num = n => (n === null || n === undefined) ? "—"
+  : Number(n).toLocaleString("zh-CN");
+
+function money(v) {
+  if (v === null || v === undefined || v === 0) return "—";
+  const n = Number(v);
+  if (n >= 1e8) return (n / 1e8).toFixed(2) + " 亿";
+  if (n >= 1e4) return (n / 1e4).toFixed(0) + " 万";
+  return num(n);
+}
+
+function pad2(n) { return String(n).padStart(2, "0"); }
+
+function numStats(arr) {
+  if (!arr || !arr.length) return null;
+  const sum = arr.reduce((a, b) => a + b, 0);
+  const max = Math.max(...arr), min = Math.min(...arr);
+  const odd = arr.filter(v => v % 2).length;
+  return { sum, span: max - min, max, min, odd, even: arr.length - odd };
+}
+
+/* 数字型彩种按「位」着色 —— 位序与原项目 renderZoneBalls 的 ZONE_PALETTE 一致，
+   第 1 位红、第 2 位蓝、第 3 位绿……（不是每期随机，是固定按位） */
+const DIGIT_POS = { pl3: 3, sd: 3, pl5: 5, qxc: 7 };
+const DIGIT_ZONE_NAMES = {
+  pl3: ["百位", "十位", "个位"],
+  sd:  ["百位", "十位", "个位"],
+  pl5: ["万位", "千位", "百位", "十位", "个位"],
+  qxc: ["第1位", "第2位", "第3位", "第4位", "第5位", "第6位", "第7位"],
+};
+
+function ballsHtml(front, back, seq, lot, opts) {
+  lot = lot || "";
+  opts = opts || {};
+  const nPos = DIGIT_POS[lot] || 0;        // >0 = 数字型，按位着色
+  const names = DIGIT_ZONE_NAMES[lot] || [];
+  const small = (front || []).length > 10 ? " small" : "";
+  let h = '<div class="balls">';
+  (front || []).forEach((v, i) => {
+    if (opts.labels) {
+      // 数字型每位一色，必须逐位标注；红蓝球只在第一个前面标一次「红球」，
+      // 否则会变成「红球 13 红球 14 …」这种复读
+      if (nPos) h += `<span class="blabel">${names[i] || "第" + (i + 1) + "位"}</span>`;
+      else if (i === 0) h += '<span class="blabel">红球</span>';
+    }
+    const cls = nPos ? ("p" + (i % 8)) : "r";
+    h += `<span class="ball ${cls}${small}">${nPos ? v : pad2(v)}</span>`;
+  });
+  if (back && back.length) {
+    h += '<span class="sep">+</span>';
+    if (opts.labels) h += '<span class="blabel">蓝球</span>';
+    back.forEach(v => { h += `<span class="ball b${small}">${pad2(v)}</span>`; });
+  }
+  h += "</div>";
+  return h;
+}
+
+/* ---------------- 初始化 ---------------- */
+async function init() {
+  META = await (await fetch("/api/meta")).json();
+  META.lotteries.forEach(l => { LOT_NAME[l.code] = l.name; LOT_FAMILY[l.code] = l.family; LOT_N[l.code] = l.n; });
+
+  $("stTotal").textContent = META.total.toLocaleString("zh-CN");
+  $("stSize").textContent = META.size_mb;
+
+  // 彩种 chips（按常用度固定顺序，不按字典序）
+  const ORDER = ["ssq", "dlt", "pl3", "pl5", "sd", "qxc", "qlc", "kl8"];
+  const box = $("lotChips");
+  let h = "";
+  [...META.lotteries]
+    .sort((a, b) => ORDER.indexOf(a.code) - ORDER.indexOf(b.code))
+    .forEach(l => {
+      h += `<button class="chip" data-lot="${l.code}" title="${l.d0 || ""} ~ ${l.d1 || ""}">
+      ${l.name}<span class="n">${(l.n || 0).toLocaleString("zh-CN")}</span></button>`;
+    });
+  box.innerHTML = h;
+  box.addEventListener("click", e => {
+    const b = e.target.closest(".chip");
+    if (!b) return;
+    const c = b.dataset.lot;
+    if (state.lots.has(c)) { state.lots.delete(c); b.classList.remove("on"); }
+    else { state.lots.add(c); b.classList.add("on"); }
+    state.page = 1; load();
+  });
+
+  // 源下拉
+  const sel = $("source");
+  META.sources.forEach(s => {
+    const o = document.createElement("option");
+    o.value = s.source; o.textContent = `${s.name}（${s.n.toLocaleString("zh-CN")}）`;
+    sel.appendChild(o);
+  });
+
+  bindInputs();
+  load();
+}
+
+let timer = null;
+function debounce(fn, ms) { return (...a) => { clearTimeout(timer); timer = setTimeout(() => fn(...a), ms); }; }
+
+function bindInputs() {
+  $("q").addEventListener("input", debounce(() => { state.q = $("q").value.trim(); state.page = 1; load(); }, 260));
+  $("d0").addEventListener("change", () => { state.d0 = $("d0").value; state.page = 1; load(); });
+  $("d1").addEventListener("change", () => { state.d1 = $("d1").value; state.page = 1; load(); });
+  $("source").addEventListener("change", () => { state.source = $("source").value; state.page = 1; load(); });
+  $("size").addEventListener("change", () => { state.size = +$("size").value; state.page = 1; load(); });
+
+  ["has_region", "has_seq"].forEach(k => {
+    $(k).addEventListener("change", () => { state[k] = $(k).checked; state.page = 1; load(); });
+  });
+  ["sales_min", "sales_max", "fw_min", "fw_max"].forEach(k => {
+    $(k).addEventListener("input", debounce(() => { state[k] = $(k).value; state.page = 1; load(); }, 300));
+  });
+
+  $("btnAdv").addEventListener("click", () => {
+    $("adv").classList.toggle("on");
+    $("btnAdv").classList.toggle("pri", $("adv").classList.contains("on"));
+  });
+  $("btnReset").addEventListener("click", reset);
+  $("btnExport").addEventListener("click", doExport);
+  $("btnDateOrder").addEventListener("click", () => {
+    // 已在按日排序 ⇒ 只翻转升降序；否则先回到按日排序（恢复按天分组）
+    if (state.sort === "draw_date") state.order = state.order === "desc" ? "asc" : "desc";
+    else { state.sort = "draw_date"; state.order = "desc"; }
+    state.page = 1; load();
+  });
+  $("dClose").addEventListener("click", closeDrawer);
+  $("mask").addEventListener("click", closeDrawer);
+  document.addEventListener("keydown", e => {
+    if (e.key === "Escape") closeDrawer();
+    if (e.key === "/" && document.activeElement.tagName !== "INPUT") {
+      e.preventDefault(); $("q").focus();
+    }
+  });
+
+  document.querySelectorAll("thead th[data-sort]").forEach(th => {
+    th.addEventListener("click", () => {
+      const s = th.dataset.sort;
+      if (state.sort === s) state.order = state.order === "desc" ? "asc" : "desc";
+      else { state.sort = s; state.order = "desc"; }
+      state.page = 1; load();
+    });
+  });
+
+  window.addEventListener("resize", syncTheadHeight);
+}
+
+function reset() {
+  state.lots.clear();
+  document.querySelectorAll(".chip").forEach(c => c.classList.remove("on"));
+  ["q", "d0", "d1", "sales_min", "sales_max", "fw_min", "fw_max"].forEach(k => $(k).value = "");
+  ["has_region", "has_seq"].forEach(k => $(k).checked = false);
+  $("source").value = "all";
+  Object.assign(state, {
+    q: "", d0: "", d1: "", source: "all", has_region: false, has_seq: false,
+    sales_min: "", sales_max: "", fw_min: "", fw_max: "",
+    sort: "draw_date", order: "desc", page: 1
+  });
+  load();
+}
+
+function params(withPage) {
+  const p = new URLSearchParams();
+  if (state.lots.size) p.set("lottery", [...state.lots].join(","));
+  ["q", "d0", "d1", "has_region", "has_seq", "sales_min", "sales_max", "fw_min", "fw_max"]
+    .forEach(k => { if (state[k] !== "" && state[k] !== false) p.set(k, state[k] === true ? "1" : state[k]); });
+  if (state.d0) p.set("date_from", state.d0);
+  if (state.d1) p.set("date_to", state.d1);
+  if (state.source !== "all") p.set("source", state.source);
+  p.set("sort", state.sort); p.set("order", state.order);
+  if (withPage) { p.set("page", state.page); p.set("size", state.size); }
+  return p;
+}
+
+/* ---------------- 查询 ---------------- */
+/* 现在滚动的是表格区自己，不是 window —— 翻页/改筛选要把它回顶 */
+function scrollTop0(smooth) {
+  const sc = document.querySelector(".scroll");
+  if (sc) sc.scrollTo({ top: 0, behavior: smooth ? "smooth" : "auto" });
+  else window.scrollTo({ top: 0 });
+}
+
+async function load() {
+  $("loading").classList.add("on");
+  try {
+    const r = await fetch("/api/draws?" + params(true));
+    const d = await r.json();
+    state.total = d.total; state.pages = d.pages;
+    render(d.rows, d.day_counts || {});
+    renderPager();
+    $("stFiltered").textContent = d.total.toLocaleString("zh-CN");
+    renderSortArrows();
+    syncTheadHeight();
+  } catch (e) {
+    $("tbody").innerHTML = `<tr><td colspan="10" class="empty">加载失败：${e.message}</td></tr>`;
+  } finally {
+    $("loading").classList.remove("on");
+  }
+}
+
+function renderSortArrows() {
+  document.querySelectorAll("thead th[data-sort]").forEach(th => {
+    const old = th.querySelector(".arw"); if (old) old.remove();
+    if (th.dataset.sort === state.sort) {
+      th.insertAdjacentHTML("beforeend",
+        `<span class="arw">${state.order === "desc" ? "▼" : "▲"}</span>`);
+    }
+  });
+  syncDateBtn();
+}
+
+/* 状态栏那个「开奖日 ↓」按钮：它同时是**回到分组视图**的入口。
+   按天分组只在 sort=draw_date 时生效，而分组后「开奖日」整列被隐藏，
+   表头那一下点击就没了 —— 想切升序/降序或从别的排序回到分组，只能靠这个按钮。 */
+function syncDateBtn() {
+  const b = $("btnDateOrder");
+  if (!b) return;
+  if (state.sort !== "draw_date") b.textContent = "按开奖日分组";
+  else b.textContent = state.order === "desc" ? "开奖日 ↓" : "开奖日 ↑";
+  b.classList.toggle("pri", state.sort === "draw_date" && state.order === "desc");
+}
+
+const WEEK = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+/* YYYY-MM-DD → 周几。显式拆年/月/日再 new Date(y,m,d)，
+   不要 new Date("2026-10-20")：那是按 UTC 解析的，负时区会整体差一天。 */
+function weekday(s) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s || "");
+  if (!m) return "";
+  return WEEK[new Date(+m[1], +m[2] - 1, +m[3]).getDay()] || "";
+}
+
+const LOT_ORDER = ["ssq", "dlt", "pl3", "pl5", "sd", "qxc", "qlc", "kl8"];
+const lotRank = c => { const i = LOT_ORDER.indexOf(c); return i < 0 ? 99 : i; };
+
+function rowHtml(r, extra) {
+  const rg = r.region_raw
+    ? `<span class="tag has" title="${r.region_raw.replace(/"/g, "&quot;")}">${r.region_n || 1} 省</span>`
+    : `<span class="tag none">—</span>`;
+  const sq = r.seq
+    ? `<span class="tag warm">有</span>`
+    : `<span class="tag none">—</span>`;
+  const srcs = (r.srcs || "").split(",").filter(Boolean);
+  const srcTxt = srcs.length > 1
+    ? `<span class="tag">${srcs.length} 源</span>`
+    : `<span class="tag">${({cwl:"福彩官方",sporttery:"体彩官方",zhcw:"中彩网",csv500:"CSV"})[srcs[0]] || srcs[0] || "—"}</span>`;
+  return `<tr class="${extra || ""}" data-lot="${r.lottery}" data-issue="${r.issue}">
+    <td><div class="lot"><b>${LOT_NAME[r.lottery] || r.lottery}</b><i>${r.lottery}</i></div></td>
+    <td class="iss">${r.issue}</td>
+    <td class="date col-date">${r.draw_date || "—"}</td>
+    <td>${ballsHtml(r.front, r.back, null, r.lottery)}</td>
+    <td class="n">${money(r.sales)}</td>
+    <td class="n">${money(r.pool)}</td>
+    <td class="n">${r.fw === null || r.fw === undefined ? "—" : num(r.fw)}</td>
+    <td class="c">${rg}</td>
+    <td class="c">${sq}</td>
+    <td class="c">${srcTxt}</td>
+  </tr>`;
+}
+
+function render(rows, dayCounts) {
+  const tb = $("tbody");
+  const table = document.querySelector("table");
+  if (!rows.length) {
+    tb.innerHTML = ""; table.classList.remove("grouped");
+    $("groupHint").textContent = "";
+    $("empty").style.display = "block"; return;
+  }
+  $("empty").style.display = "none";
+
+  /* 只有「按开奖日排序」才分组。按销售额/一等奖/期号排序时同一天的行在结果里
+     并不连续，硬分组会把一天拆成好几块，比不分还乱 —— 那种情况走平表。 */
+  const grouped = state.sort === "draw_date";
+  table.classList.toggle("grouped", grouped);
+  $("groupHint").textContent = grouped ? ""
+    : `（当前按「${({issue:"期号",lottery:"彩种",sales:"销售额",pool:"奖池",
+        first_winners:"一等奖"})[state.sort] || state.sort}」排序，已切换为平表视图）`;
+
+  if (!grouped) { tb.innerHTML = rows.map(rowHtml).join(""); bindRows(); return; }
+
+  // 按 draw_date 切块（服务端已按日期排好序，同一天的行必然相邻）
+  const groups = [], idx = new Map();
+  rows.forEach(r => {
+    const k = r.draw_date || "未知日期";
+    let g = idx.get(k);
+    if (!g) { g = { date: k, rows: [] }; idx.set(k, g); groups.push(g); }
+    g.rows.push(r);
+  });
+
+  // 一天之内按固定彩种顺序排（双色球→大乐透→排3→排5→3D→七星→七乐→快乐8），
+  // 否则同一天里各彩种的先后取决于 issue_seq 的巧合，翻页还会变。
+  groups.forEach(g => g.rows.sort((a, b) =>
+    lotRank(a.lottery) - lotRank(b.lottery) ||
+    (state.order === "asc" ? (a.issue_seq - b.issue_seq) : (b.issue_seq - a.issue_seq))));
+
+  let h = "";
+  groups.forEach(g => {
+    const shown = g.rows.length;
+    // 跨页那天：当天真实期数 > 本页显示期数 ⇒ 明确标出来，不让人以为这天只有 3 期
+    const full = dayCounts && dayCounts[g.date];
+    const partial = full && full > shown
+      ? `<span class="split">当天共 ${full} 期 · 本页 ${shown} 期（跨页）</span>` : "";
+    const lots = [...new Set(g.rows.map(r => LOT_NAME[r.lottery] || r.lottery))].join(" · ");
+    h += `<tr class="dayhead"><td colspan="9"><div class="dh">
+      <span class="d">${g.date}</span>
+      <span class="w">${weekday(g.date)}</span>
+      <span class="n">${full || shown} 期</span>
+      <span class="lots">${lots}</span>${partial}
+    </div></td></tr>` + g.rows.map((r, i) =>
+      rowHtml(r, i === g.rows.length - 1 ? "dayend" : "")).join("");
+  });
+  tb.innerHTML = h;
+  bindRows();
+}
+
+function bindRows() {
+  $("tbody").querySelectorAll("tr[data-issue]").forEach(tr => {
+    tr.addEventListener("click", () => openDetail(tr.dataset.lot, tr.dataset.issue));
+  });
+}
+
+/* 分组行要钉在表头正下方，但表头高度会随字号/换行/缩放变化 ⇒ 实测后写进 CSS 变量。
+   写死 37px 在系统缩放 125% 时会露一条缝（表头底边压不住分组行顶边）。 */
+function syncTheadHeight() {
+  const th = document.querySelector("thead th");
+  if (!th) return;
+  const h = Math.round(th.getBoundingClientRect().height);
+  if (h > 0) document.documentElement.style.setProperty("--thead-h", h + "px");
+}
+
+function renderPager() {
+  const p = state.page, all = state.pages, box = $("pager");
+  if (!all) { box.innerHTML = ""; return; }
+  const btn = (label, page, dis, on) =>
+    `<button class="pg${on ? " on" : ""}" ${dis ? "disabled" : ""} data-p="${page}">${label}</button>`;
+  let h = `<span>第 ${p} / ${all} 页</span>`;
+  h += btn("首页", 1, p === 1);
+  h += btn("‹ 上一页", p - 1, p === 1);
+  // 页码窗口
+  const win = [];
+  for (let i = Math.max(1, p - 2); i <= Math.min(all, p + 2); i++) win.push(i);
+  win.forEach(i => { h += btn(i, i, false, i === p); });
+  h += btn("下一页 ›", p + 1, p === all);
+  h += btn("末页", all, p === all);
+  h += `<span>跳至</span><input type="number" id="jump" min="1" max="${all}" value="${p}"><span>页</span>`;
+  box.innerHTML = h;
+  box.querySelectorAll(".pg[data-p]").forEach(b => {
+    b.addEventListener("click", () => {
+      const np = +b.dataset.p;
+      if (np >= 1 && np <= all) { state.page = np; load(); scrollTop0(true); }
+    });
+  });
+  const j = $("jump");
+  if (j) j.addEventListener("keydown", e => {
+    if (e.key === "Enter") {
+      const v = Math.min(all, Math.max(1, +j.value || 1));
+      state.page = v; load(); scrollTop0(true);
+    }
+  });
+}
+
+/* ---------------- 详情 ---------------- */
+async function openDetail(lot, issue) {
+  $("mask").classList.add("on");
+  $("drawer").classList.add("on");
+  $("dTitle").textContent = `${LOT_NAME[lot] || lot} ${issue}`;
+  $("dSub").textContent = "载入中…";
+  $("dBody").innerHTML = '<div style="padding:20px 0"><div class="spin" style="margin:auto"></div></div>';
+
+  let d;
+  try { d = await (await fetch(`/api/detail?lottery=${encodeURIComponent(lot)}&issue=${encodeURIComponent(issue)}`)).json(); }
+  catch (e) { $("dBody").innerHTML = `<p class="hint">载入失败：${e.message}</p>`; return; }
+  if (d.error) { $("dBody").innerHTML = `<p class="hint">${d.error}</p>`; return; }
+
+  const main = d.merged || d.sources[0] || {};
+  $("dSub").textContent = `${main.draw_date || "—"} · ${d.sources.length} 个数据源`;
+
+  let h = "";
+
+  // 号码
+  h += `<div class="sect"><h4>开奖号码</h4>
+    <div class="dball-row">${ballsHtml(main.front, main.back, null, lot, {labels: true}).replace('class="balls"', 'class="balls" style="max-width:none"')}</div>`;
+  if (main.seq_front && main.seq_front.length) {
+    // 出球顺序也用同一套球：顺序靠箭头表达，颜色仍按红/蓝分区
+    const arrow = '<span class="sep">→</span>';
+    h += `<div class="dball-row" style="margin-top:8px;align-items:center">
+      <span class="blabel" style="margin-left:0">出球顺序</span>
+      ${main.seq_front.map(v => `<span class="ball r">${lot === "kl8" ? v : pad2(v)}</span>`).join(arrow)}
+      ${main.seq_back && main.seq_back.length
+        ? arrow + main.seq_back.map(v => `<span class="ball b">${pad2(v)}</span>`).join(arrow)
+        : ""}</div>`;
+  }
+  h += `</div>`;
+
+  // 关键数字
+  const fw = main.first_winners;
+  const st = numStats(main.front);
+  h += `<div class="sect"><h4>关键数据</h4><dl class="kv">
+    <dt>销售额</dt><dd>${money(main.sales)}${main.sales ? ` <span style="color:var(--mut);font-size:12px">(${num(main.sales)} 元)</span>` : ""}</dd>
+    <dt>奖池</dt><dd>${money(main.pool)}</dd>
+    <dt>一等奖</dt><dd>${fw === null ? "—" : num(fw) + " 注"}</dd>
+    ${st ? `<dt>和值</dt><dd>${num(st.sum)}　<span style="color:var(--mut);font-size:12px">跨度 ${st.span} · 最大 ${st.max} · 最小 ${st.min}</span></dd>
+    <dt>奇偶</dt><dd>${st.odd} : ${st.even}　<span style="color:var(--mut);font-size:12px">奇数 ${st.odd} 个 / 偶数 ${st.even} 个</span></dd>` : ""}
+    <dt>分省分布</dt><dd>${main.first_region_raw ? main.first_region_raw : "该期无分省数据"}</dd>
+  </dl></div>`;
+
+  // 各源对比
+  if (d.sources.length > 1) {
+    h += `<div class="sect"><h4>多源对比（同一期，互不覆盖）</h4>
+      <table class="mini"><thead><tr><th>源</th><th>期号</th><th>销售额</th><th>奖池</th></tr></thead><tbody>`;
+    d.sources.forEach(s => {
+      h += `<tr><td>${s.source_cn}</td><td style="font-family:monospace">${s.issue}</td>
+        <td class="n">${money(s.sales)}</td><td class="n">${money(s.pool)}</td></tr>`;
+    });
+    h += `</tbody></table></div>`;
+  }
+
+  // 分省
+  if (d.regions.length) {
+    const mx = Math.max(...d.regions.map(r => r.winners));
+    h += `<div class="sect"><h4>头奖分省（${d.regions.length} 省）</h4>`;
+    d.regions.forEach(r => {
+      h += `<div class="barline"><span class="r">${r.region}</span>
+        <span class="t"><i style="width:${100 * r.winners / mx}%"></i></span>
+        <span class="v">${r.winners} 注</span></div>`;
+    });
+    h += `</div>`;
+  }
+
+  // 奖级：多源可能各有明细，用标签切换，默认显示最可信源（避免同一条列三遍）
+  if (d.prizes.length) {
+    const bySrc = {};
+    d.prizes.forEach(p => { (bySrc[p.source] = bySrc[p.source] || []).push(p); });
+    const prio = s => ({ cwl: 0, sporttery: 0, zhcw: 1 })[s] ?? 2;
+    const order = Object.keys(bySrc).sort((a, b) => prio(a) - prio(b));
+    const tabs = order.map((s, i) =>
+      `<button class="dtab${i === 0 ? " on" : ""}" data-src="${s}">${srcCn(s)}
+        <em>${bySrc[s].length}</em></button>`).join("");
+    let panes = "";
+    order.forEach((s, i) => {
+      const list = bySrc[s];
+      // 整期所有档位都是 0 注 0 元 ⇒ 该源此期没提供奖级（中彩网 2003–2004 全如此），
+      // 不能当成「真的一等奖 0 注」展示，否则会误读。
+      const allZero = list.every(p => !p.winners && !p.amount);
+      let t = "";
+      if (allZero) {
+        t += `<div class="note">该源此期未提供奖级数据（全部为 0，属源头缺失，不是真的 0 注）</div>`;
+      }
+      t += `<table class="mini"><thead><tr><th>档位</th><th>名称</th>
+        <th>注数</th><th>金额</th></tr></thead><tbody>`;
+      list.slice(0, 60).forEach(p => {
+        t += `<tr><td>${p.level}</td><td class="${p.level === 1 ? "bm" : ""}">${p.level_name || "—"}</td>
+          <td class="n">${p.winners === null ? "—" : num(p.winners)}</td>
+          <td class="n">${p.amount === null ? "—" : num(p.amount)}${p.amount_kind === "total" ? ' <span class="hint">(总)</span>' : ""}</td></tr>`;
+      });
+      t += `</tbody></table>`;
+      if (list.length > 60) t += `<div class="hint">仅显示前 60 档，共 ${list.length} 档</div>`;
+      panes += `<div class="dpane" data-pane="${s}" style="display:${i === 0 ? "block" : "none"}">${t}</div>`;
+    });
+    h += `<div class="sect"><h4>奖级明细</h4>
+      <div class="dtabs">${tabs}</div>${panes}</div>`;
+  } else {
+    h += `<div class="sect"><h4>奖级明细</h4><p class="hint">该期没有奖级数据</p></div>`;
+  }
+
+  $("dBody").innerHTML = h;
+  $("dBody").scrollTop = 0;
+
+  $("dBody").querySelectorAll(".dtab").forEach(b => {
+    b.addEventListener("click", () => {
+      const s = b.dataset.src;
+      $("dBody").querySelectorAll(".dtab").forEach(x => x.classList.toggle("on", x === b));
+      $("dBody").querySelectorAll(".dpane").forEach(p =>
+        p.style.display = p.dataset.pane === s ? "block" : "none");
+    });
+  });
+}
+
+function srcCn(s) {
+  return ({ cwl: "福彩官方", sporttery: "体彩官方", zhcw: "中彩网", csv500: "现有CSV" })[s] || s;
+}
+
+function closeDrawer() {
+  $("mask").classList.remove("on");
+  $("drawer").classList.remove("on");
+}
+
+/* ---------------- 导出 ---------------- */
+function doExport() {
+  const p = params(false);
+  window.location = "/api/export?" + p;
+  const tip = document.createElement("div");
+  tip.textContent = "已开始导出当前筛选结果…";
+  tip.style.cssText = "position:fixed;bottom:24px;left:50%;transform:translateX(-50%);" +
+    "background:#171b23;color:#fff;padding:9px 18px;border-radius:8px;font-size:13px;z-index:99";
+  document.body.appendChild(tip);
+  setTimeout(() => tip.remove(), 2200);
+}
+
+init();
+</script>
+</body>
+</html>

@@ -81,6 +81,8 @@ docs/_backup/求职*
 # push_notify.json 含企业微信 webhook token，必须继续排除。
 config/*
 !config/ticket_size.json
+# 低拥挤策略的情景参数（三档 λ / 门控 / 生产默认档）—— 策略配置，不是运行时状态，也不含密钥
+!config/lowcrowd.json
 logs/flask_stdout.log
 logs/run_supervisor.log
 
@@ -96,3 +98,20 @@ logs/_pytest_*.log
 # ===== 兜底推送/复核的一次性脚本（代理 502 时走 REST API 用，不入库） =====
 .api_push*.py
 .api_verify*.py
+
+# ===== 研究用一次性网格/诊断脚本与日志（跑完即删，不入库） =====
+# 命名约定：点前缀 + .grid_/.log_/.scratch_，只存在于仓库根目录。
+.grid_*.py
+.grid_*.json
+.log_*.txt
+.scratch_*.py
+
+# market.db 旁路补充库（可随时删除重建，不入库）
+market/*.db
+market/*.db-wal
+market/*.db-shm
+market/cache.db-journal
+# 更新编排的互斥锁（运行时产物，残留会被当成本地状态误提交）
+market/.update.lock
+# 财政部月报附件缓存（2008 起约 330 个文件 / 11MB，可随时重新下载）
+market/.mof_cache/

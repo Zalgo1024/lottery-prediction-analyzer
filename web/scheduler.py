@@ -38,6 +38,15 @@ RETRY_CHECK_INTERVAL = 5 * 60
 LOCK_FILE = BASE_DIR / "lottery_data" / ".auto_scheduled.lock"
 LOCK_MAX_AGE = 6 * 3600  # 与 ps1 中锁过期时间一致（秒）
 
+# ---- market.db 旁路库的每日补库 ----
+# 为什么不跟着各彩种的 22:05 一起跑：market 更新是**全库一次**（不是按彩种），
+# 且要等 22:05 那批流水线把 CSV 写完之后再抓，否则抓到的是半天前的数据。
+# 23:10 距 22:05 有 65 分钟，足够流水线跑完（其上限 10 分钟）；又早于 23:40 的
+# 体检日报，所以当天补库失败能当天被日报捞到。
+MARKET_RUN_HOUR = 23
+MARKET_RUN_MINUTE = 10
+MARKET_STATE_KEY = "_market"   # 与彩种名不会冲突；get_status 只遍历 LOTTERY_CONFIG，不会误显示
+
 
 def _external_lock_held() -> bool:
     """计划任务是否正在跑（用同一把锁文件互斥）。"""
@@ -81,6 +90,7 @@ class AutoScheduler:
         self._thread = None
         self._stop = threading.Event()
         self._digest_running = False
+        self._market_thread = None
         self._load()
 
     # ---------- 持久化 ----------
@@ -267,6 +277,113 @@ class AutoScheduler:
             if respect_lock:
                 _release_external_lock()
 
+    # ---------- market.db 每日补库（分省头奖 / 出球顺序靠它） ----------
+    def _market_due(self, now=None) -> bool:
+        """今天 23:10 是否该补库且还没补过。
+
+        与各彩种同一套语义：只要「应触发时刻已过」且「当天没跑过」就补，
+        所以 23:10 之后才开机（或服务重启）也能当天补上，不会顺延到明天。
+        """
+        now = now or datetime.now()
+        target = now.replace(hour=MARKET_RUN_HOUR, minute=MARKET_RUN_MINUTE,
+                             second=0, microsecond=0)
+        if now < target:
+            return False
+        with self._lock:
+            st = self.state.get(MARKET_STATE_KEY) or {}
+        last = st.get("last_run")
+        if not last:
+            return True
+        try:
+            return datetime.fromisoformat(last).date() < now.date()
+        except Exception:
+            return True
+
+    def _run_market_update(self, reason: str = "daily", mode: str = None) -> bool:
+        """后台线程跑 market 更新。返回是否真的起来了（已在跑则 False）。
+
+        全量约 3~5 分钟，绝不能占着 tick 线程 —— 那会让当天的流水线触发顺延。
+        """
+        if self._market_thread is not None and self._market_thread.is_alive():
+            return False
+        if mode not in (None, "incremental", "full"):
+            logger.warning("未知的补库模式 %r，按增量处理" % (mode,))
+            mode = None
+        mode_override = mode
+
+        def _work():
+            try:
+                from market.update import run_update
+                # 周日全量翻页（重建完整历史，10~20 分钟），其余日子增量抓最近一页
+                # （十几秒）。全量每天跑没必要，还会把官方接口翻 500+ 页。
+                mode = (mode_override
+                        or ("full" if datetime.now().weekday() == 6 else "incremental"))
+                # 用 logger 而不是 print：调度器在 Flask 进程里，stdout 被重定向进
+                # logs/flask_stdout.log，走 logger 才能按级别过滤、带时间戳。
+                r = run_update(mode=mode, log=lambda m: logger.info("[market] %s" % m))
+            except Exception as e:
+                logger.warning(f"market 补库异常（不影响主流程）: {e}")
+                r = {"ok": False, "status": "fail",
+                     "error": "%s: %s" % (type(e).__name__, str(e)[:300])}
+
+            with self._lock:
+                st = self.state.setdefault(MARKET_STATE_KEY, {})
+                st["last_run"] = _now_iso()
+                st["last_status"] = r.get("status") or ("ok" if r.get("ok") else "fail")
+                st["last_reason"] = reason
+                st["last_mode"] = r.get("mode")
+                st["last_elapsed"] = r.get("elapsed")
+                st["last_rows"] = r.get("rows")
+                st["last_failed"] = r.get("failed") or []
+                st["last_skipped"] = r.get("skipped") or []
+                if r.get("error"):
+                    st["last_error"] = r["error"]
+                else:
+                    st.pop("last_error", None)
+                self._save()
+
+            if r.get("ok"):
+                logger.info(f"market 补库完成：{r.get('rows')} 期，{r.get('elapsed')}s")
+            else:
+                logger.warning("market 补库未全部成功：失败源=%s 错误=%s"
+                               % (r.get("failed") or [], r.get("error") or "-"))
+
+        self._market_thread = threading.Thread(target=_work, name="market-update", daemon=True)
+        self._market_thread.start()
+        return True
+
+    def trigger_market_update(self, reason: str = "manual", mode: str = None) -> bool:
+        """手动触发补库（页面「更新数据」按钮 / 接口）。
+
+        故意与定时触发共用同一条路径和同一份状态：手动跑过之后当天 23:10
+        就不会再跑一遍（数据已经是最新的，没必要重复抓 5 分钟）。
+        """
+        return self._run_market_update(reason=reason, mode=mode)
+
+    def market_status(self) -> dict:
+        """给接口/页面看的补库状态。"""
+        with self._lock:
+            st = dict(self.state.get(MARKET_STATE_KEY) or {})
+        try:
+            from market.update import is_running
+            running = bool(is_running())
+        except Exception:
+            running = False
+        return {
+            "enabled": self.enabled,
+            "running": running or bool(self._market_thread and self._market_thread.is_alive()),
+            "last_run": st.get("last_run"),
+            "last_status": st.get("last_status"),
+            "last_elapsed": st.get("last_elapsed"),
+            "last_rows": st.get("last_rows"),
+            "last_failed": st.get("last_failed") or [],
+            "last_skipped": st.get("last_skipped") or [],
+            "last_mode": st.get("last_mode"),
+            "last_error": st.get("last_error"),
+            "schedule": "%02d:%02d" % (MARKET_RUN_HOUR, MARKET_RUN_MINUTE),
+            "due_today": self._market_due(),
+        }
+
     # ---------- 七星彩每日补抓（纯数据，不跑流水线/不生成预测） ----------
     def _daily_qxc_supplement(self):
         """七星彩数据源恒延迟约 1 期：若在开奖日(周二/五/日)才抓取，
@@ -394,6 +511,11 @@ class AutoScheduler:
                             self._launch(lot, respect_lock=True)
                     # 七星彩每日补抓（纯数据，压滞后用；与开奖日流水线互不冲突）
                     self._daily_qxc_supplement()
+                    # market.db 每日补库（23:10）：官方源里才有分省头奖、出球顺序，
+                    # 这些字段 CSV 不存，只能靠这条线保持最新。
+                    if self._market_due():
+                        if self._run_market_update(reason="daily"):
+                            logger.info("调度器触发 market.db 每日补库（23:10 档）")
                     # 离线体检日报/周检（2026-10-21）：到点才跑，一天只跑一次。
                     # 只在有问题时推送 —— 你不开机的时候，它就是那个替你看着的人。
                     self._daily_digest()

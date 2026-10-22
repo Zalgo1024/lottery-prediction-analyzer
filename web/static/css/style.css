@@ -27,7 +27,7 @@ a:hover { text-decoration: underline; }
 .navbar nav { display: flex; gap: 0; flex: 1; overflow-x: auto; scrollbar-width: none; -ms-overflow-style: none; }
 .navbar nav::-webkit-scrollbar { display: none; }
 .navbar nav a {
-    color: #ccc; padding: 0 14px; height: var(--nav-height); line-height: var(--nav-height);
+    color: #ccc; padding: 0 12px; height: var(--nav-height); line-height: var(--nav-height);
     font-size: 13px; white-space: nowrap; flex-shrink: 0;
     transition: all 0.2s; border-bottom: 3px solid transparent;
 }
@@ -38,6 +38,8 @@ a:hover { text-decoration: underline; }
     background: rgba(255,255,255,0.12); color: #fff; border: 1px solid rgba(255,255,255,0.25);
     border-radius: 6px; padding: 5px 12px; font-size: 13px; cursor: pointer; line-height: 1;
     transition: background 0.2s;
+    /* 导航项变多后按钮曾被挤成两行（"重启服/务"），这两个属性把它钉成单行不可压缩 */
+    white-space: nowrap; flex-shrink: 0;
 }
 .navbar nav .nav-restart:hover { background: rgba(255,255,255,0.22); }
 .navbar nav .nav-restart:disabled { opacity: 0.55; cursor: progress; }

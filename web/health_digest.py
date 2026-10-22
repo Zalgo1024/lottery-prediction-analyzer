@@ -155,6 +155,48 @@ def _pending_status() -> Dict[str, Any]:
     }
 
 
+def _market_freshness() -> Dict[str, Any]:
+    """market.db 旁路库的新鲜度（每日 23:10 由调度器补库）。
+
+    为什么要进日报：这个库里的**分省头奖、出球顺序**是 CSV 里根本没有的字段，
+    补库一旦悄悄停掉，界面上照样能翻旧数据，肉眼发现不了 —— 只有日报能看出来。
+    但它终究是可删可重建的旁路库，所以"从未启用"不当故障，只如实展示。
+    """
+    try:
+        from market.update import last_update
+    except Exception as e:
+        return {"可用": False, "说明": "market 模块不可用: %s" % str(e)[:80]}
+
+    info = last_update()
+    if not info.get("available"):
+        return {
+            "可用": False,
+            "说明": info.get("reason") or "不可用",
+            "最新开奖日": info.get("latest_draw_date"),
+        }
+
+    # 正在跑的时候不能报"停滞"：全量抓取在晚间高峰能跑到 20 分钟以上，
+    # 这期间 last_update 还停在上一轮的记录上，按时间判会误报。
+    running = False
+    try:
+        from market.update import is_running
+        running = bool(is_running())
+    except Exception:
+        pass
+
+    return {
+        "可用": True,
+        "最近更新": info.get("finished_at"),
+        "距今小时": info.get("age_hours"),
+        "状态": info.get("status"),
+        "失败源": info.get("failed") or [],
+        "进行中": running,
+        "更新期数": info.get("rows"),
+        "最新开奖日": info.get("latest_draw_date"),
+        "抓取时间": info.get("latest_fetch"),
+    }
+
+
 def _data_lag() -> List[Dict[str, Any]]:
     """各彩种数据滞后天数（0 = 最新）。"""
     from config import LOTTERY_CONFIG
@@ -208,6 +250,7 @@ def build_digest(days: int = WINDOW_DAYS) -> Dict[str, Any]:
     pending = _pending_status()
     lag = _data_lag()
     health = _latest_health_report()
+    market = _market_freshness()
 
     problems: List[Dict[str, str]] = []
     for it in pipeline.get("失败明细") or []:
@@ -226,6 +269,20 @@ def build_digest(days: int = WINDOW_DAYS) -> Dict[str, Any]:
         problems.append({"彩种": "全量体检", "项": "历史遗留",
                          "详情": f"{health['日期']} 报告有 {health['问题数']} 项待处理"})
 
+    # 开奖数据库（旁路库）补库健康度
+    if market.get("可用"):
+        if market.get("状态") in ("fail", "partial"):
+            srcs = "、".join(market.get("失败源") or []) or "-"
+            problems.append({"彩种": "开奖数据库", "项": "补库失败",
+                             "详情": "%s 失败源：%s" % (market.get("最近更新"), srcs)})
+        age = market.get("距今小时")
+        # 36 小时 = 连续两个 23:10 档都没成功；比"一天没跑"更保守，
+        # 避免刚过点（比如 23:20）就被误报成停滞。
+        # 正在跑时一律不报 —— 长任务会把 last_update 停在上一轮，按时间判必误报。
+        if isinstance(age, (int, float)) and age > 36 and not market.get("进行中"):
+            problems.append({"彩种": "开奖数据库", "项": "补库停滞",
+                             "详情": f"已 {age} 小时未更新（最新开奖日 {market.get('最新开奖日')}）"})
+
     return {
         "生成时间": now.isoformat(timespec="seconds"),
         "窗口天数": days,
@@ -236,6 +293,7 @@ def build_digest(days: int = WINDOW_DAYS) -> Dict[str, Any]:
         "注数一致性": pending,
         "数据滞后": lag,
         "全量体检": health,
+        "开奖数据库": market,
     }
 
 

@@ -210,6 +210,110 @@ def control_tickets(lottery: str, cands: List[Dict[str, Any]], n: int,
     return picked
 
 
+def _blue_interleaved(pool: List[Dict[str, Any]], lottery: str,
+                     rng: np.random.Generator) -> List[Dict[str, Any]]:
+    """把候选池按后区(蓝球)分组后轮转交织：使前 K 张覆盖尽可能多的不同后区组合。
+
+    双色球(16 蓝) / 大乐透(66 蓝) 的 5 元奖级(六等/九等)只要求命中蓝球，
+    故「分散后区」直接扩大「至少中 5 元」覆盖的不中奖结果集。
+    """
+    from collections import defaultdict
+    groups: Dict[tuple, List[Dict[str, Any]]] = defaultdict(list)
+    for t in pool:
+        bk = tuple(t.get("蓝球", []))
+        groups[bk].append(t)
+    keys = list(groups.keys())
+    rng.shuffle(keys)
+    out: List[Dict[str, Any]] = []
+    while len(out) < len(pool):
+        progressed = False
+        for k in keys:
+            if groups[k]:
+                out.append(groups[k].pop(0))
+                progressed = True
+        if not progressed:
+            break
+    return out
+
+
+def _qxc_interleaved(pool: List[Dict[str, Any]],
+                    rng: np.random.Generator) -> List[Dict[str, Any]]:
+    """七星彩：按后区(第7位, 0-14)分组轮转交织，分散「后区命中」这一 5 元(六等)通道。"""
+    from collections import defaultdict
+    groups: Dict[Any, List[Dict[str, Any]]] = defaultdict(list)
+    for t in pool:
+        nums = t.get("号码") or []
+        bk = nums[6] if len(nums) > 6 else None
+        groups[bk].append(t)
+    keys = list(groups.keys())
+    rng.shuffle(keys)
+    out: List[Dict[str, Any]] = []
+    while len(out) < len(pool):
+        progressed = False
+        for k in keys:
+            if groups[k]:
+                out.append(groups[k].pop(0))
+                progressed = True
+        if not progressed:
+            break
+    return out
+
+
+def _digit_interleaved(pool: List[Dict[str, Any]],
+                      rng: np.random.Generator) -> List[Dict[str, Any]]:
+    """数字型占位：按首位分组轮转（奖级≠5元，优先级置后，仅做位置多样性）。"""
+    from collections import defaultdict
+    groups: Dict[Any, List[Dict[str, Any]]] = defaultdict(list)
+    for t in pool:
+        nums = t.get("号码") or []
+        bk = nums[0] if nums else None
+        groups[bk].append(t)
+    keys = list(groups.keys())
+    rng.shuffle(keys)
+    out: List[Dict[str, Any]] = []
+    while len(out) < len(pool):
+        progressed = False
+        for k in keys:
+            if groups[k]:
+                out.append(groups[k].pop(0))
+                progressed = True
+        if not progressed:
+            break
+    return out
+
+
+def select_coverage(lottery: str, pool: List[Dict[str, Any]], K: int,
+                   target_tier: int = 5, seed: Optional[int] = None) -> List[Dict[str, Any]]:
+    """
+    覆盖分散选号（Phase 1 奖级覆盖策略）：从**同一候选池**挑 K 注，针对目标奖级的
+    「不中奖结果集」做分散，再施加与现有选号相同的低重叠约束。
+
+    ⚠️ 诚实边界（与项目一致）：各组合等可能 ⇒ 本函数**不改变**单注中奖概率 / 平均
+    中奖次数；它只改变「K 注之间中奖结果的重叠结构」——在固定 K 下「至少中一注」的
+    概率可能提高（也可能不改变，须回测），同时「多注同中」的可能性会改变。
+
+    做法（复用 _greedy_pick / _overlap，唯一差异 = 排序目标）：
+      - 双/大 目标=5元(六等/九等，命中蓝球即≥5元)：先按后区分组轮转交织，使前 K 张
+        覆盖更多不同后区；再 _greedy_pick 施加前区低重叠。
+      - 七星彩 目标=5元(六等=任意≥1位命中 或 后区命中)：按后区分组轮转，分散后区通道。
+      - 数字型：奖级≠5元，优先级置后，仅做首位多样性占位。
+    更高奖级由 _greedy_pick 的前区/位低重叠自然覆盖（K 注分散在号码空间）。
+
+    返回 [ticket, ...]（ticket 为原候选池中的字典，可直接喂回放/判级）。
+    """
+    rng = np.random.default_rng(seed)
+    cap = _OVERLAP_CAP.get(lottery, 3)
+    if lottery in ("双色球", "大乐透"):
+        ordered = _blue_interleaved(pool, lottery, rng)
+    elif lottery == "七星彩":
+        ordered = _qxc_interleaved(pool, rng)
+    else:
+        ordered = _digit_interleaved(pool, rng)
+    scored = [(0.0, t) for t in ordered]   # 主分散排序已由 *_interleaved 完成
+    picked = _greedy_pick(scored, K, cap, lottery)
+    return [p["号码"] for p in picked]
+
+
 def select_tickets(lottery: str, n: int = 5, pool_size: int = 20000,
                    seed: Optional[int] = None, issue: str = None,
                    candidates: Optional[List[Dict[str, Any]]] = None,

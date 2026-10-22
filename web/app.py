@@ -61,6 +61,7 @@ from web.routes.hits import bp as hits_bp
 from web.routes.system import bp as system_bp
 from web.routes.audit import bp as audit_bp
 from web.routes.settings import bp as settings_bp
+from web.routes.market import bp as market_bp
 
 app.register_blueprint(dashboard_bp)
 app.register_blueprint(stats_bp)
@@ -77,6 +78,7 @@ app.register_blueprint(hits_bp)
 app.register_blueprint(system_bp)
 app.register_blueprint(audit_bp)
 app.register_blueprint(settings_bp)
+app.register_blueprint(market_bp)
 
 
 # 禁用浏览器缓存：静态资源 + HTML 页面
@@ -104,6 +106,14 @@ def _inject_asset_version():
         except OSError:
             return 0
     return {"asset_ver": asset_ver}
+
+
+# 导航单一真源：顶栏与侧栏都从 web/nav.py 的 NAV_GROUPS 渲染，
+# 杜绝「某页只在顶栏有、侧栏没有」的漂移。
+@app.context_processor
+def _inject_nav():
+    from web.nav import NAV_GROUPS, nav_flat
+    return {"nav_groups": NAV_GROUPS, "nav_flat": nav_flat()}
 
 
 def main():
@@ -149,6 +159,19 @@ def main():
                 log.warning(f"预热缓存失败: {_name} — {e}")
 
     threading.Thread(target=_preload_cache, daemon=True).start()
+
+    # 数据浏览器（/market 内嵌页的 5001 服务）：重启主服务时 run.py 用
+    # `taskkill /T` 杀整棵进程树，会把它一起带走，所以这里补拉一次。
+    # 它只是可选的只读浏览进程，起不来也不该影响主服务。
+    def _ensure_viewer():
+        try:
+            from web.routes.market import ensure_viewer_running
+            r = ensure_viewer_running(wait=10)
+            log.info(f"数据浏览器自启动: {r}")
+        except Exception as e:
+            log.warning(f"数据浏览器自启动失败（不影响主服务）: {e}")
+
+    threading.Thread(target=_ensure_viewer, daemon=True).start()
 
     try:
         app.run(host="0.0.0.0", port=args.port, debug=args.debug)
