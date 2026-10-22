@@ -406,6 +406,9 @@ def main():
     profit_parser.add_argument("--scenario", action="store_true", help="同时输出情景倍数扫描")
     profit_parser.add_argument("--save", action="store_true", help="写入影子台账（training/profit）")
     profit_parser.add_argument("--summary", action="store_true", help="只输出台账汇总")
+    profit_parser.add_argument("--backtest", type=int, default=0, metavar="N",
+                               help="回测最近 N 期（已实现口径：真实开奖 + 当期真实单注奖金结算）")
+    profit_parser.add_argument("--block", type=int, default=50, help="回测的选号块长（默认 50）")
 
     # ----- payout（NetPayout WP0：实得奖金统一口径）-----
     payout_parser = subparsers.add_parser(
@@ -2193,6 +2196,15 @@ def _cmd_profit(args):
     if not issue:
         from data.feedback import _next_issue
         issue = _next_issue(lot)
+
+    if getattr(args, "backtest", 0):
+        from ev.profit import backtest as BT
+        arm = BT.run_profit_arm(lot, K=args.groups, periods=args.backtest,
+                                block=args.block)
+        print(BT.report(arm))
+        print("\n" + _json.dumps({k: v for k, v in arm.items() if k != "序列"},
+                                  ensure_ascii=False, indent=1, default=str))
+        return
 
     d = solvers.decide(lot, issue, K=args.groups)
     if getattr(args, "scenario", False) and d.get("选号"):
