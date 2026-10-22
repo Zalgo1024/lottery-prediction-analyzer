@@ -83,6 +83,8 @@ config/*
 !config/ticket_size.json
 # 低拥挤策略的情景参数（三档 λ / 门控 / 生产默认档）—— 策略配置，不是运行时状态，也不含密钥
 !config/lowcrowd.json
+# 盈利策略的政策与情景配置（税率/κ 网格/情景倍数/台账开关），不是运行时状态也不是密钥
+!config/profit.json
 logs/flask_stdout.log
 logs/run_supervisor.log
 

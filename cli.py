@@ -393,6 +393,20 @@ def main():
     ev_parser.add_argument("--sum-range", default=None, help="和值范围，如 9-18")
     ev_parser.add_argument("--max-consec", type=int, default=2, help="最大连号长度（默认2）")
 
+    # ----- profit（盈利门槛策略 · 研究用 · 默认只记影子台账）-----
+    profit_parser = subparsers.add_parser(
+        "profit",
+        help="盈利门槛策略（研究）：净EV门槛 → 选票 → 不参与判断；默认只记影子台账，不写 pending",
+    )
+    profit_parser.add_argument(
+        "lottery", nargs="?", default="双色球",
+        choices=["双色球", "大乐透", "七星彩", "排列3", "排列5", "福彩3D"])
+    profit_parser.add_argument("--issue", default=None, help="目标期号（默认自动取下一期）")
+    profit_parser.add_argument("--groups", type=int, default=20, help="出号注数（默认 20）")
+    profit_parser.add_argument("--scenario", action="store_true", help="同时输出情景倍数扫描")
+    profit_parser.add_argument("--save", action="store_true", help="写入影子台账（training/profit）")
+    profit_parser.add_argument("--summary", action="store_true", help="只输出台账汇总")
+
     # ----- payout（NetPayout WP0：实得奖金统一口径）-----
     payout_parser = subparsers.add_parser(
         "payout",
@@ -705,6 +719,8 @@ def _dispatch(args):
         _cmd_salesmodel(args)
     elif args.command == "ev":
         _cmd_ev(args)
+    elif args.command == "profit":
+        _cmd_profit(args)
     elif args.command == "payout":
         _cmd_payout(args)
     elif args.command == "select":
@@ -2160,6 +2176,34 @@ def _cmd_ev(args):
         r = net_ev(args.lottery, [1, 2, 3], issue=args.issue)
         _show(r)
         print(f"  备注: crowd 模型不可用，示例为占位号（用 ev {args.lottery} --cold N 看数据驱动冷门TOP）")
+
+
+def _cmd_profit(args):
+    """盈利门槛策略（研究）：判决 + 四指标 + 可选情景扫描/影子台账。"""
+    import json as _json
+
+    from ev.profit import ledger, payouts as P, solvers
+
+    lot = args.lottery or "双色球"
+    if getattr(args, "summary", False):
+        print(_json.dumps(ledger.summary(lot), ensure_ascii=False, indent=1))
+        return
+
+    issue = args.issue
+    if not issue:
+        from data.feedback import _next_issue
+        issue = _next_issue(lot)
+
+    d = solvers.decide(lot, issue, K=args.groups)
+    if getattr(args, "scenario", False) and d.get("选号"):
+        ctx = P.build_ctx(lot, issue)
+        up = (d.get("机制强度上界") or {}).get("kappa") or 0.0
+        d["情景扫描"] = solvers.solve_scenario(lot, d["选号"]["票"], ctx, kappa_ref=up)
+    print(_json.dumps(d, ensure_ascii=False, indent=1, default=str))
+
+    if getattr(args, "save", False):
+        r = ledger.record(lot, issue, d, (d.get("选号") or {}).get("票"))
+        print(f"\n影子台账：{r}")
 
 
 def _cmd_payout(args):
