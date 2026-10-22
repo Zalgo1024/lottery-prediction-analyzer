@@ -409,6 +409,15 @@ def main():
     profit_parser.add_argument("--backtest", type=int, default=0, metavar="N",
                                help="回测最近 N 期（已实现口径：真实开奖 + 当期真实单注奖金结算）")
     profit_parser.add_argument("--block", type=int, default=50, help="回测的选号块长（默认 50）")
+    profit_parser.add_argument("--beta", choices=["full", "walk_forward"], default="full",
+                               help="回测的 β 口径：full=全样本β（in-sample，略偏乐观，"
+                                    "上限参考）；walk_forward=每块只用块之前数据重拟合"
+                                    "（无前视，默认推荐口径）")
+    profit_parser.add_argument("--settle", nargs="?", const=True, default=False,
+                               help="对照实际开奖结算指定期（接期号，如 --settle 9154；"
+                                    "不带期号则结算 --issue/下一期），回填影子台账")
+    profit_parser.add_argument("--settle-pending", action="store_true", dest="settle_pending",
+                               help="结算该彩种全部『已记录、未结算、且已开奖』的期次")
 
     # ----- payout（NetPayout WP0：实得奖金统一口径）-----
     payout_parser = subparsers.add_parser(
@@ -2200,10 +2209,23 @@ def _cmd_profit(args):
     if getattr(args, "backtest", 0):
         from ev.profit import backtest as BT
         arm = BT.run_profit_arm(lot, K=args.groups, periods=args.backtest,
-                                block=args.block)
+                                block=args.block, beta_mode=args.beta)
         print(BT.report(arm))
         print("\n" + _json.dumps({k: v for k, v in arm.items() if k != "序列"},
                                   ensure_ascii=False, indent=1, default=str))
+        return
+
+    if getattr(args, "settle_pending", False):
+        from ev.profit import settle as ST
+        res = ST.settle_pending(lot)
+        print(_json.dumps(res, ensure_ascii=False, indent=1, default=str))
+        return
+
+    if getattr(args, "settle", False):
+        from ev.profit import settle as ST
+        settle_issue = args.settle if isinstance(args.settle, str) else issue
+        res = ST.settle_issue(lot, settle_issue)
+        print(_json.dumps(res, ensure_ascii=False, indent=1, default=str))
         return
 
     d = solvers.decide(lot, issue, K=args.groups)

@@ -198,14 +198,19 @@ def record_trial(lottery: str, n: int = _DEFAULT_ARMS, pool_size: int = _DEFAULT
 
 
 # ---------------- 结算 ----------------
-def _grade_of(lottery: str, ticket: Dict[str, Any], actual_zones: Dict[str, List[int]]) -> str:
-    """按官方规则判奖级（复用 data.feedback 的分类函数，避免口径漂移）。"""
+def _grade_of(lottery: str, ticket: Dict[str, Any], actual_zones: Dict[str, List[int]],
+              issue: Any = None) -> str:
+    """按官方规则判奖级（复用 data.feedback 的分类函数，避免口径漂移）。
+
+    `issue` 给定 ⇒ 按**该期规则版本**判级（大乐透 2026-02 前奖级不同：
+    4+2 在 2019 段是四等、2026 段起并入三等）。历史 trials 结算必须传期号。
+    """
     from data.feedback import _classify_dlt_prize, _classify_prize
 
     red_hits = len(set(ticket.get("红球", [])) & set(actual_zones.get("红球", [])))
     blue_hits = len(set(ticket.get("蓝球", [])) & set(actual_zones.get("蓝球", [])))
     if lottery == "大乐透":
-        return _classify_dlt_prize(red_hits, blue_hits)
+        return _classify_dlt_prize(red_hits, blue_hits, issue=issue)
     return _classify_prize(red_hits, blue_hits)
 
 
@@ -267,7 +272,7 @@ def settle_trials(lottery: str) -> Dict[str, Any]:
         for arm in ("A", "B"):
             total, hits, detail = 0.0, 0, {}
             for t in row.get(arm, []):
-                g = _grade_of(lottery, t, az)
+                g = _grade_of(lottery, t, az, iss)
                 if g != "未中":
                     hits += 1
                     detail[g] = detail.get(g, 0) + 1

@@ -102,24 +102,56 @@ def _zone_order(name: str) -> int:
 
 
 # ---------------- 理论概率（组合精确值，与号码无关） ----------------
-_PROB_CACHE: Dict[str, Dict[str, float]] = {}
+# ★ 缓存键必须是 (彩种, **解析后的**版本)：大乐透有五个规则版本，九级与七级的奖级集合不同。
+#   不能按 issue 做键（3500 期×6 彩种会把缓存撑爆），也不能不解析版本（同一版本两份缓存）。
+_PROB_CACHE: Dict[Tuple[str, str], Dict[str, float]] = {}
 
 
-def grade_probabilities(lottery: str, ticket=None) -> Dict[str, float]:
+def grade_probabilities(lottery: str, ticket=None, *,
+                        version: Optional[str] = None) -> Dict[str, float]:
     """
-    返回 {奖级: 概率}（按彩种缓存；概率是组合常数，重复计算纯浪费）。
+    返回 {奖级: 概率}（按 (彩种, 版本) 缓存；概率是组合常数，重复计算纯浪费）。
 
     ⚠️ 概率与具体号码无关（任一合法注相同）——这里保留 ticket 形参仅为将来
        支持"复式/多注"等改变概率的玩法，当前忽略。
+    version=None ⇒ 该彩种的**现行版本**（大乐透=最近一段，其余忽略）。
     """
-    if lottery in _PROB_CACHE:
-        return _PROB_CACHE[lottery]
-    probs = _grade_probabilities_impl(lottery)
-    _PROB_CACHE[lottery] = probs
+    ver = version or _default_version(lottery)
+    key = (lottery, ver)
+    if key in _PROB_CACHE:
+        return _PROB_CACHE[key]
+    probs = _grade_probabilities_impl(lottery, ver)
+    _PROB_CACHE[key] = probs
     return probs
 
 
-def _grade_probabilities_impl(lottery: str) -> Dict[str, float]:
+def _default_version(lottery: str) -> str:
+    if lottery == "大乐透":
+        from ev.profit.rules import rules_for
+        return rules_for(lottery).rule_version
+    return "default"
+
+
+def _probs_from_grade_table(lottery: str, version: str) -> Dict[str, float]:
+    """由规则表的 (h, j) → 奖级 推导各奖级概率（组合型彩种通用）。
+
+    这样大乐透的六级/九级/七级概率都从**同一张** grade_table 生成，
+    不再有手写的第二份（历史上有三份九级表互相打架）。
+    """
+    from ev.profit.rules import rules_by_version
+
+    r = rules_by_version(lottery, version)
+    w = r.outer_width
+    n = r.outer_range[1] - r.outer_range[0] + 1
+    out: Dict[str, float] = {}
+    for (h, j), g in r.grade_table.items():
+        p_h = math.comb(w, h) * math.comb(n - w, w - h) / math.comb(n, w)
+        p = p_h * r.inner_multiplicity.get(j, 0) / r.inner_size
+        out[g] = out.get(g, 0.0) + p
+    return out
+
+
+def _grade_probabilities_impl(lottery: str, version: str = "default") -> Dict[str, float]:
     c = math.comb
     if lottery == "双色球":
         den = c(33, 6) * 16                          # 17,721,088
@@ -135,21 +167,7 @@ def _grade_probabilities_impl(lottery: str) -> Dict[str, float]:
             "六等": p(2, pb_hit) + p(1, pb_hit) + p(0, pb_hit),
         }
     if lottery == "大乐透":
-        df_, db_ = c(35, 5), c(12, 2)
-        F = lambda k: c(5, k) * c(30, 5 - k)          # 前区命中 k
-        B = lambda j: c(2, j) * c(10, 2 - j)          # 后区命中 j
-        p = lambda k, j: F(k) * B(j) / (df_ * db_)
-        return {
-            "一等": p(5, 2),
-            "二等": p(5, 1),
-            "三等": p(5, 0),
-            "四等": p(4, 2),
-            "五等": p(4, 1),
-            "六等": p(3, 2),
-            "七等": p(4, 0),
-            "八等": p(3, 1) + p(2, 2),
-            "九等": p(3, 0) + p(2, 1) + p(1, 2) + p(0, 2),
-        }
+        return _probs_from_grade_table(lottery, version)
     if lottery in ("排列3", "福彩3D"):
         return {"直选": 1 / 1000}
     if lottery == "排列5":

@@ -265,6 +265,11 @@ class AutoScheduler:
                 st["last_run"] = _now_iso()
                 self._save()
             logger.info(f"调度器触发 {lottery} 流水线 (task={tid})")
+            # 开奖后结算钩子：自动触发（已等流水线把最新开奖抓回）后，
+            # 把影子台账里「已记录、未结算」的历史期对照实际开奖回填。
+            # 只动 research-only 的 training/profit 影子台账，不影响 pending/生产。
+            if respect_lock:
+                self._settle_profit_ledger(lottery)
             return True
         except Exception as e:
             logger.warning(f"调度器触发 {lottery} 失败: {e}")
@@ -444,6 +449,25 @@ class AutoScheduler:
                 self._digest_running = False
 
         threading.Thread(target=_run, name="health-digest", daemon=True).start()
+
+    def _settle_profit_ledger(self, lottery: str):
+        """开奖后结算钩子：把某彩种影子台账里『已记录、未结算』的历史期回填。
+
+        只动 research-only 的 training/profit 影子台账（不参与生产、不写 pending），
+        流水线把最新开奖抓回后才调用，确保实际开奖数据已就位。任何异常只记日志，
+        绝不让结算失败拖垮主调度循环。
+        """
+        try:
+            from ev.profit import settle as ST
+            res = ST.settle_pending(lottery)
+            newly = res.get("新结算期数", 0)
+            if newly:
+                logger.info(f"影子台账结算（{lottery}）：新结算 {newly} 期，"
+                            f"已结算 {res.get('已结算期数', 0)} 期")
+            else:
+                logger.debug(f"影子台账结算（{lottery}）：无新结算期")
+        except Exception as e:
+            logger.warning(f"影子台账结算钩子异常（不影响主流程）: {e}")
 
     def run_now(self, lottery=None):
         """手动立即运行：指定彩种或（默认）全部。返回成功触发的彩种列表。

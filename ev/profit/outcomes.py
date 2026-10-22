@@ -42,9 +42,10 @@ def outer_universe(lottery: str) -> np.ndarray:
     w = r.outer_width
     if r.outer_choose:
         return np.array(list(combinations(range(lo, hi + 1), w)), dtype=np.int16)
-    out = np.empty((hi - lo + 1) ** w, dtype=np.int16)
-    # 逐位展开，避免 list(product(...)) 的巨量 Python 对象
+    # 排列型：全部 n^w 个位串，形状必须是 (n^w, w) —— 曾误建 1 维导致 IndexError
     base = hi - lo + 1
+    out = np.empty((base ** w, w), dtype=np.int16)
+    # 逐位展开（字典序：最高位变化最慢），避免 list(product(...)) 的巨量 Python 对象
     idx = np.arange(out.shape[0], dtype=np.int64)
     for pos in range(w):
         div = base ** (w - 1 - pos)
@@ -82,16 +83,37 @@ def outer_encoding(lottery: str) -> np.ndarray:
 
 # ---------------------------------------------------------------- 票面 → 数组
 
-def tickets_to_outer(lottery: str, tickets: Sequence[dict]) -> np.ndarray:
-    """把票面列表转成外层矩阵 (K, width)（升序，组合型排序 / 排列型保序）。"""
-    r = rules_for(lottery)
-    key = _outer_key(r)
-    rows = [sorted(int(x) for x in t[key]) for t in tickets]
-    return np.asarray(rows, dtype=np.int16)
-
-
-def _outer_key(r: LotteryRules) -> str:
+def outer_key(r: LotteryRules) -> str:
+    """外层在票面 dict 里的键名（单一真源；select 构造票面也从这里取）。"""
     return {"红球": "红球", "前区": "红球", "前6位": "号码", "全部位数": "号码"}[r.outer_label]
+
+
+def _outer_digits(r: LotteryRules, ticket: dict) -> List[int]:
+    """从票面提取**外层位**（按 outer_label 分型）。
+
+    ★ 七星彩的 outer_label="前6位" 而票面 "号码" 是 7 位（第 7 位是内层），
+      必须切前 6 位；数字型 "全部位数" 取整串。位数对不对直接决定
+      `hit_histogram` 的编码矩阵形状（曾因多取一位而 IndexError）。
+    """
+    if r.outer_label == "前6位":
+        return [int(x) for x in ticket["号码"][: r.outer_width]]
+    return [int(x) for x in ticket[outer_key(r)]]
+
+
+def tickets_to_outer(lottery: str, tickets: Sequence[dict]) -> np.ndarray:
+    """把票面列表转成外层矩阵 (K, width)。
+
+    ★ 分型保序：
+      · 组合型（outer_choose=True，双/大）：**排序**（组合无序，排序是规范化）
+      · 排列型（outer_choose=False，七星彩前6位/数字型）：**保序**（位序即信息；
+        排序会把「123…」与「321…」混为一谈，命中数虚高——奖级按同位命中数判）
+    """
+    r = rules_for(lottery)
+    if r.outer_choose:
+        rows = [sorted(_outer_digits(r, t)) for t in tickets]
+    else:
+        rows = [_outer_digits(r, t) for t in tickets]
+    return np.asarray(rows, dtype=np.int16)
 
 
 def tickets_to_inner(lottery: str, tickets: Sequence[dict]) -> np.ndarray:

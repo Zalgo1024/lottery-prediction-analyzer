@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
@@ -53,7 +54,21 @@ def _write_atomic(p: Path, rows: Iterable[Dict[str, Any]]) -> None:
     with open(tmp, "w", encoding="utf-8") as f:
         for r in rows:
             f.write(json.dumps(r, ensure_ascii=False, default=str) + "\n")
-    os.replace(tmp, p)
+    # ★ Windows 上 os.replace 偶发 WinError 5（杀毒/索引服务短暂占用目标文件）。
+    #   退避重试 5 次即可；仍失败才抛出（不静默丢数据）。
+    last = None
+    for attempt in range(5):
+        try:
+            os.replace(tmp, p)
+            return
+        except PermissionError as e:      # pragma: no cover - 依赖外部占用时序
+            last = e
+            time.sleep(0.05 * (attempt + 1))
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    raise last if last else RuntimeError("write failed")
 
 
 def record(lottery: str, issue: Any, decision: Dict[str, Any],
@@ -67,6 +82,7 @@ def record(lottery: str, issue: Any, decision: Dict[str, Any],
         "记录时间": datetime.now().isoformat(timespec="seconds"),
         "策略": "盈利策略",
         "判决": decision.get("判决"),
+        "判决等级": decision.get("判决等级"),
         "原因": decision.get("原因"),
         "注数": decision.get("注数"),
         "净EV单注": (decision.get("κ0基线") or {}).get("净EV单注"),

@@ -98,51 +98,41 @@ def prize_probabilities_ssq() -> List[dict]:
     }
 
 
-def prize_probabilities_dlt() -> List[dict]:
+def prize_probabilities_dlt(issue: Optional[str] = None) -> List[dict]:
     """
-    大乐透各奖级概率（2023 新规：9 奖级，条件与 ev/rollover.py::_dlt_fixed 一致，
-    已对照体彩官网《"超级大乐透"游戏中奖介绍》核实）。
-    旧 7 级表（三等=5+0/4+2 等）为 2023 前规则，已废弃。
+    大乐透各奖级概率 —— **由 ev/profit/rules.rules_for 按期生成**。
+
+    大乐透历史上奖级数变更多次（8/6/9/7 级五段，见 data/prize_versions.py），
+    旧实现手写 2019 九级表，对 2026-02 之后的期全错。现在按期号取规则版本：
+    issue=None ⇒ 现行版本（2026-02 起七级）。
+    返回列表，每项含 prize_name, conditions, probability, is_floating
     """
-    total = total_combinations("大乐透")
+    from ev.profit.rules import rules_for
 
-    # 前区C(35,5)=324632, 后区C(12,2)=66, 总=21,425,712
-    # 一等奖: 5+2
-    c1 = comb(5, 5) * comb(30, 0) * comb(2, 2) * comb(10, 0)  # 1
-    # 二等奖: 5+1
-    c2 = comb(5, 5) * comb(30, 0) * comb(2, 1) * comb(10, 1)  # 20
-    # 三等奖: 5+0 → 10000
-    c3 = comb(5, 5) * comb(30, 0) * comb(2, 0) * comb(10, 2)  # 45
-    # 四等奖: 4+2 → 3000
-    c4 = comb(5, 4) * comb(30, 1) * comb(2, 2) * comb(10, 0)  # 150
-    # 五等奖: 4+1 → 300
-    c5 = comb(5, 4) * comb(30, 1) * comb(2, 1) * comb(10, 1)  # 3000
-    # 六等奖: 3+2 → 200
-    c6 = comb(5, 3) * comb(30, 2) * comb(2, 2) * comb(10, 0)  # 4350
-    # 七等奖: 4+0 → 100
-    c7 = comb(5, 4) * comb(30, 1) * comb(2, 0) * comb(10, 2)  # 6750
-    # 八等奖: 3+1 或 2+2 → 15
-    c8a = comb(5, 3) * comb(30, 2) * comb(2, 1) * comb(10, 1)  # 87000
-    c8b = comb(5, 2) * comb(30, 3) * comb(2, 2) * comb(10, 0)  # 20300
-    c8 = c8a + c8b
-    # 九等奖: 3+0 或 2+1 或 1+2 或 0+2 → 5
-    c9a = comb(5, 3) * comb(30, 2) * comb(2, 0) * comb(10, 2)  # 195750
-    c9b = comb(5, 2) * comb(30, 3) * comb(2, 1) * comb(10, 1)  # 913500
-    c9c = comb(5, 1) * comb(30, 4) * comb(2, 2) * comb(10, 0)  # 137025
-    c9d = comb(5, 0) * comb(30, 5) * comb(2, 2) * comb(10, 0)  # 142506
-    c9 = c9a + c9b + c9c + c9d
+    rules = rules_for("大乐透", issue)
+    total = rules.outcome_size          # C(35,5)×C(12,2) = 21,425,712
+    ow = rules.outer_width
+    lo, hi = rules.outer_range
+    n = hi - lo + 1
 
-    levels = [
-        {"prize_name": "一等奖", "condition": "5+2", "win_combs": c1, "is_floating": True},
-        {"prize_name": "二等奖", "condition": "5+1", "win_combs": c2, "is_floating": True},
-        {"prize_name": "三等奖", "condition": "5+0", "win_combs": c3, "fixed_amount": 10000},
-        {"prize_name": "四等奖", "condition": "4+2", "win_combs": c4, "fixed_amount": 3000},
-        {"prize_name": "五等奖", "condition": "4+1", "win_combs": c5, "fixed_amount": 300},
-        {"prize_name": "六等奖", "condition": "3+2", "win_combs": c6, "fixed_amount": 200},
-        {"prize_name": "七等奖", "condition": "4+0", "win_combs": c7, "fixed_amount": 100},
-        {"prize_name": "八等奖", "condition": "3+1 / 2+2", "win_combs": c8, "fixed_amount": 15},
-        {"prize_name": "九等奖", "condition": "3+0 / 2+1 / 1+2 / 0+2", "win_combs": c9, "fixed_amount": 5},
-    ]
+    # 逐 (前区命中 h, 后区命中 j) 格精确计数 → 按奖级聚合
+    counts: Dict[str, int] = {}
+    conds: Dict[str, List[str]] = {}
+    for (h, j), g in rules.grade_table.items():
+        cells = comb(ow, h) * comb(n - ow, ow - h) * rules.inner_multiplicity[j]
+        counts[g] = counts.get(g, 0) + cells
+        conds.setdefault(g, []).append(f"{h}+{j}")
+
+    levels: List[dict] = []
+    for g, r in rules.grades.items():          # grades 已按奖级升序
+        lv: dict = {"prize_name": g,
+                    "condition": " / ".join(sorted(conds[g], key=lambda s: -int(s[0]))),
+                    "win_combs": counts[g]}
+        if r.kind == "floating":
+            lv["is_floating"] = True
+        else:
+            lv["fixed_amount"] = r.fixed
+        levels.append(lv)
 
     total_win = 0
     for level in levels:
@@ -199,15 +189,16 @@ def prize_probabilities_generic(lottery_name: str) -> dict:
     }
 
 
-def get_prize_data(lottery_name: str) -> dict:
+def get_prize_data(lottery_name: str, issue: Optional[str] = None) -> dict:
     """
     统一入口：返回该彩种的中奖概率数据。
     双色球/大乐透走原逻辑（零回归）；数字型走通用分区计算。
+    `issue` 仅对大乐透有效：按期号取规则版本（8/6/9/7 级五段）。
     """
     if is_redblue(lottery_name):
         if lottery_name == "双色球":
             return prize_probabilities_ssq()
-        return prize_probabilities_dlt()
+        return prize_probabilities_dlt(issue)
     return prize_probabilities_generic(lottery_name)
 
 

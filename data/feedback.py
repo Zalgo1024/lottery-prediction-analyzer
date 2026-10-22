@@ -684,39 +684,28 @@ def _classify_prize(red_hits: int, blue_hits: int) -> str:
         return "未中"
 
 
-def _classify_dlt_prize(red_hits: int, blue_hits: int) -> str:
-    """
-    中奖等级分类（大乐透专用，2023 新规九级）。
+def _classify_dlt_prize(red_hits: int, blue_hits: int,
+                        issue: Any = None) -> str:
+    """大乐透中奖等级判定 —— **委托 `data.prize_versions.classify_dlt`（单一真源）**。
 
-    ⚠️ 历史坑：此前红蓝彩种统一走 `_classify_prize`（双色球规则），对大乐透
-    造成系统性误判：5+0 判四等(官方三等)、4+2/3+2 判五等(官方四等)、
-    3+0/1+2/0+2 官方中奖却被判"未中"(漏判)、0+1/1+1 官方**不中奖**却判"六等"(虚报)。
-    条件与 `ev/rollover.py::_dlt_fixed()`（前区5/35、后区2/12）逐条一致：
-      一等 5+2（浮动）；二等 5+1（浮动）；
-      三等 5+0；四等 4+2；五等 4+1；六等 3+2；七等 4+0；
-      八等 3+1、2+2；九等 3+0、2+1、1+2、0+2；其余（2+0/1+1/1+0/0+1/0+0）未中。
-    命名延续乐透型体系"X等"（不带"奖"字）。
+    大乐透有五段规则（8/8/6/9/7 级），条件映射各不相同：
+      · 2014 前 8 级：三等 5+0；四等 4+2；六等 3+2/4+0；七等 3+1/2+2；八等其余四条
+      · 2014~2019 6 级：三等 5+0/4+2；四等 4+1/3+2；五等 4+0/3+1/2+2
+      · 2019~2026 9 级：原三/四/五等各拆两级
+      · 2026 起 7 级：5+0 与 4+2 合并三等；4+0 与 3+2 合并五等
+    `issue=None` ⇒ 现行版本。过去这里硬编码九级，2026 段会把 3+1/2+2 判成"八等"（实际六等）、
+    把 4+0 判成"七等"（实际五等），金额与奖级同时错。
     """
-    if red_hits == 5 and blue_hits == 2:
-        return "一等"
-    if red_hits == 5 and blue_hits == 1:
-        return "二等"
-    if red_hits == 5 and blue_hits == 0:
-        return "三等"
-    if red_hits == 4 and blue_hits == 2:
-        return "四等"
-    if red_hits == 4 and blue_hits == 1:
-        return "五等"
-    if red_hits == 3 and blue_hits == 2:
-        return "六等"
-    if red_hits == 4 and blue_hits == 0:
-        return "七等"
-    if (red_hits == 3 and blue_hits == 1) or (red_hits == 2 and blue_hits == 2):
-        return "八等"
-    if (red_hits == 3 and blue_hits == 0) or (red_hits == 2 and blue_hits == 1) \
-            or (red_hits == 1 and blue_hits == 2) or (red_hits == 0 and blue_hits == 2):
-        return "九等"
-    return "未中"
+    from data.prize_versions import classify_dlt
+
+    g = classify_dlt(int(red_hits), int(blue_hits),
+                     version=None if issue is None else _dlt_version_name(issue))
+    return g or "未中"
+
+
+def _dlt_version_name(issue: Any) -> str:
+    from data.prize_versions import version_for_issue
+    return version_for_issue(issue).version
 
 
 def _hit_detail(lottery_name: str, pred_ps: dict, actual_rec, schema) -> tuple:

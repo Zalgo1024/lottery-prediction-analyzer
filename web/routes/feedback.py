@@ -76,16 +76,18 @@ def api_feedback_history(lottery):
 
     # 等级排序权重 —— 三套命名体系并存，缺一会被 .get(x,99) 当成"未中"排序：
     #   乐透型  双色球: 一等~六等        （_classify_prize）
-    #   乐透型  大乐透: 一等~九等        （_classify_dlt_prize，2023九级）
+    #   乐透型  大乐透: 一等~九等        （_classify_dlt_prize；历史上 6/7/8/9 级四种，
+    #                                     「X等」部分由规则表生成，不手写副本）
     #   七星彩          : 一等奖~六等奖    （_qxc_prize）
     #   数字型(3D/排列3/排列5): 直选 / 组选3 / 组选6 / 未中（_group_winning；排列5 只有直选）
-    prize_rank = {
-        "一等": 1, "二等": 2, "三等": 3, "四等": 4, "五等": 5, "六等": 6,
-        "七等": 7, "八等": 8, "九等": 9,
+    from ev.profit.rules import grade_rank_names
+
+    prize_rank = {g: i + 1 for i, g in enumerate(grade_rank_names())}
+    prize_rank.update({
         "一等奖": 1, "二等奖": 2, "三等奖": 3, "四等奖": 4, "五等奖": 5, "六等奖": 6,
         "直选": 1, "组选3": 2, "组选6": 3,
         "未中": 99,
-    }
+    })
     min_rank = prize_rank.get(min_prize, 0) if min_prize != "全部" else 0
 
     def _int_param(value, default=None):

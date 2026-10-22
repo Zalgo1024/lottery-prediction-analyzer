@@ -34,6 +34,7 @@ ev/rollover.py —— 双色球/大乐透 Rollover-EV 计算器（任务 2.3）
 """
 import math
 from pathlib import Path
+from typing import Any, Dict, Tuple
 
 import pandas as pd
 
@@ -52,43 +53,63 @@ _JACKPOT_CAP = 10_000_000
 _POOL_SHARE = 0.7
 
 
-def _ssq_fixed():
-    """双色球固定奖概率（红球 C(33,6)，蓝球 1/16）"""
-    denom = math.comb(33, 6) * 16
-    c = math.comb
-    return {
-        "三等奖": (3000, c(6, 5) * c(27, 1) / denom),                                          # 5+1
-        "四等奖": (200, (c(6, 5) * c(27, 1) * 15 + c(6, 4) * c(27, 2)) / denom),               # 5+0, 4+1
-        "五等奖": (10, (c(6, 4) * c(27, 2) * 15 + c(6, 3) * c(27, 3)) / denom),               # 4+0, 3+1
-        "六等奖": (5, (c(6, 2) * c(27, 4) + c(6, 1) * c(27, 5) + c(27, 6)) / denom),         # 2+1, 1+1, 0+1
-    }
-
-
-def _dlt_fixed():
-    """大乐透固定奖概率（2023 新规：前区 C(35,5)，后区 C(12,2)）"""
-    denom = math.comb(35, 5) * math.comb(12, 2)
-    c = math.comb
-    f5, f4, f3, f2, f1, f0 = (c(5, 5), c(5, 4) * c(30, 1), c(5, 3) * c(30, 2),
-                              c(5, 2) * c(30, 3), c(5, 1) * c(30, 4), c(30, 5))
-    b2, b1, b0 = c(2, 2), c(2, 1) * c(10, 1), c(10, 2)
-    return {
-        "三等奖": (10000, f5 * b0 / denom),                       # 5+0
-        "四等奖": (3000, f4 * b2 / denom),                        # 4+2
-        "五等奖": (300, f4 * b1 / denom),                         # 4+1
-        "六等奖": (200, f3 * b2 / denom),                         # 3+2
-        "七等奖": (100, f4 * b0 / denom),                         # 4+0
-        "八等奖": (15, (f3 * b1 + f2 * b2) / denom),              # 3+1, 2+2
-        "九等奖": (5, (f3 * b0 + f2 * b1 + f1 * b2 + f0 * b2) / denom),  # 3+0, 2+1, 1+2, 0+2
-    }
-
-
-# 固定小奖（名义赔付，概率为组合精确值）
-_FIXED_PRIZES = {
-    "双色球": _ssq_fixed(),
-    "大乐透": _dlt_fixed(),
+# 红蓝型几何：(外层池, 外层选, 内层池, 内层选) —— 与 ev/profit/rules 格表配套
+_RB_GEOM = {
+    "双色球": (33, 6, 16, 1),
+    "大乐透": (35, 5, 12, 2),
 }
 
-# 一等奖分配系数（奖池×系数 进入头奖池，MVP 近似）
+
+def fixed_prizes_for(name: str, issue: Any = None) -> Dict[str, Tuple[float, float]]:
+    """固定小奖 {奖级: (单注金额, 组合精确概率)}，**由 rules_for 按期生成**。
+
+    取代旧的手写 `_ssq_fixed` / `_dlt_fixed`（后者是九级硬编码副本，大乐透
+    2026-02 起奖级与金额全错）。按期传 issue ⇒ 用当期规则版本（大乐透五段
+    8/6/9/7 级）；issue=None ⇒ 现行版本。浮动奖级（大乐透一/二/三等在
+    2014 及以前为浮动）不进本表。
+    """
+    if name not in _RB_GEOM:
+        raise KeyError(f"{name} 非红蓝乐透型，无固定小奖表")
+    ot, op, it, ip = _RB_GEOM[name]
+    from ev.profit.rules import rules_for
+
+    rules = rules_for(name, issue)
+    denom = math.comb(ot, op) * math.comb(it, ip)
+    out: Dict[str, Tuple[float, float]] = {}
+    for g, r in rules.grades.items():
+        if r.kind != "fixed" or r.fixed is None:
+            continue
+        cells = 0
+        for (h, j), gg in rules.grade_table.items():
+            if gg != g:
+                continue
+            cells += (math.comb(op, h) * math.comb(ot - op, op - h)
+                      * rules.inner_multiplicity[j])
+        out[g] = (float(r.fixed), cells / denom)
+    return out
+
+
+# 现行版本固定小奖（兼容既有导入点；内容由 rules_for 现算，非手写副本）
+_FIXED_PRIZES = {n: fixed_prizes_for(n) for n in _RB_GEOM}
+
+
+def fixed_prizes_robust(name: str, issue: Any) -> Dict[str, Tuple[float, float]]:
+    """fixed_prizes_for 的容错包装：期号不可解析/早于最早版本 → 现行版本。"""
+    try:
+        return fixed_prizes_for(name, issue)
+    except ValueError:                          # IssueKeyError / RuleVersionError
+        return fixed_prizes_for(name)
+
+
+def fixed_prize_ev(name: str, issue: Any = None) -> float:
+    """固定小奖单注期望贡献（元）。issue 给定 ⇒ 按该期规则版本结算。"""
+    return sum(payout * p for payout, p in fixed_prizes_for(name, issue).values())
+
+
+def rules_version_of(name: str, issue: Any) -> str:
+    """该期生效的规则版本名（仅用于口径标注，不参与计算）。"""
+    from ev.profit.rules import rules_for
+    return rules_for(name, issue).rule_version
 
 
 def _load_history(name: str) -> pd.DataFrame:
@@ -109,11 +130,6 @@ def _head_payout_history(name: str) -> pd.Series:
     s = pd.to_numeric(df["一等奖奖金"], errors="coerce")
     s = s[(s > 0) & s.notna()]
     return s
-
-
-def fixed_prize_ev(name: str) -> float:
-    """固定小奖单注期望贡献（元）"""
-    return sum(payout * p for payout, p in _FIXED_PRIZES[name].values())
 
 
 def _mu_cold_state(name: str, q_cold: float = 0.1) -> tuple:
@@ -181,7 +197,15 @@ def rollover_ev(name: str, issue: str = None, pool_share: float = _POOL_SHARE,
     # 头奖单注奖金估计：总池 / 期望注数，上限 1000 万
     jackpot_per_win = min(cap, head_pool / max(lam, 1e-9)) if head_pool > 0 else 0.0
     head_contrib = p1 * jackpot_per_win
-    fixed_contrib = fixed_prize_ev(name)
+    # 固定奖按**当期规则版本**结算（大乐透 2026-02 前是九级表，金额全不同）
+    issue_actual = str(row["期号"])
+    try:
+        fixed_prizes = fixed_prizes_for(name, issue_actual)
+        fixed_basis = f"规则版本 {rules_version_of(name, issue_actual)}"
+    except ValueError:
+        fixed_prizes = fixed_prizes_for(name)
+        fixed_basis = "现行版本（期号不可解析/越界，显式降级）"
+    fixed_contrib = sum(payout * p for payout, p in fixed_prizes.values())
     total_ev = -2.0 + head_contrib + fixed_contrib
 
     # 参与信号：EV 天花板语义（2026-09-04 P1-2 修正 P75 死锁/饱和缺陷）
@@ -229,6 +253,7 @@ def rollover_ev(name: str, issue: str = None, pool_share: float = _POOL_SHARE,
         "头奖单注奖金估计": round(jackpot_per_win, 2),
         "头奖期望贡献": round(head_contrib, 6),
         "固定奖贡献": round(fixed_contrib, 6),
+        "固定奖规则版本": fixed_basis,
         "总EV(每注)": round(total_ev, 6),
         "参与信号": play_signal,
         "分摊口径": (f"{cold_basis}（μ_冷门口径）" if mu_cold is not None
@@ -263,6 +288,8 @@ def rollover_history(name: str, n: int = 30) -> list:
             "期号": str(row["期号"]),
             "奖池": round(pool, 0),
             "头奖单注估计": round(jpw, 0),
+            "固定奖贡献": round(sum(payout * p for payout, p in
+                                    fixed_prizes_robust(name, str(row["期号"])).values()), 6),
             "参与信号": bool(jpw >= _JACKPOT_CAP * 0.999 and lam > 0),
             "μ_冷门": round(mu_cold, 3) if mu_cold is not None else None,
             "头奖单注估计(冷门口径)": round(jpw_cold, 0) if jpw_cold is not None else None,

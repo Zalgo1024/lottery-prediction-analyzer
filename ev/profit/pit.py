@@ -22,31 +22,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 ZERO_FILL_EPS = 1e-9
 
-
-class PitError(RuntimeError):
-    """试图使用决策时点之后（或不存在）的信息。"""
-
-
-def issue_key(lottery: str, issue: Any) -> Tuple[int, int]:
-    """跨源期号归一化 → (年, 序号)。
-
-    实测存在三套格式：CSV `26120`、中彩网 `2026120`、体彩 `07001`。
-    不归一会导致 market.db 的奖级注数与 CSV 财务字段**一行都 join 不上**。
-    """
-    s = "".join(ch for ch in str(issue or "") if ch.isdigit())
-    if not s:
-        raise PitError(f"非法期号: {issue!r}")
-    if len(s) >= 7:                       # 2026120
-        return int(s[:4]), int(s[4:])
-    if len(s) == 5:                       # 26120 / 07001 → 两位年
-        yy = int(s[:2])
-        return (2000 + yy if yy < 90 else 1900 + yy), int(s[2:])
-    if len(s) == 4:
-        # ★ 双色球的 2003~2009 是**一位年**：`3001` = 2003 年第 1 期。
-        #   曾把前两位（"30"）当年份 ⇒ 判成 2030，979 期被当成"未来"静默丢掉。
-        yy = int(s[:1])
-        return (2000 + yy if yy < 90 else 1900 + yy), int(s[1:])
-    raise PitError(f"无法识别的期号格式: {issue!r}")
+# ★ 期号归一化已下沉到 data/issue_key.py（data 层也要用，而 ev/ 不能反向被 data/ 依赖）。
+#   PitError 保持为同一异常类型，否则 `except PitError` 抓不到 issue_key 抛出的错误。
+from data.issue_key import IssueKeyError as PitError  # noqa: E402  (兼容旧捕获)
+from data.issue_key import issue_key  # noqa: E402,F401  (re-export)
 
 
 def is_zero_filled(sales: Optional[float], pool: Optional[float],

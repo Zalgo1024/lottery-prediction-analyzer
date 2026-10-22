@@ -20,8 +20,10 @@ import numpy as np
 
 from ev.profit import evaluate as E
 from ev.profit import payouts as P
+from ev.profit import pit
 from ev.profit import tilt as T
 from ev.profit import tax as TX
+from ev.profit import crowd_tilt as CT
 from ev.profit.rules import rules_for
 
 # κ* 求解用的网格（每点一次精确评估；点越多越慢）
@@ -31,23 +33,30 @@ VERDICT_PARTICIPATE = "条件性可参与"
 VERDICT_REJECT = "本期不建议参与"
 VERDICT_NO_DATA = "不出结论（数据不足）"
 
+# 判决等级（三档）：完整（乐透 measured_GO）/ 条件性（代理未检验）/ 不出结论
+VERDICT_LEVEL_FULL = "完整"
+VERDICT_LEVEL_CONDITIONAL = "条件性（代理未检验）"
+VERDICT_LEVEL_NONE = "不出结论"
 
-def _ev_single(lottery: str, tickets: Sequence[dict], ctx: P.Ctx, kappa: float) -> Dict[str, Any]:
-    m = E.exact_metrics(lottery, tickets, ctx, kappa=kappa)
+
+def _ev_single(lottery: str, tickets: Sequence[dict], ctx: P.Ctx, kappa: float,
+               tax_basis: str = TX.BASIS_ISSUE) -> Dict[str, Any]:
+    m = E.exact_metrics(lottery, tickets, ctx, kappa=kappa, tax_basis=tax_basis)
     return {"κ": float(kappa), "净EV单注": float(m["净EV单注"]),
             "净EV": float(m["净EV"]), "P至少中一注": float(m["P至少中一注"]),
             "中奖注数期望": float(m["中奖注数期望"]), "税前期望": float(m["税前期望"]),
-            "期望税": float(m["期望税"])}
+            "期望税": float(m["期望税"]), "税口径": m["税口径"]}
 
 
 def solve_kappa_star(lottery: str, tickets: Sequence[dict], ctx: P.Ctx,
-                     grid: Sequence[float] = KSTAR_GRID) -> Dict[str, Any]:
+                     grid: Sequence[float] = KSTAR_GRID,
+                     tax_basis: str = TX.BASIS_ISSUE) -> Dict[str, Any]:
     """A：反解净EV 单注 = 0 的 κ（盈亏平衡所需机制强度）。
 
     单调性不假设：先在网格上算 EV(κ)，判 `单调`；单调则在穿越区间线性插值，
     非单调则取**首个**穿越点并把非单调区间写进备注。
     """
-    pts = [_ev_single(lottery, tickets, ctx, k) for k in grid]
+    pts = [_ev_single(lottery, tickets, ctx, k, tax_basis=tax_basis) for k in grid]
     evs = [p["净EV单注"] for p in pts]
     mono = all(evs[i + 1] >= evs[i] - 1e-12 for i in range(len(evs) - 1))
 
@@ -134,12 +143,26 @@ def decide(lottery: str, issue: Any, tickets: Optional[Sequence[dict]] = None,
 
     ★ 任何一步不满足都输出 `不出结论`/`不建议参与`，**不给近似数字冒充结论**。
     """
-    r = rules_for(lottery)
     out: Dict[str, Any] = {"彩种": lottery, "期号": str(issue),
-                           "税口径": TX.BASIS_ISSUE}
+                           "税口径": TX.BASIS_ISSUE,
+                           "判决等级": VERDICT_LEVEL_NONE}
 
-    # 0. 数据门
-    ctx = P.build_ctx(lottery, issue)
+    # 0. 早期数据门：代理 π 本身不可用（如福彩3D 直选注数自 2022 起全 0）
+    early = CT.unavailable_reason(lottery)
+    if early is not None:
+        out.update({"判决": VERDICT_NO_DATA, "原因": early})
+        return out
+
+    # 0b. 构造 PIT 视图（只用开奖前信息）；同时喂给 build_ctx 避免双重加载
+    view = pit.as_of(lottery, issue, min_history=min_history)
+    ctx = P.build_ctx(lottery, issue, view=view)
+    r = ctx.rules
+    out["规则版本"] = r.rule_version
+    if len(view.history) < min_history:
+        out.update({"判决": VERDICT_NO_DATA,
+                    "原因": f"开奖/销售历史仅 {len(view.history)} 期，低于门槛 {min_history}"
+                            f"（数字型销售额数据仅 2016-07 起有效）⇒ 不出结论"})
+        return out
     if ctx.sales_forecast <= 0:
         out.update({"判决": VERDICT_NO_DATA, "原因": "本期销量不可得（历史销售缺失）"})
         return out
@@ -153,12 +176,13 @@ def decide(lottery: str, issue: Any, tickets: Optional[Sequence[dict]] = None,
     }
     out["奖金口径"] = P.note(ctx)
 
-    # 0b. 选号（没给票就先按净EV 代理选）
+    # 0c. 选号（没给票就先按净EV 代理选）
     if tickets is None:
         from ev.profit import select as SEL
         sel = SEL.select_profit_tickets(lottery, K, ctx, kappa=0.0, seed=seed)
         tickets = sel["票"]
-        out["选号"] = sel["元数据"]
+        # 同时保留「票」与「元数据」：情景扫描与台账落账都读 d["选号"]["票"]
+        out["选号"] = {"票": sel["票"], **sel["元数据"]}
     out["注数"] = len(tickets)
     if not tickets:
         out.update({"判决": VERDICT_NO_DATA, "原因": "选号结果为空"})
@@ -176,14 +200,20 @@ def decide(lottery: str, issue: Any, tickets: Optional[Sequence[dict]] = None,
     # 2. 拥挤度门
     tl = T.outer_tilt(lottery)
     if tl is None:
-        out.update({"判决": VERDICT_REJECT,
+        out.update({"判决": VERDICT_REJECT, "判决等级": VERDICT_LEVEL_NONE,
                     "原因": "拥挤度打分不可用（模型未 Go 或不支持该彩种）⇒ 无法评估机制倾斜，"
                             "只能拒绝参与"})
         return out
 
-    # 3. κ* 与上界
+    # 判决等级：乐透 measured_GO = 完整；代理 π / walk_forward = 条件性（代理未检验）
+    判决等级 = (VERDICT_LEVEL_FULL if tl.source == "measured_GO"
+               else VERDICT_LEVEL_CONDITIONAL)
+    out["判决等级"] = 判决等级
+
+    # 3. κ* 与上界（按拥挤度来源分发到正确的上界估计器）
     ks = solve_kappa_star(lottery, tickets, ctx)
-    up = T.kappa_upper(lottery)
+    up = (T.kappa_upper_marginal(lottery, tl)
+          if tl.source == CT.CROWD_PI_SOURCE else T.kappa_upper(lottery))
     out["κ*求解"] = ks
     out["机制强度上界"] = up
 
@@ -194,7 +224,7 @@ def decide(lottery: str, issue: Any, tickets: Optional[Sequence[dict]] = None,
         return out
 
     kstar = ks["κ*"]
-    k_up = up.get("kappa") if up.get("可用") else None
+    k_up = (up.get("kappa_upper", up.get("kappa")) if up.get("可用") else None)
     out["缺口倍数"] = (round(kstar / k_up, 2) if k_up and k_up > 0 else None)
 
     if k_up is None or kstar > k_up:
@@ -205,10 +235,16 @@ def decide(lottery: str, issue: Any, tickets: Optional[Sequence[dict]] = None,
                              f"需要 κ*={kstar:.3f}，但机制强度上界不可得 ⇒ 本期不建议参与")})
         return out
 
-    out.update({"判决": VERDICT_PARTICIPATE,
-                "原因": f"κ*={kstar:.3f} ≤ 已测上界 {k_up}，且稳健性检查见下",
-                "注意": "「条件性可参与」仍需通过稳健性检查（β 形状误差、销量 P10/P90、"
-                        "池模型两口径、税两口径）后才可作为建议；本模型不保证盈利。"})
+    if 判决等级 == VERDICT_LEVEL_FULL:
+        out.update({"判决": VERDICT_PARTICIPATE,
+                    "原因": f"κ*={kstar:.3f} ≤ 已测上界 {k_up}，且稳健性检查见下",
+                    "注意": "「条件性可参与」仍需通过稳健性检查（β 形状误差、销量 P10/P90、"
+                            "池模型两口径、税两口径）后才可作建议；本模型不保证盈利。"})
+    else:
+        out.update({"判决": VERDICT_PARTICIPATE,
+                    "原因": "条件性可参与（拥挤度为**未检验代理**，不得作为投注建议）",
+                    "注意": "代理 π 无 Go 门槛、位置独立是结构假设；本结论仅表示在代理口径下"
+                            "机制强度上界未被 κ* 否定，不构成投注建议。"})
 
     if allow_mc:
         out["MC校验"] = solve_monte_carlo(lottery, tickets, ctx, kappa=0.0, n=5000)

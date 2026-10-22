@@ -145,6 +145,44 @@ def prize_payout(lottery: str, grade: str, issue: Any = None) -> Dict[str, Any]:
       }
     """
     g = _norm_grade(grade)
+
+    # ★ 大乐透有五个规则版本（8/8/6/9/7 级），固定奖金额**按期选版本**。
+    #   曾因这里只读静态九级表、而概率已按 2026 七级算，导致「七等」按 100 元
+    #   × 0.06 的命中率算出 +6 元/注的假正 EV（2026 的七等实际是 5 元）。
+    if lottery == "大乐透":
+        from data.prize_versions import DLT_VERSIONS, RuleVersionError, version_for_issue
+
+        try:
+            v = version_for_issue(issue) if issue is not None else DLT_VERSIONS[-1]
+        except (RuleVersionError, ValueError):
+            # 期号越界/脏数据：展示函数不抛错，回退现行版本并在备注里标注
+            v = DLT_VERSIONS[-1]
+        amt_v = v.fixed_amount(g)
+        if amt_v is not None:
+            return {"金额": float(amt_v), "浮动": False, "来源": "固定奖金",
+                    "文本": _fmt_amount(amt_v),
+                    "备注": f"{lottery} {grade} 固定奖金 {_fmt_amount(amt_v)}/注"
+                            f"（规则版本 {v.version}）"}
+        if g in v.floating:
+            # 浮动奖级：优先当期实际单注奖金
+            actual = None
+            if issue is not None:
+                try:
+                    actual = _load_actual_payouts(lottery).get(int(issue), {}).get(g)
+                except (TypeError, ValueError):
+                    actual = None
+            if actual:
+                return {"金额": float(actual), "浮动": True, "来源": "当期实际单注奖金",
+                        "文本": _fmt_amount(actual),
+                        "备注": f"{lottery} 第{issue}期 {grade} 当期实际单注奖金（规则版本 {v.version}）"}
+            ref = FLOATING_REF.get(lottery, {}).get(g)
+            return {"金额": None, "浮动": True, "来源": "名义参考",
+                    "文本": (f"浮动（上限 {_fmt_amount(ref)}）" if ref else "浮动（视奖池）"),
+                    "备注": f"{lottery} {grade} 为浮动奖级，金额随奖池与中奖注数变化"
+                            f"（规则版本 {v.version}）"}
+        return {"金额": 0.0, "浮动": False, "来源": "未中",
+                "文本": "—", "备注": f"{lottery} {grade}：该规则版本下不存在此奖级"}
+
     fixed = FIXED_PAYOUT.get(lottery, {})
 
     # 1) 固定奖级

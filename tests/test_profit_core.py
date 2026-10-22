@@ -27,18 +27,34 @@ def _outer_pmf(r):
     return {h: math.comb(w, h) * (n - 1) ** (w - h) / n ** w for h in range(w + 1)}
 
 
-@pytest.mark.parametrize("name", R.SUPPORTED)
-def test_rules_reproduce_combinatorial_probabilities(name):
-    """规则表（格表 + 内层重数）必须逐奖级复现 payout.grade_probabilities。"""
-    r = R.rules_for(name)
+@pytest.mark.parametrize("name,issue", [
+    ("双色球", None),
+    ("大乐透", None), ("大乐透", "26013"), ("大乐透", "19018"),
+    ("大乐透", "14051"), ("大乐透", "09121"),
+    ("七星彩", None), ("排列3", None), ("福彩3D", None), ("排列5", None),
+])
+def test_rules_reproduce_combinatorial_probabilities(name, issue):
+    """规则表（格表 + 内层重数）必须逐奖级复现 payout.grade_probabilities 的同版本值。
+
+    大乐透有五个版本（8/8/6/9/7 级），必须按版本比对，否则会拿九级概率当七级用。
+    """
+    r = R.rules_for(name, issue)
     pmf = _outer_pmf(r)
     got = {}
     for (h, j), g in r.grade_table.items():
         got[g] = got.get(g, 0.0) + pmf[h] * r.inner_multiplicity[j] / r.inner_size
-    want = grade_probabilities(name)
-    assert set(got) == set(want), f"奖级集合不一致: {set(got) ^ set(want)}"
+    want = grade_probabilities(name, version=r.rule_version)
+    assert set(got) == set(want), f"奖级集合不一致({name} {issue}): {set(got) ^ set(want)}"
     for g, p in want.items():
-        assert got[g] == pytest.approx(p, rel=1e-12), f"{name} {g}"
+        assert got[g] == pytest.approx(p, rel=1e-12), f"{name} {issue} {g}"
+
+
+def test_dlt_all_versions_share_win_probability():
+    """13 个中奖条件跨段守恒 ⇒ 各版本「中任意奖」的总概率必须相同。"""
+    from data.prize_versions import DLT_VERSIONS
+    totals = [sum(grade_probabilities("大乐透", version=v.version).values())
+              for v in DLT_VERSIONS]
+    assert max(totals) - min(totals) < 1e-12, totals
 
 
 @pytest.mark.parametrize("name", R.SUPPORTED)
@@ -129,6 +145,17 @@ def test_tilt_monotone_in_kappa():
 
 
 def test_unsupported_lottery_returns_none_not_uniform():
-    """不支持/未 Go 的彩种必须显式返回 None，不许静默退化成均匀。"""
+    """不支持/未 Go 的彩种必须显式返回 None，不许静默退化成均匀。
+
+    改写自原「福彩3D / 七星彩 都返回 None」：现在数字型/七星彩 走代理 π
+    （crowd_pi_v2）来源，所以：
+      · 福彩3D 因直选注数自 2022 起全 0 ⇒ π 不可测 ⇒ 仍显式 None；
+      · 排列5 走 crowd_pi_v2，返回 Tilt 且分数**非全零**（不得退化成均匀）。
+    """
+    # 福彩3D：直选注数自 2022 起全 0 ⇒ π 不可测 ⇒ 显式 None（不是退化成均匀）
     assert T.outer_tilt("福彩3D") is None
-    assert T.outer_tilt("七星彩") is None
+    # 排列5：代理 π 来源（crowd_pi_v2），返回 Tilt 且不退化成均匀
+    tl = T.outer_tilt("排列5")
+    assert tl is not None
+    assert tl.source == "crowd_pi_v2"
+    assert not np.allclose(tl.scores, 0.0)        # 非退化成均匀（分数全 0）

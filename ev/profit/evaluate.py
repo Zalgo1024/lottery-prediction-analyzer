@@ -43,10 +43,10 @@ def _float_pay_matrix(lottery: str, ctx: P.Ctx, M: int) -> Dict[str, np.ndarray]
       分数 bit 级并列）。所以先对 μ 取唯一值、只在唯一值上算 E[min(cap,池/(1+X))]，
       再映射回 M —— 否则要逐 110 万行调 scipy，单期就能跑掉一分多钟。
     """
-    r = rules_for(lottery)
+    r = ctx.rules          # ★ 规则随期次版本变化，必须用 ctx 里的那份
     tl = T.outer_tilt(lottery)
     raw = (tl.scores + tl.offset) if tl is not None else None
-    gprobs = grade_probabilities(lottery)
+    gprobs = grade_probabilities(lottery, version=r.rule_version)
     out: Dict[str, np.ndarray] = {}
     for g, gr in r.grades.items():
         if gr.kind != "floating":
@@ -82,12 +82,13 @@ def _float_pay_matrix(lottery: str, ctx: P.Ctx, M: int) -> Dict[str, np.ndarray]
 
 def exact_metrics(lottery: str, tickets: Sequence[dict], ctx: P.Ctx,
                   kappa: float = 0.0, want_dist: bool = True,
-                  weights: Optional[np.ndarray] = None) -> Dict[str, Any]:
+                  weights: Optional[np.ndarray] = None,
+                  tax_basis: str = TX.BASIS_ISSUE) -> Dict[str, Any]:
     """整组 S 的四指标（单期，精确）。
 
     weights：可注入已算好的外层权重（回测按块缓存用），避免重复建权重。
     """
-    r = rules_for(lottery)
+    r = ctx.rules          # ★ 同上：按上下文版本取规则
     if not tickets:
         raise ValueError("候选集为空")
     K = len(tickets)
@@ -151,8 +152,24 @@ def exact_metrics(lottery: str, tickets: Sequence[dict], ctx: P.Ctx,
         win_mean += pj * float((w * (H @ ind[:, j])).sum())
         gross += pj * float((w * g_rho).sum())
 
-        tax_rho = np.where(g_rho > TX.TAX_THRESHOLD, TX.TAX_RATE * g_rho, 0.0)
-        tax_exp += pj * float((w * tax_rho).sum())
+        if tax_basis == TX.BASIS_TICKET:
+            # 逐注计税：每注的 gross 独立与阈值比较，整组只对有奖注逐注计征。
+            # 同一 (ρ,h) 桶内的注，其固定奖 = per_h[h]、浮动奖 = 该结局 ρ 的池分摊
+            # （与具体哪注无关），故逐注可加；再按桶内注数 H[ρ,h] 累加。
+            tax_pt = np.zeros(M)
+            for h in range(h_max + 1):
+                g = r.grade_of(h, j)
+                if g is None:
+                    continue
+                col = float_pay.get(g)
+                gtc = per_h[h] + (col if col is not None else 0.0)
+                taxed = np.where(gtc > TX.TAX_THRESHOLD, TX.TAX_RATE * gtc, 0.0)
+                tax_pt = tax_pt + H[:, h] * taxed
+            tax_exp += pj * float((w * tax_pt).sum())
+        else:
+            # 同期同彩种合并计税（默认）：整组中奖总额 > 阈值才按 20% 全额计征。
+            tax_rho = np.where(g_rho > TX.TAX_THRESHOLD, TX.TAX_RATE * g_rho, 0.0)
+            tax_exp += pj * float((w * tax_rho).sum())
 
         if dist is not None:
             cnt = (H @ ind[:, j]).astype(np.int64)
@@ -168,7 +185,7 @@ def exact_metrics(lottery: str, tickets: Sequence[dict], ctx: P.Ctx,
         "净EV": float(net_ev),
         "净EV单注": float(net_ev / K),
         "成本": float(cost),
-        "税口径": TX.BASIS_ISSUE,
+        "税口径": tax_basis,
     }
     if dist is not None:
         out["中奖注数分布"] = {int(i): float(v) for i, v in enumerate(dist) if v > 1e-12}
@@ -187,7 +204,7 @@ def simulate_net_prob(lottery: str, tickets: Sequence[dict], ctx: P.Ctx,
 
     P(≥1)、E[中奖注数]、净EV 都是线性的，解析式正确，不走这里。
     """
-    r = rules_for(lottery)
+    r = ctx.rules
     U = O.outer_universe(lottery)
     M = len(U)
     w = weights if weights is not None else _outer_weights(lottery, kappa)

@@ -107,7 +107,7 @@ def prize_split_table(lottery: str, issue: Optional[str] = None,
                 "note": "固定赔率彩种：撞号不分薄、单注 EV 恒定，无号码相关口径可对照",
                 "诚实边界": _HONEST_NOTE}
 
-    from ev.rollover import _FIXED_PRIZES, _P1, fixed_prize_ev
+    from ev.rollover import _P1, fixed_prizes_robust
 
     row = None
     if pool is None or n_tickets is None:
@@ -120,6 +120,10 @@ def prize_split_table(lottery: str, issue: Optional[str] = None,
         if n_tickets is None:
             sales = float(row["总投注额"]) if row.get("总投注额") == row.get("总投注额") else 0.0
             n_tickets = sales / 2.0 if sales else 0.0
+
+    # 固定小奖按**当期规则版本**结算（大乐透 2026-02 前奖级/金额不同）；
+    # row=None（外部显式传 pool/票量）⇒ 现行版本
+    fixed = fixed_prizes_robust(lottery, str(row["期号"]) if row is not None else None)
 
     p1 = _P1[lottery]
     lam = n_tickets * p1
@@ -150,7 +154,7 @@ def prize_split_table(lottery: str, issue: Optional[str] = None,
         "备注": (f"μ_冷={mu_cold:.2f}/μ_热={mu_hot:.2f}（N×p1×exp(β·f(q分位))）"
                  if mu_cold is not None else "冷/热口径不可用"),
     }]
-    for grade, (payout, p) in _FIXED_PRIZES[lottery].items():
+    for grade, (payout, p) in fixed.items():
         rows.append({
             "奖级": grade, "概率": p, "名义单注": payout, "浮动": False,
             "λ均摊单注": payout, "冷门口径单注": payout, "热门口径单注": payout,
@@ -158,7 +162,8 @@ def prize_split_table(lottery: str, issue: Optional[str] = None,
             "备注": "固定奖，不随选号口径变化（期望线性性）",
         })
 
-    ev_nominal = -2.0 + nominal_1 * p1 + fixed_prize_ev(lottery)
+    fixed_ev = sum(payout * p for payout, p in fixed.values())
+    ev_nominal = -2.0 + nominal_1 * p1 + fixed_ev
     ev_lambda = -2.0 + sum(r["贡献_λ"] for r in rows)
     ev_cold = (-2.0 + sum(r["贡献_冷门"] for r in rows)) if cold_unit is not None else None
     ev_hot = (-2.0 + sum(r["贡献_热门"] for r in rows)) if hot_unit is not None else None

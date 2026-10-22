@@ -42,6 +42,7 @@ from itertools import combinations
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+from data.issue_key import issue_key  # 期号归一化（双色球 2003-2009 是 4 位年，须按 (年,序) 排序）
 
 logger = logging.getLogger(__name__)
 
@@ -112,15 +113,31 @@ def features_matrix(R: np.ndarray, prev: Optional[np.ndarray] = None) -> np.ndar
 
 
 # ---------------- 数据装载 ----------------
+def _issue_sort_key(lottery: str, issue: Any) -> Tuple[int, Any]:
+    """期号排序键：优先按归一化 (年,序) 元组；解析失败退化为字符串（不崩溃）。
+
+    ★ 不能用裸字符串排序：双色球 2003-2009 的期号是 4 位（"3001"），字典序会排到
+    2026 的 7 位期号（"2026001"）之后，导致「按行序前 N 期」的 CV/walk-forward 切点
+    落在错误的时间位置。
+    """
+    try:
+        return (0, issue_key(lottery, issue))
+    except Exception:
+        return (1, (str(issue),))
+
+
 def _load_draw_rows(lottery: str) -> Optional[Dict[str, np.ndarray]]:
-    """按时间升序返回 {"reds": (n,k), "prev": (n,k), "y": (n,) 一等奖注数, "N": (n,) 票量, "issues": [...]}"""
+    """按时间升序返回 {"reds": (n,k), "prev": (n,k), "y": (n,) 一等奖注数, "N": (n,) 票量, "issues": [...]}。
+
+    ★ 排序键用 `issue_key`（(年,序) 元组），不再用裸字符串——见 `_issue_sort_key`。
+    """
     try:
         from data.loader import load_lottery
         data = load_lottery(lottery)
     except Exception as e:
         logger.error(f"[popularity] 读 {lottery} 失败: {e}")
         return None
-    recs = sorted(data.records, key=lambda r: r.期号)  # 升序
+    recs = sorted(data.records, key=lambda r: _issue_sort_key(lottery, r.期号))  # 按时间升序
     schema = None
     from data.schema import get_schema
     schema = get_schema(lottery)
@@ -796,6 +813,57 @@ def counterfactual_backtest(lottery: str, q_cold: float = 0.1, q_hot: float = 0.
                  f"{np.median(ratios_arr):.2f} 倍（{len(ratios_arr)} 期反事实；"
                  f"不改变中奖概率本身）"),
     }
+
+
+# ---------------- 全组合打分（tilt / walk-forward 回测复用） ----------------
+
+def universe_scores(lottery: str,
+                    beta: Optional[np.ndarray] = None,
+                    mu_: Optional[np.ndarray] = None,
+                    sd_: Optional[np.ndarray] = None,
+                    quantiles: bool = True) -> Optional[Dict[str, Any]]:
+    """全部外层组合的中心化 log-popularity 分数（+ 中点秩分位）。
+
+    `beta/mu_/sd_` 显式传入 ⇒ 用调用方参数（**walk-forward 回测**：β 只用
+    切点之前的数据拟合，无前视）；缺省 ⇒ 取 `get_popularity_model`（未 Go → None）。
+
+    返回 {"scores": (M,) 中心化分数, "quantiles": (M,) 或 None,
+          "offset": float, "beta_source": "explicit"|"cached_model"}；
+    模型不可用 / 打分失败 → None（调用方必须显式降级，不许静默）。
+
+    ★ 显式参数时不落打分缓存（walk-forward 每块指纹不同，落盘只会互相覆盖）。
+    """
+    if beta is None:
+        params = get_popularity_model(lottery)
+        if not params.get("go"):
+            return None
+        beta = np.asarray(params["beta"], dtype=np.float64)
+        mu_ = np.asarray(params["m_"], dtype=np.float64)
+        sd_ = np.asarray(params["s_"], dtype=np.float64)
+        src = "cached_model"
+    else:
+        beta = np.asarray(beta, dtype=np.float64)
+        mu_ = np.asarray(mu_ if mu_ is not None else np.zeros(len(beta)), dtype=np.float64)
+        sd_ = np.asarray(sd_ if sd_ is not None else np.ones(len(beta)), dtype=np.float64)
+        src = "explicit"
+
+    from ev.profit.outcomes import outer_universe
+
+    R = outer_universe(lottery)
+    F = features_matrix(np.asarray(R, dtype=np.int16))
+    raw = ((F - mu_) / sd_) @ beta
+    offset = float(raw.mean())
+    out: Dict[str, Any] = {
+        "scores": (raw - offset).astype(np.float64),
+        "offset": offset,
+        "beta_source": src,
+        "quantiles": None,
+    }
+    if quantiles:
+        u = drawn_quantiles(lottery, R, beta=beta, mu_=mu_, sd_=sd_, persist=False)
+        if np.isfinite(u).all():
+            out["quantiles"] = np.asarray(u, dtype=np.float64)
+    return out
 
 
 # ---------------- 漂移监控：人群选号行为是否随时间变化 ----------------

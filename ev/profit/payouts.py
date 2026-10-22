@@ -29,9 +29,13 @@ from ev.profit.rules import LotteryRules, rules_for
 # 一等奖份额 a1（占销售额）与二等份额（占销售额）
 #   双色球：二等实测中位 0.0684（n=2760）；一二等合计实测 0.2251 ⇒ 一等 ≈ 0.157
 #   大乐透：二等实测中位 0.0414（n=1241）；一等按同类结构取先验（未校准）
+#   大乐透三等：**仅 2014-05 及更早段为浮动奖**（2014 财政部公告：按注均分 7%）；
+#     2019 起三等改固定奖（rules 里 kind="fixed"），本条目自动不生效。
+#     2007/2009 段的计提比例无原文 ⇒ 沿用 0.07 并标先验。
 FLOAT_SHARE = {
     "双色球": {"一等": (0.157, "实测中位标定 n=2760"), "二等": (0.0684, "实测中位 n=2760")},
-    "大乐透": {"一等": (0.115, "先验（未校准）"), "二等": (0.0414, "实测中位 n=1241")},
+    "大乐透": {"一等": (0.115, "先验（未校准）"), "二等": (0.0414, "实测中位 n=1241"),
+               "三等": (0.07, "2014 财政部公告原文 7%（2007/2009 段沿用为先验）")},
     "七星彩": {"一等": (0.06, "先验（未校准）"), "二等": (0.03, "先验（未校准）")},
 }
 
@@ -71,10 +75,15 @@ class Ctx:
         return self.float_pool.get(grade)
 
 
-def build_ctx(lottery: str, issue: Any, sales_override: Optional[float] = None) -> Ctx:
-    """从 PIT 视图构造决策上下文。"""
-    r = rules_for(lottery)
-    view = pit.as_of(lottery, issue)
+def build_ctx(lottery: str, issue: Any, sales_override: Optional[float] = None,
+               view: Optional[pit.PitView] = None) -> Ctx:
+    """从 PIT 视图构造决策上下文。
+
+    `view` 可外部传入（decide 已构造过，避免双重加载与潜在不一致）。
+    """
+    r = rules_for(lottery, issue)      # ★ 按期选规则版本
+    if view is None:
+        view = pit.as_of(lottery, issue)
     warn = list(view.warnings)
 
     fc = view.forecast_sales()
@@ -84,8 +93,11 @@ def build_ctx(lottery: str, issue: Any, sales_override: Optional[float] = None) 
 
     pool_before = view.pool_before()
     shares = FLOAT_SHARE.get(lottery, {})
+    floating = set(r.floating())          # 该版本真正浮动的奖级
     float_pool: Dict[str, float] = {}
     for g, (a, src) in shares.items():
+        if g not in floating:
+            continue                      # 如 2019 起大乐透三等已改固定奖，不建浮动池
         base = a * sales
         if g == "一等":
             if pool_before is not None:
@@ -121,10 +133,12 @@ def expected_payout(ctx: Ctx, grade: str, mu_others: float) -> float:
 
 def note(ctx: Ctx) -> Dict[str, Any]:
     """口径声明（必须随每份输出一起返回）。"""
+    floating = set(ctx.rules.floating())      # 只报当期真正浮动的奖级
     return {
         "奖金口径": FLOAT_SOURCE.get(ctx.lottery, "unknown"),
         "浮动奖份额": {g: {"a": a, "来源": s}
-                       for g, (a, s) in FLOAT_SHARE.get(ctx.lottery, {}).items()},
+                       for g, (a, s) in FLOAT_SHARE.get(ctx.lottery, {}).items()
+                       if g in floating},
         "票量": f"销售额 / {ctx.rules.avg_ticket_price:.4f}",
         "注意": ("浮动奖份额为实测中位/先验常数，未做删失回归；1000 万封顶会压住池子大小的影响，"
                  "故该常数的误差对净EV 的影响远小于机制强度 κ 的不确定性。"),

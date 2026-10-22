@@ -39,27 +39,35 @@ def _uniform_prob(r, h: int, j: int) -> float:
     return p_h * r.inner_multiplicity.get(j, 0) / r.inner_size
 
 
-def _overlap_ok(reds, chosen, cap: int) -> bool:
+def _overlap_ok(reds, chosen, cap: int, ordered: bool = False) -> bool:
+    """与已选票的重叠是否超上限。
+
+    · 组合型：集合交集大小（双色球生产口径 cap=3）
+    · 排列型：**同位相同数**（位序即信息，「123」与「321」同位相同数为 0；
+      用集合交集会把它们判成重叠 3，白白砍掉多样性）
+    """
+    if ordered:
+        return all(sum(1 for a, b in zip(reds, c) if a == b) <= cap for c in chosen)
     s = set(int(x) for x in reds)
     return all(len(s & set(int(y) for y in c)) <= cap for c in chosen)
 
 
-def _key_of(r) -> str:
-    return {"红球": "红球", "前区": "红球", "前6位": "号码", "全部位数": "号码"}[r.outer_label]
-
-
 def ev_proxy(lottery: str, rows: np.ndarray, scores: np.ndarray,
-             ctx: P.Ctx, kappa: float) -> np.ndarray:
+             ctx: P.Ctx, kappa: float,
+             tilt: Optional[T.Tilt] = None) -> np.ndarray:
     """候选组合的**代理单注 EV**（向量化）。
 
     = Σ_{h,j} p_j·P(h,j)·pay(c, h, j) × 机制通道因子 exp(−κs)/E[exp(−κs)]
     浮动奖的 pay 用该票自己的 μ（少人买 ⇒ 分奖少）。
+
+    `tilt` 显式传入 ⇒ 用调用方的倾斜依据（walk-forward 回测：块级 β，
+    不用全样本缓存）；缺省 ⇒ `T.outer_tilt(lottery)`。
     """
-    r = rules_for(lottery)
+    r = ctx.rules
     p_j = O.inner_class_prob(r)
-    gprobs = grade_probabilities(lottery)
+    gprobs = grade_probabilities(lottery, version=r.rule_version)
     offset = 0.0
-    tl = T.outer_tilt(lottery)
+    tl = tilt if tilt is not None else T.outer_tilt(lottery)
     if tl is not None:
         offset = tl.offset
 
@@ -95,11 +103,17 @@ def ev_proxy(lottery: str, rows: np.ndarray, scores: np.ndarray,
 def select_profit_tickets(lottery: str, K: int, ctx: P.Ctx, kappa: float = 0.0,
                           seed: int = 0, pool_size: int = 20000,
                           overlap_cap: int = PROD_OVERLAP_CAP,
-                          blue: Optional[int] = 1) -> Dict[str, Any]:
-    """按净EV 代理排序选 K 注（受重叠上限约束）。"""
-    r = rules_for(lottery)
+                          blue: Optional[int] = 1,
+                          tilt: Optional[T.Tilt] = None) -> Dict[str, Any]:
+    """按净EV 代理排序选 K 注（受重叠上限约束）。
+
+    `tilt` 显式传入 ⇒ 用调用方的倾斜依据（walk-forward 回测用块级 β）；
+    缺省 ⇒ 全样本 `T.outer_tilt(lottery)`。
+    """
+    r = ctx.rules
     U = O.outer_universe(lottery)
-    tl = T.outer_tilt(lottery)
+    tl = tilt if tilt is not None else T.outer_tilt(lottery)
+    ordered = not r.outer_choose          # 排列型：位序即信息（重叠判据/票面都走保序）
 
     rng = np.random.default_rng(seed)
     if pool_size >= len(U):
@@ -109,28 +123,32 @@ def select_profit_tickets(lottery: str, K: int, ctx: P.Ctx, kappa: float = 0.0,
     rows = U[idx]
     scores = (tl.scores[idx] if tl is not None else np.zeros(len(idx)))
 
-    ev = ev_proxy(lottery, rows, scores, ctx, kappa)
+    ev = ev_proxy(lottery, rows, scores, ctx, kappa, tilt=tl)
     order = np.argsort(-ev)
 
     chosen_rows: List[List[int]] = []
     chosen_ev: List[float] = []
     for i in order:
         row = [int(x) for x in rows[i]]
-        if _overlap_ok(row, chosen_rows, overlap_cap):
+        if _overlap_ok(row, chosen_rows, overlap_cap, ordered=ordered):
             chosen_rows.append(row)
             chosen_ev.append(float(ev[i]))
         if len(chosen_rows) >= K:
             break
 
+    # ---- 票面一次构造（组合型外层排序；排列型保序，位序不许被 sorted 抹掉）----
+    key = O.outer_key(r)
     tickets = []
     for row in chosen_rows:
-        t: Dict[str, Any] = {_key_of(r): sorted(row)}
+        outer = sorted(row) if r.outer_choose else list(row)
+        t: Dict[str, Any] = {key: outer}
         if r.name == "双色球":
             t["蓝球"] = [int(blue or 1)]
         elif r.name == "大乐透":
             t["蓝球"] = [1, 2]
         elif r.name == "七星彩":
-            t["号码"] = sorted(row) + [int(blue or 0)]
+            # 外层=前 6 位（保序）；第 7 位内层默认 0（不参与排序）
+            t[key] = outer + [int(blue or 0)]
         tickets.append(t)
 
     return {
@@ -139,6 +157,9 @@ def select_profit_tickets(lottery: str, K: int, ctx: P.Ctx, kappa: float = 0.0,
             "彩种": lottery, "注数": len(tickets), "κ": float(kappa),
             "候选池": int(len(idx)), "重叠上限": int(overlap_cap),
             "EV代理范围": [min(chosen_ev), max(chosen_ev)] if chosen_ev else [None, None],
+            "倾斜来源": (f"{tl.source}（β as-of {tl.beta_asof}）"
+                         if (tl is not None and tl.beta_asof)
+                         else (tl.source if tl is not None else "无（模型未Go/不支持）")),
             "口径": "净EV 代理排序（非逐候选全枚举）；出号后用 exact_metrics 复核",
             "诚实声明": ("κ=0 且无分摊差异时全部候选同分、排序无意义；"
                          "本模型下差异只来自「少人买 ⇒ 分奖少」这一条，"

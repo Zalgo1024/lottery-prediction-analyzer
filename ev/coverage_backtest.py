@@ -48,14 +48,10 @@ K_GRID = {
     "排列3": [5, 10, 25, 50],
 }
 
-# 固定奖级的官方单注金额（元）。浮动奖级（ssq/dlt 一二三等、qxc 一二等）不在此表，
-# 回测时走 payout_eff（红蓝）/ nominal（qxc 浮动，标注名义值）。
-TIER_PAYOUT = {
-    "双色球": {"三等": 3000, "四等": 200, "五等": 10, "六等": 5},   # 一/二 浮动
-    "大乐透": {"三等": 10000, "四等": 3000, "五等": 300, "六等": 200,
-              "七等": 100, "八等": 15, "九等": 5},                  # 一/二 浮动
-    "七星彩": {"三等": 3000, "四等": 500, "五等": 30, "六等": 5},   # 一/二 浮动（名义值）
-}
+# ★ 原先这里有一张手写的 TIER_PAYOUT（第三份九级固定奖表）。它在大乐透 2026-02
+#   改七级之后全错（七等按 100 元算，实际 5 元）。现已删除：
+#   固定奖一律走 `ev.profit.rules.rules_for(lottery, issue)`（按规则版本），
+#   金额优先取 `data.prize_amounts.actual_per_bet`（当期实测，含派奖相加）。
 
 # qxc 浮动奖级名义值（仅用于净收益估计；一等奖/二等奖中出极罕见，且历史数据常缺，
 # 用名义值并在报告中标注，不影响「≥5元/≥10元」门槛判定）。
@@ -98,10 +94,10 @@ def _floating_payout_redblue(lottery: str, ticket: Dict[str, Any], issue: Any,
 
 def grade_ticket(lottery: str, ticket: Dict[str, Any], actual_rec: Any,
                  issue: Any, cache: Dict[str, Any]) -> Tuple[str, float]:
-    """单注对单期开奖的 (奖级, 实得单注元)。未中 → ("未中", 0.0)。
+    """单注对单期开奖的 (奖级, 实得单注元, 口径)。未中 → ("未中", 0.0, "规则表")。
 
-    复用 data/feedback 的判级单一真源；固定奖级查 TIER_PAYOUT，浮动奖级红蓝走
-    payout_eff、qxc 走名义值（标注）。
+    复用 data/feedback 的判级单一真源；金额按**规则版本**结算（_settle_by_rules）：
+    固定奖 → 规则表/实测；浮动奖红蓝走库里实测或 payout_eff 兜底、qxc 走名义值。
     """
     from data.feedback import (_classify_dlt_prize, _classify_prize, _qxc_prize,
                                _settle_pl)
@@ -113,14 +109,13 @@ def grade_ticket(lottery: str, ticket: Dict[str, Any], actual_rec: Any,
         ab = set((actual_rec.zone_numbers or {}).get("蓝球", []))
         rh = len(ph & ah)
         bb = len(bh & ab)
-        tier = (_classify_dlt_prize(rh, bb) if lottery == "大乐透"
+        tier = (_classify_dlt_prize(rh, bb, issue) if lottery == "大乐透"
                 else _classify_prize(rh, bb))
         if tier == "未中":
-            return ("未中", 0.0)
-        payout = TIER_PAYOUT[lottery].get(tier)
-        if payout is None:  # 浮动奖级
-            payout = _floating_payout_redblue(lottery, ticket, issue, tier, cache)
-        return (tier, float(payout))
+            return ("未中", 0.0, "规则表")
+        return _settle_by_rules(lottery, issue, tier, cache,
+                                fallback=lambda: _floating_payout_redblue(
+                                    lottery, ticket, issue, tier, cache))
 
     if lottery == "七星彩":
         pred = ticket.get("号码") or []
@@ -130,10 +125,10 @@ def grade_ticket(lottery: str, ticket: Dict[str, Any], actual_rec: Any,
             zh[f"第{i + 1}位"] = 1 if int(pred[i]) == int(actual[i]) else 0
         tier, fixed = _qxc_prize({"分区命中": zh})
         if tier is None:
-            return ("未中", 0.0)
-        if fixed > 0:
-            return (tier, float(fixed))
-        return (tier, float(QXC_FLOATING_NOMINAL.get(tier, 0.0)))
+            return ("未中", 0.0, "规则表")
+        g = tier.replace("奖", "")                      # "一等奖" → "一等"
+        return _settle_by_rules("七星彩", issue, g, cache,
+                                fallback=lambda: float(QXC_FLOATING_NOMINAL.get(tier, 0.0)))
 
     # 数字型（排列5/3D/排列3）：走官方规则 _settle_pl（直选/组选/未中）。
     pred = ticket.get("号码") or []
@@ -144,8 +139,44 @@ def grade_ticket(lottery: str, ticket: Dict[str, Any], actual_rec: Any,
     }
     pl, _mode, level = _settle_pl(lottery, fb)
     if level is None:
-        return ("未中", 0.0)
-    return (level, float(pl + 2.0))   # _settle_pl 返回 模拟盈亏 = 实得 − 2
+        return ("未中", 0.0, "规则表")
+    return (level, float(pl + 2.0), "规则表")   # _settle_pl 返回 模拟盈亏 = 实得 − 2
+
+
+def _settle_by_rules(lottery: str, issue: Any, grade: str,
+                     cache: Dict[str, Any], fallback) -> Tuple[str, float, str]:
+    """按**规则版本**取该奖级的实得单注金额。返回 (奖级, 金额, 口径)。
+
+    顺序：固定奖 → 规则表金额（除非库里有实测，派奖期会是「基本+派奖」）；
+          浮动奖 → 库里当期实测单注奖金 → 兜底 fallback（payout_eff / 名义值）。
+
+    ★ 期号不可解析（合成期号如 "TEST"）→ 回退现行版本并在口径里显式标注，
+      **不静默降级**；期号可解析但早于最早版本（RuleVersionError）→ 向上抛，
+      真实早期期号不许用新规则结算。
+    """
+    from data.issue_key import IssueKeyError
+    from data.prize_amounts import actual_per_bet
+    from data.prize_versions import RuleVersionError
+    from ev.profit.rules import rules_for
+
+    try:
+        rules = rules_for(lottery, issue)
+        basis = "规则表"
+    except IssueKeyError:
+        rules = rules_for(lottery)
+        basis = "规则表(期号不可解析→现行版)"
+    rule = rules.grades.get(grade)
+    if rule is None:
+        return (grade, 0.0, "未知奖级")
+    if rule.kind == "fixed":
+        amt, note = actual_per_bet(lottery, issue, grade, rule.fixed)
+        if amt is None:
+            return (grade, float(rule.fixed), basis)
+        return (grade, float(amt), note)
+    amt, note = actual_per_bet(lottery, issue, grade, None)
+    if amt is not None:
+        return (grade, float(amt), note)
+    return (grade, float(fallback() or 0.0), "payout_eff")
 
 
 def _nums_to_zones(nums: List[int], lottery: str) -> Dict[str, List[int]]:
@@ -160,8 +191,10 @@ def evaluate_period(lottery: str, tickets: List[Dict[str, Any]], actual_rec: Any
     hit10 = False
     wins = 0
     total = 0.0
+    notes: Dict[str, int] = {}
     for t in tickets:
-        _tier, payout = grade_ticket(lottery, t, actual_rec, issue, cache)
+        _tier, payout, note = grade_ticket(lottery, t, actual_rec, issue, cache)
+        notes[note] = notes.get(note, 0) + 1
         if payout and payout > 0:
             wins += 1
             total += payout
@@ -174,6 +207,7 @@ def evaluate_period(lottery: str, tickets: List[Dict[str, Any]], actual_rec: Any
         "总实得": round(total, 2),
         "≥5元": hit5,
         "≥10元": hit10,
+        "结算口径": notes,      # 可审计：实测 / 实测+派奖 / 规则表 / payout_eff
     }
 
 
