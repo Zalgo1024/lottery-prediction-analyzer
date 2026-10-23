@@ -79,5 +79,17 @@ EV_NEGATIVE_CAVEAT = (
     f"见 `{MEASURE_COMMAND}`，结论随测量结果而定。"
 )
 
+# ------------------------------------------------------------------ 追加：奖级达标策略
+# ★ 三件套（RANDOMNESS_PREMISE / NO_SIGNAL / EV_NEGATIVE）保持原样，本条是**追加**，
+#   不是替换。它回答的是「覆盖类策略该怎么说」这一独立问题，因此自带完整作用域说明。
+TIER_COVERAGE_CAVEAT = (
+    "⚠️ 覆盖类策略只改变**这一组票整体**「至少一注达到目标奖级」的概率，"
+    "不改变任何一张票自己的中奖概率；"
+    "该整体概率的解析上界是 Kp（K 注结局完全不相交时的线性上界），"
+    "而生产注数下 Kp 通常远小于统计功效所需的最小效应量 —— "
+    "**「未检出改善」只说明功效不足以识别该上界，不等于覆盖无用**。"
+    "金额侧（净收益）在任何情况下都受名义返奖率约束。" + EV_NEGATIVE_CAVEAT
+)
+
 __all__ = ["MEASURE_COMMAND", "RANDOMNESS_PREMISE_CAVEAT",
-           "NO_SIGNAL_CAVEAT", "EV_NEGATIVE_CAVEAT"]
+           "NO_SIGNAL_CAVEAT", "EV_NEGATIVE_CAVEAT", "TIER_COVERAGE_CAVEAT"]

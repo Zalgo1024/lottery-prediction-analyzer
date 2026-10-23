@@ -50,17 +50,15 @@ def expected_value(lottery_name: str) -> dict:
     }
 
 
-def _estimate_floating_prize(lottery_name: str, prize_name: str) -> int:
+def _estimate_floating_prize(lottery_name: str, prize_name: str) -> float:
+    """浮动奖单注金额的历史估算 —— 单一真源在 `data.prize_table`。
+
+    ★ 历史上这里是三份手写副本之一（step2/step4/step5 各一份），键写「一等奖」而
+      规则层返回「一等」⇒ 查不到 ⇒ 浮动奖在 EV 里**静默算成 0**。
     """
-    根据历史数据估算浮动奖的期望金额
-    一等奖：历史均值约 500-1000 万
-    二等奖：历史均值约 10-50 万
-    """
-    estimates = {
-        "双色球": {"一等奖": 5_000_000, "二等奖": 200_000},
-        "大乐透": {"一等奖": 5_000_000, "二等奖": 150_000},
-    }
-    return estimates.get(lottery_name, {}).get(prize_name, 0)
+    from data.prize_table import estimate_floating_prize
+
+    return estimate_floating_prize(lottery_name, prize_name)
 
 
 def historical_return_rate(data: LotteryData) -> dict:

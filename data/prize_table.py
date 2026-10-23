@@ -46,6 +46,26 @@ FLOATING_REF: Dict[str, Dict[str, Optional[float]]] = {
 
 COST = 2.0  # 单注成本（元）
 
+# 浮动奖单注奖金的**历史均值估算**：仅用于「缺当期实际数据」时的兜底
+# （静态 EV / 方差 / 凯利 这类不需要当期开奖的粗算）。
+# ★ 键一律用**规则层级名**（「一等」），查找走 `estimate_floating_prize` 做归一化。
+FLOATING_ESTIMATE: Dict[str, Dict[str, float]] = {
+    "双色球": {"一等": 5_000_000, "二等": 200_000},
+    "大乐透": {"一等": 5_000_000, "二等": 150_000},
+}
+
+
+def estimate_floating_prize(lottery: str, grade: str) -> float:
+    """浮动奖单注金额的历史估算（按奖级名归一化查找）。
+
+    ★ 为什么单独立成一个函数：这张表历史上在 `step2_expected` / `step4_risk` /
+      `step5_betting` 里各抄了一份，且键写的是「一等奖」；而规则层（`rules_for`）
+      与 `prize_probabilities_*` 用的是「一等」⇒ `.get("一等", 0)` 恒返回 **0**，
+      浮动奖在静态 EV/方差/凯利里**静默消失**。三份副本就是它长期没被发现的原因。
+    """
+    table = {_norm_grade(k): v for k, v in FLOATING_ESTIMATE.get(lottery, {}).items()}
+    return float(table.get(_norm_grade(grade), 0.0))
+
 # 拼音数字 → 阿拉伯（用于归一化 "一等奖" → "一等"）
 _CN = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
 _NUM2CN = {v: k for k, v in _CN.items()}

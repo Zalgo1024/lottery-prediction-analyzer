@@ -26,7 +26,7 @@ ev/selection 的 _rand_tickets / _greedy_pick / control_tickets / select_coverag
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 
 import numpy as np
 
@@ -185,10 +185,20 @@ def _nums_to_zones(nums: List[int], lottery: str) -> Dict[str, List[int]]:
 
 
 def evaluate_period(lottery: str, tickets: List[Dict[str, Any]], actual_rec: Any,
-                    issue: Any, cache: Dict[str, Any]) -> Dict[str, Any]:
-    """单期：对 K 张票逐注判级 + 取实得，返回四类指标。"""
+                    issue: Any, cache: Dict[str, Any],
+                    target_grades: Optional[FrozenSet[str]] = None) -> Dict[str, Any]:
+    """单期：对 K 张票逐注判级 + 取实得，返回四类指标。
+
+    `target_grades`：已解析好的「达标奖级集」（来自 `ev.tier_target.resolve_conditions`）。
+      给了就在返回里加 `"达标"`（本期是否**有任一注**达到 ≥目标奖级）。
+      ★ 零额外成本：奖级 `_tier` 本来就是 `grade_ticket` 的返回值，只是以前被丢掉了。
+      ★ 与 `≥10元` 的口径差异：`≥10元` 看**当期实际实得**（含派奖），`达标` 看**奖级**
+        是否在集合里（规则表口径）⇒ 派奖期两者可能不一致，这是刻意的：
+        选号阶段不许看当期实际派奖（前视）。
+    """
     hit5 = False
     hit10 = False
+    hit_target = False
     wins = 0
     total = 0.0
     notes: Dict[str, int] = {}
@@ -202,13 +212,18 @@ def evaluate_period(lottery: str, tickets: List[Dict[str, Any]], actual_rec: Any
                 hit5 = True
             if payout >= 10:
                 hit10 = True
-    return {
+        if target_grades is not None and _tier and _tier != "未中" and _tier in target_grades:
+            hit_target = True
+    out = {
         "命中注数": wins,
         "总实得": round(total, 2),
         "≥5元": hit5,
         "≥10元": hit10,
         "结算口径": notes,      # 可审计：实测 / 实测+派奖 / 规则表 / payout_eff
     }
+    if target_grades is not None:
+        out["达标"] = hit_target
+    return out
 
 
 # ---------------------------------------------------------------- 候选池

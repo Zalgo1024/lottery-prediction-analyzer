@@ -28,68 +28,54 @@ def total_combinations(lottery_name: str) -> int:
     return red_comb * blue_comb
 
 
-def prize_probabilities_ssq() -> List[dict]:
+def prize_probabilities_ssq(issue: Optional[str] = None) -> dict:
     """
-    双色球各奖级概率（2026 新规，含福运奖）
-    返回列表，每项含 prize_name, conditions, probability, is_floating
+    双色球各奖级概率 —— **由 ev/profit/rules.rules_for 生成**（与大乐透同一套做法）。
+
+    ★ 旧实现手写 comb()，已与官方规则表漂移（2026-10-23 修）：
+        · 六等奖只算「0红+1蓝」，**漏了 1红+1蓝 / 2红+1蓝** ⇒ 六等奖组合数少算约 2/3；
+        · 凭空多出一个「福运奖（3红+0蓝，奖池≥15亿）」，而双色球规则表**没有该奖级**
+          ⇒ 3红+0蓝 是**未中**，把它算成中奖会虚增总中奖概率约 1.2 个百分点。
+      现在从单一真源 `rules_for("双色球").grade_table` 反查，六等 = 0/1/2 红 + 1 蓝，
+      与判级函数 `_classify_prize` 同源（不再可能各自漂移）。
+
+    返回 dict：{levels: [...], total_combinations, total_win_probability}
     """
-    # 总组合数 C(33,6) * C(16,1) = 17,721,088
-    total = total_combinations("双色球")
+    from ev.profit.rules import _GRADE_ORDER, rules_for
 
-    # 各奖级中奖组合数
-    # 一等奖: 6红 + 1蓝 = C(6,6)*C(27,0) * C(1,1)*C(15,0) = 1
-    c1 = comb(6, 6) * comb(27, 0) * comb(1, 1) * comb(15, 0)
+    rules = rules_for("双色球", issue)
+    total = rules.outcome_size          # C(33,6) × C(16,1) = 17,721,088
+    ow = rules.outer_width
+    lo, hi = rules.outer_range
+    n = hi - lo + 1
 
-    # 二等奖: 6红 + 0蓝 = C(6,6)*C(27,0) * C(1,0)*C(15,1) = 15
-    c2 = comb(6, 6) * comb(27, 0) * comb(1, 0) * comb(15, 1)
+    # 逐 (红球命中 h, 蓝球命中 j) 格精确计数 → 按奖级聚合
+    counts: Dict[str, int] = {}
+    conds: Dict[str, List[str]] = {}
+    for (h, j), g in rules.grade_table.items():
+        cells = comb(ow, h) * comb(n - ow, ow - h) * rules.inner_multiplicity[j]
+        counts[g] = counts.get(g, 0) + cells
+        conds.setdefault(g, []).append(f"{h}+{j}")
 
-    # 三等奖: 5红 + 1蓝 = C(6,5)*C(27,1) * C(1,1)*C(15,0) = 162
-    c3 = comb(6, 5) * comb(27, 1) * comb(1, 1) * comb(15, 0)
+    # ★ _build_grades 先固定后浮动，顺序是 三/四/五/六/一/二等 ⇒ 必须按级数重排
+    levels: List[dict] = []
+    for g in sorted(rules.grades, key=_GRADE_ORDER.index):
+        r = rules.grades[g]
+        lv: dict = {"prize_name": g,
+                    "condition": " / ".join(sorted(conds[g], key=lambda s: -int(s[0]))),
+                    "win_combs": counts[g]}
+        if r.kind == "floating":
+            lv["is_floating"] = True
+        else:
+            lv["fixed_amount"] = r.fixed
+        levels.append(lv)
 
-    # 四等奖: 5红+0蓝 或 4红+1蓝
-    c4a = comb(6, 5) * comb(27, 1) * comb(1, 0) * comb(15, 1)  # 5+0
-    c4b = comb(6, 4) * comb(27, 2) * comb(1, 1) * comb(15, 0)  # 4+1
-    c4 = c4a + c4b
-
-    # 五等奖: 4红+0蓝 或 3红+1蓝
-    c5a = comb(6, 4) * comb(27, 2) * comb(1, 0) * comb(15, 1)  # 4+0
-    c5b = comb(6, 3) * comb(27, 3) * comb(1, 1) * comb(15, 0)  # 3+1
-    c5 = c5a + c5b
-
-    # 六等奖: 0红+1蓝 = C(6,0)*C(27,6) * C(1,1)*C(15,0)
-    c6 = comb(6, 0) * comb(27, 6) * comb(1, 1) * comb(15, 0)
-
-    # 福运奖（2026新增，奖池≥15亿时生效）: 3红+0蓝
-    c_fuyun = comb(6, 3) * comb(27, 3) * comb(1, 0) * comb(15, 1)
-
-    levels = [
-        {"prize_name": "一等奖", "condition": "6红+1蓝", "win_combs": c1, "is_floating": True},
-        {"prize_name": "二等奖", "condition": "6红+0蓝", "win_combs": c2, "is_floating": True},
-        {"prize_name": "三等奖", "condition": "5红+1蓝", "win_combs": c3, "fixed_amount": 3000},
-        {"prize_name": "四等奖", "condition": "5红+0蓝 / 4红+1蓝", "win_combs": c4, "fixed_amount": 200},
-        {"prize_name": "五等奖", "condition": "4红+0蓝 / 3红+1蓝", "win_combs": c5, "fixed_amount": 10},
-        {"prize_name": "六等奖", "condition": "0红+1蓝", "win_combs": c6, "fixed_amount": 5},
-    ]
-
-    # 计算概率
-    total_win = 0
+    total_win = 0.0
     for level in levels:
         p = level["win_combs"] / total
         level["probability"] = p
         level["概率倒数"] = f"1/{total // level['win_combs']}" if level['win_combs'] > 0 else "0"
         total_win += p
-
-    # 福运奖（条件性）
-    p_fuyun = c_fuyun / total
-    levels.append({
-        "prize_name": "福运奖(条件)",
-        "condition": "3红+0蓝（奖池≥15亿）",
-        "win_combs": c_fuyun,
-        "probability": p_fuyun,
-        "概率倒数": f"1/{total // c_fuyun}",
-        "fixed_amount": 5,
-    })
-    total_win += p_fuyun
 
     return {
         "levels": levels,
@@ -197,7 +183,7 @@ def get_prize_data(lottery_name: str, issue: Optional[str] = None) -> dict:
     """
     if is_redblue(lottery_name):
         if lottery_name == "双色球":
-            return prize_probabilities_ssq()
+            return prize_probabilities_ssq(issue)
         return prize_probabilities_dlt(issue)
     return prize_probabilities_generic(lottery_name)
 

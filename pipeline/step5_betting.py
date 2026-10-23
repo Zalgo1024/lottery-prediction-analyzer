@@ -89,12 +89,12 @@ def kelly_criterion(lottery_name: str) -> dict:
     }
 
 
-def _est_float(lottery: str, prize: str) -> int:
-    estimates = {
-        "双色球": {"一等奖": 5_000_000, "二等奖": 200_000},
-        "大乐透": {"一等奖": 5_000_000, "二等奖": 150_000},
-    }
-    return estimates.get(lottery, {}).get(prize, 0)
+def _est_float(lottery: str, prize: str) -> float:
+    """浮动奖单注金额的历史估算 —— 单一真源在 `data.prize_table`。
+    （历史上 step2/step4/step5 各抄一份「一等奖」键，与规则层的「一等」对不上 ⇒ 恒为 0。）"""
+    from data.prize_table import estimate_floating_prize
+
+    return estimate_floating_prize(lottery, prize)
 
 
 def sharpe_ratio(lottery_name: str, risk_free_rate: float = 0.025) -> dict:

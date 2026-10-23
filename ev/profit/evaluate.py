@@ -83,10 +83,17 @@ def _float_pay_matrix(lottery: str, ctx: P.Ctx, M: int) -> Dict[str, np.ndarray]
 def exact_metrics(lottery: str, tickets: Sequence[dict], ctx: P.Ctx,
                   kappa: float = 0.0, want_dist: bool = True,
                   weights: Optional[np.ndarray] = None,
-                  tax_basis: str = TX.BASIS_ISSUE) -> Dict[str, Any]:
+                  tax_basis: str = TX.BASIS_ISSUE,
+                  min_grade: Optional[str] = None) -> Dict[str, Any]:
     """整组 S 的四指标（单期，精确）。
 
     weights：可注入已算好的外层权重（回测按块缓存用），避免重复建权重。
+    min_grade：把「中奖」收窄为「达到 ≥min_grade 的奖级」（如 "四等"）。
+      · None（默认）⇒ 行为与旧实现**逐位一致**（所有中奖格都算）。
+      · 非 None ⇒ `ind` 只置「排名 ≤ min_grade」的格，于是
+        `P至少中一注` / `中奖注数期望` / `中奖注数分布` 都变成**达标**口径；
+        而 `税前期望` / `期望税` / `净EV` 仍是**全部奖金**（钱不打折）。
+      ⇒ 两者合起来才能回答「提高达标率值不值」——只看前者会自欺。
     """
     r = ctx.rules          # ★ 同上：按上下文版本取规则
     if not tickets:
@@ -102,10 +109,20 @@ def exact_metrics(lottery: str, tickets: Sequence[dict], ctx: P.Ctx,
 
     p_j = O.inner_class_prob(r)                     # 内层类别边际概率
     j_max = len(p_j) - 1
-    ind = np.zeros((h_max + 1, j_max + 1))          # 该 (h,j) 是否中奖
-    for (h, j) in r.grade_table:
+
+    gate: Optional[int] = None
+    if min_grade is not None:
+        from ev.profit.rules import _GRADE_ORDER
+
+        if min_grade not in _GRADE_ORDER:
+            raise ValueError(f"未知奖级 {min_grade!r}，应为 {_GRADE_ORDER} 之一")
+        gate = _GRADE_ORDER.index(min_grade)
+
+    ind = np.zeros((h_max + 1, j_max + 1))          # 该 (h,j) 是否计入「中奖/达标」
+    for (h, j), g in r.grade_table.items():
         if h <= h_max and j <= j_max:
-            ind[h, j] = 1.0
+            if gate is None or (g in _GRADE_ORDER and _GRADE_ORDER.index(g) <= gate):
+                ind[h, j] = 1.0
 
     float_pay = _float_pay_matrix(lottery, ctx, M)
     cost = ctx.rules.cost * K
@@ -187,8 +204,14 @@ def exact_metrics(lottery: str, tickets: Sequence[dict], ctx: P.Ctx,
         "成本": float(cost),
         "税口径": tax_basis,
     }
+    if min_grade is not None:
+        # 达标口径：上面那三个「中奖」量实际是「达标」量，故显式标注并给出别名
+        out["达标线"] = min_grade
+        out["P_达标"] = p_any
+        out["达标注数期望"] = float(win_mean)
     if dist is not None:
-        out["中奖注数分布"] = {int(i): float(v) for i, v in enumerate(dist) if v > 1e-12}
+        key = "中奖注数分布" if min_grade is None else "达标注数分布"
+        out[key] = {int(i): float(v) for i, v in enumerate(dist) if v > 1e-12}
     return out
 
 

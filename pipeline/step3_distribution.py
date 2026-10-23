@@ -12,6 +12,7 @@ from scipy import stats as scipy_stats
 
 from config import LOTTERY_CONFIG
 from data.schema import LotteryData
+from data.prize_table import _norm_grade
 from pipeline.step1_probability import get_prize_data, comb
 
 logger = logging.getLogger(__name__)
@@ -36,7 +37,7 @@ def binomial_probability(
         p = 0.0
         for level in data["levels"]:
             p += level["probability"]
-            if level["prize_name"] == prize_level:
+            if _norm_grade(level["prize_name"]) == _norm_grade(prize_level):
                 break
     else:
         p = data["total_win_probability"]
@@ -77,7 +78,7 @@ def geometric_distribution(
         p = 0.0
         for level in data["levels"]:
             p += level["probability"]
-            if level["prize_name"] == prize_level:
+            if _norm_grade(level["prize_name"]) == _norm_grade(prize_level):
                 break
     else:
         p = data["total_win_probability"]

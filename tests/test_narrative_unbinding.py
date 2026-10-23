@@ -46,9 +46,13 @@ _LOCKED = {
     "stake": (SK._HONEST_NOTE, "纪律不下注"),
     "threshold": (TH._HONEST_NOTE, "不因门槛达成而改变"),
     "total_ev": (TE._HONEST_NOTE, "不预测号码"),
+    # 奖级达标策略（Phase B/C/D）。它自带作用域说明并以 EV_NEGATIVE_CAVEAT 收尾，
+    # 因此自动满足第 ② 条「每个 HONEST_NOTE 都带解绑从句」。
+    "tier_coverage": (NR.TIER_COVERAGE_CAVEAT, "不改变任何一张票自己的中奖概率"),
 }
 
-# 六处（模块名 → 文案）。新增 HONEST_NOTE 请在这里登记。
+# 七处（模块名 → 文案）。新增 HONEST_NOTE 请在这里登记。
+# ★ 三件套 _CAVEATS 仍是 3 条，别把「奖级达标」那条塞进去 —— 它有自己的作用域说明。
 _NOTES = {k: v[0] for k, v in _LOCKED.items()}
 
 _CAVEATS = (NR.RANDOMNESS_PREMISE_CAVEAT, NR.NO_SIGNAL_CAVEAT,

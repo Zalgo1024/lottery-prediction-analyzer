@@ -63,7 +63,7 @@ DEFAULT_STRATEGIES = ["高频策略", "遗漏值策略", "区间均衡策略"]
 #   就会被当成「未通过闸门者」参与「均分剩余权重」，把三个生产策略的权重从 1/3
 #   稀释到 1/6。这是一条**静默回归**，必须靠下面的 continue 挡掉。
 #   （策略名不得含「ML」/「统计训练」，否则被 normalize_strategy_name 归并。）
-NON_LEARNING_STRATEGIES = frozenset({"低拥挤策略"})
+NON_LEARNING_STRATEGIES = frozenset({"低拥挤策略", "奖级达标策略"})
 
 # 训练模型（ML / 统计训练）归一化后的统一策略名，参与反馈权重分配
 ML_STRATEGY = "ML策略"

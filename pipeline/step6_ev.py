@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from config import LOTTERY_CONFIG
+from data.prize_table import _norm_grade
 from data.schema import LotteryData
 from pipeline.step1_probability import get_prize_data
 
@@ -62,10 +63,12 @@ def _floating_prize_ev(record, lottery_name: str) -> float:
     缺数据时回退历史估算
     """
     ev = 0.0
-    levels = {lv["prize_name"]: lv for lv in _prize_levels(lottery_name)}
+    # ★ 键名归一化：「一等奖」≡「一等」（规则层用小写级名，历史代码写全称）。
+    #   不归一化会 `levels.get("一等奖") → None` ⇒ 浮动奖在 EV 里**静默消失**。
+    levels = {_norm_grade(lv["prize_name"]): lv for lv in _prize_levels(lottery_name)}
 
     for name, amount_attr in (("一等奖", "一等奖奖金"), ("二等奖", "二等奖奖金")):
-        lv = levels.get(name)
+        lv = levels.get(_norm_grade(name))
         if not lv:
             continue
         amount = getattr(record, amount_attr, None)
@@ -73,9 +76,11 @@ def _floating_prize_ev(record, lottery_name: str) -> float:
             ev += amount * lv["probability"]
         else:
             # 回退历史估算
-            est = {"双色球": {"一等奖": 5_000_000, "二等奖": 200_000},
-                   "大乐透": {"一等奖": 5_000_000, "二等奖": 150_000}}.get(lottery_name, {}).get(name, 0)
-            ev += est * lv["probability"]
+            table = {_norm_grade(k): v for k, v in
+                     {"双色球": {"一等奖": 5_000_000, "二等奖": 200_000},
+                      "大乐透": {"一等奖": 5_000_000, "二等奖": 150_000}}
+                     .get(lottery_name, {}).items()}
+            ev += table.get(_norm_grade(name), 0) * lv["probability"]
     return ev
 
 

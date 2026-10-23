@@ -419,6 +419,40 @@ def main():
     profit_parser.add_argument("--settle-pending", action="store_true", dest="settle_pending",
                                help="结算该彩种全部『已记录、未结算、且已开奖』的期次")
 
+    # ----- prize-tier（奖级达标策略 · 研究用 · 只记影子台账）-----
+    tier_parser = subparsers.add_parser(
+        "prize-tier",
+        help="奖级达标策略（研究）：固定预算下让「至少一注达到 ≥目标奖级」的期数尽量多；"
+             "只记影子台账 training/prize_tier，不写 pending、不参与权重学习",
+    )
+    tier_parser.add_argument(
+        "lottery", nargs="?", default="双色球",
+        choices=["双色球", "大乐透", "七星彩", "排列3", "排列5", "福彩3D"])
+    tier_parser.add_argument("--issue", default=None, help="目标期号（默认自动取下一期）")
+    tier_parser.add_argument("--target", default="四等",
+                             help="达标线：奖级（四等/五等/六等…）或金额（10 / 10元）")
+    tier_parser.add_argument("--groups", type=int, default=200,
+                             help="出号注数 K（预算 = 2K 元），默认 200")
+    tier_parser.add_argument("--pool", type=int, default=2000, help="候选池规模（默认 2000）")
+    tier_parser.add_argument("--cap", type=int, default=None,
+                             help="红球重叠上限（默认生产口径 3，不是 ev.selection 的 4）")
+    tier_parser.add_argument("--exact", action="store_true",
+                             help="额外算一次精确 P(至少一注达标)（慢，用于诊断）")
+    tier_parser.add_argument("--save", action="store_true",
+                             help="写入影子台账（training/prize_tier）")
+    tier_parser.add_argument("--summary", action="store_true", help="只输出台账汇总")
+    tier_parser.add_argument("--backtest", type=int, default=0, metavar="N",
+                             help="三臂对照回测最近 N 期（random / existing_coverage / tier_coverage）")
+    tier_parser.add_argument("--periods", type=int, default=0, metavar="N",
+                             help="回测期数（默认跟随 --backtest）")
+    tier_parser.add_argument("--seeds", default="0",
+                             help="回测种子（逗号分隔，如 0,1,2）")
+    tier_parser.add_argument("--reselect", type=int, default=25, dest="reselect",
+                             help="每隔多少期重抽候选池并重选（默认 25）")
+    tier_parser.add_argument("--alloc", default="",
+                             help="同时跑倍投分配对照，逗号分隔：all_single,few_double,"
+                                  "incremental_coverage,monetary_threshold（空=不跑）")
+
     # ----- payout（NetPayout WP0：实得奖金统一口径）-----
     payout_parser = subparsers.add_parser(
         "payout",
@@ -733,6 +767,8 @@ def _dispatch(args):
         _cmd_ev(args)
     elif args.command == "profit":
         _cmd_profit(args)
+    elif args.command == "prize-tier":
+        _cmd_prize_tier(args)
     elif args.command == "payout":
         _cmd_payout(args)
     elif args.command == "select":
@@ -2237,6 +2273,66 @@ def _cmd_profit(args):
 
     if getattr(args, "save", False):
         r = ledger.record(lot, issue, d, (d.get("选号") or {}).get("票"))
+        print(f"\n影子台账：{r}")
+
+
+def _cmd_prize_tier(args):
+    """奖级达标策略（研究）：单期选号 / 三臂对照回测 / 倍投分配对照 / 影子台账。"""
+    import json as _json
+
+    from ev import tier_ledger as TL
+
+    lot = args.lottery or "双色球"
+    if getattr(args, "summary", False):
+        print(_json.dumps(TL.summary(lot), ensure_ascii=False, indent=1))
+        return
+
+    target = args.target
+    seeds = tuple(int(x) for x in str(args.seeds).split(",") if str(x).strip())
+
+    if getattr(args, "backtest", 0):
+        from ev.tier_backtest import compare_tier
+        periods = int(args.periods) or int(args.backtest)
+        cmp = compare_tier(lot, int(args.groups), target=target, periods=periods,
+                           seeds=seeds, pool_size=args.pool, cap=args.cap,
+                           reselect_every=args.reselect)
+        print(_json.dumps(cmp, ensure_ascii=False, indent=1, default=str))
+        return
+
+    if getattr(args, "alloc", ""):
+        from ev.tier_allocate import compare_alloc
+        objs = tuple(x.strip() for x in str(args.alloc).split(",") if x.strip())
+        periods = int(args.periods) or 500
+        cmp = compare_alloc(lot, int(args.groups), target=target, objectives=objs,
+                            periods=periods, seeds=seeds, pool_size=args.pool,
+                            cap=args.cap, reselect_every=args.reselect)
+        print(_json.dumps(cmp, ensure_ascii=False, indent=1, default=str))
+        return
+
+    from ev.coverage_backtest import build_pool
+    from ev.tier_coverage import select_tier_coverage
+
+    issue = args.issue
+    if not issue:
+        from data.feedback import _next_issue
+        issue = _next_issue(lot)
+    pool = build_pool(lot, int(args.pool), seed=0)
+    tickets, meta = select_tier_coverage(lot, pool, int(args.groups), target, issue,
+                                         cap=args.cap, with_exact=bool(args.exact))
+    print(f"奖级达标策略（研究）  {lot}  期号 {issue}  目标 {meta['目标']}")
+    print(f"  规则版本 {meta['规则版本']}｜单注达标概率 {meta['单注达标概率']:.6e}"
+          f"｜随机基线 {meta['随机基线']:.4f}｜理论上限 Kp {meta['理论上限Kp']:.4f}")
+    print(f"  选中 {meta['选中注数']} 注｜覆盖通道 {meta['覆盖通道数']}/{meta['通道总数']}"
+          f"｜通道权重和 {meta['通道权重和']:.4f}（上界）｜重叠上限 {meta['重叠上限']}")
+    if not meta.get("上界是否有效", True):
+        print(f"  ⚠️ 上界无信息量：{meta.get('上界失效原因')}")
+    print("\n" + _json.dumps({k: v for k, v in meta.items()
+                              if k not in ("条件集",)}, ensure_ascii=False, indent=1))
+    print("\n号码：")
+    print(_json.dumps(tickets, ensure_ascii=False))
+
+    if getattr(args, "save", False):
+        r = TL.record(lot, issue, target, tickets, meta)
         print(f"\n影子台账：{r}")
 
 

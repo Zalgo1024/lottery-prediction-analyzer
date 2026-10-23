@@ -283,7 +283,8 @@ def _digit_interleaved(pool: List[Dict[str, Any]],
 
 
 def select_coverage(lottery: str, pool: List[Dict[str, Any]], K: int,
-                   target_tier: int = 5, seed: Optional[int] = None) -> List[Dict[str, Any]]:
+                   target_tier: int = 5, seed: Optional[int] = None,
+                   cap: Optional[int] = None) -> List[Dict[str, Any]]:
     """
     覆盖分散选号（Phase 1 奖级覆盖策略）：从**同一候选池**挑 K 注，针对目标奖级的
     「不中奖结果集」做分散，再施加与现有选号相同的低重叠约束。
@@ -300,9 +301,12 @@ def select_coverage(lottery: str, pool: List[Dict[str, Any]], K: int,
     更高奖级由 _greedy_pick 的前区/位低重叠自然覆盖（K 注分散在号码空间）。
 
     返回 [ticket, ...]（ticket 为原候选池中的字典，可直接喂回放/判级）。
+    `cap` 为 None 时取 `_OVERLAP_CAP`（旧行为）；对照回测必须显式传生产口径 3
+    （`ev.lowcrowd_backtest.PROD_OVERLAP_CAP`），否则 cap 差异会混进选号差异。
     """
     rng = np.random.default_rng(seed)
-    cap = _OVERLAP_CAP.get(lottery, 3)
+    if cap is None:
+        cap = _OVERLAP_CAP.get(lottery, 3)
     if lottery in ("双色球", "大乐透"):
         ordered = _blue_interleaved(pool, lottery, rng)
     elif lottery == "七星彩":
