@@ -1614,7 +1614,18 @@ def _cmd_robustness(args):
     drift = m.get("pool_drift")
     if drift:
         print(f"[分布漂移] max JS={drift['max_js']:.4f} "
-              f"现代段期号>{drift['modern_cutoff_issue']} 告警分区: {drift['alarm_zones'] or '无'}")
+              f"现代段期号>{drift['modern_cutoff_issue']} 显著分区: {drift['alarm_zones'] or '无'}")
+        # ★ 「裸超 P95」≠ 告警：单次 P95 阈值的误报率就是 5%，
+        #   必须过「置换 p ≤ α/分区数」与「超阈幅度」两道门（2026-10-23 大乐透蓝球）。
+        raw = drift.get("raw_exceed_zones") or []
+        if raw and not drift.get("alarm"):
+            print(f"  提示: {'、'.join(raw)} 裸超 P95 但未过门（多重比较校正/效应量），只报不判")
+        for z in drift.get("zones") or []:
+            print(f"    {z['分区']:<5} JS={z['js']:.5f} P95={z['null_p95']:.5f} "
+                  f"p={z.get('p_perm', float('nan')):.4f} α={z.get('alpha_adj', float('nan')):.4f} "
+                  f"超阈={100 * z.get('超阈幅度', 0.0):+.1f}% → "
+                  f"{'超限' if z.get('alarm') else '正常'}")
+        print("  口径: " + (drift.get("判定口径") or ""))
     g = m.get("train_test_gap")
     if g:
         print(f"[train-test gap] gap={g['gap']:+.4f} (in={g['in_mean']:.4f} / out={g['out_mean']:.4f}) "

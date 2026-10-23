@@ -12,6 +12,10 @@ import numpy as np
 import pytest
 
 from credibility.robustness import (
+    _DRIFT_FAMILY_ALPHA,
+    _DRIFT_MIN_MARGIN,
+    _DRIFT_N_PERM,
+    _drift_verdict,
     _jaccard,
     _kendall_tau,
     _ranks_desc,
@@ -108,6 +112,92 @@ def test_pool_drift_modern_segment():
     assert isinstance(r["alarm"], bool)
     for z in r["zones"]:
         assert 0.0 <= z["js"] <= math.log(2) + 1e-9
+
+
+# ------------------------------------------------------------
+# 分区 JS 漂移判定：单比 P95 不够，必须过「置换 p + 效应量」两道门
+# ------------------------------------------------------------
+
+def test_drift_gate_constants_are_sane():
+    """置换次数要够多、门控要严于裸 P95。
+
+    n_perm 太小会让 p_perm 下界 1/(n_perm+1) 高于 α，永远无法告警；
+    实测 n_perm=200 时 P95 的蒙特卡洛全距可达阈值的 11%，
+    与 2026-10-23 大乐透蓝球那次 9.2% 的超阈幅度同量级 ⇒ 判定由 seed 决定。
+    """
+    assert _DRIFT_N_PERM >= 1000
+    assert 0 < _DRIFT_MIN_MARGIN < 1
+    assert 0 < _DRIFT_FAMILY_ALPHA < 0.05 + 1e-12
+    assert 1 / (_DRIFT_N_PERM + 1) < _DRIFT_FAMILY_ALPHA
+
+
+def test_drift_verdict_marginal_exceedance_not_alarmed():
+    """裸超 P95 一点点（+1%）但幅度不到效应量门 ⇒ 不告警，且 exceed 仍为 True。
+
+    这正是「超限」最容易被误读的形态：P95 天然有 5% 误报率，
+    单分区一次边缘超阈没有信息量。
+    """
+    null = np.linspace(0.0, 1.0, 2001)
+    v = _drift_verdict(0.96, null, alpha_adj=_DRIFT_FAMILY_ALPHA)
+    assert v["exceed"] is True
+    assert v["超阈幅度"] < _DRIFT_MIN_MARGIN
+    assert v["alarm"] is False
+
+
+def test_drift_verdict_alpha_gate_binds():
+    """幅度够大时，显著性仍受族校正 α 约束（两边都过才算告警）。"""
+    null = np.linspace(0.0, 1.0, 2001)
+    assert _drift_verdict(1.25, null, alpha_adj=0.5)["alarm"] is True
+    strict = _drift_verdict(1.25, null, alpha_adj=1 / 5000)
+    assert strict["超阈幅度"] >= _DRIFT_MIN_MARGIN
+    assert strict["alarm"] is False
+
+
+def test_drift_verdict_pvalue_has_no_zero():
+    """p 值带 +1 平滑，不会出现「0.0000 显著」这种无下界的表述。"""
+    null = np.linspace(0.0, 1.0, 2001)
+    v = _drift_verdict(9.0, null, alpha_adj=_DRIFT_FAMILY_ALPHA)
+    assert v["p_perm"] > 0.0
+    assert abs(v["p_perm"] - 1 / 2002) < 1e-12
+
+
+def test_pool_drift_multiplicity_and_gate_consistency():
+    """真实数据上：α 按分区数 Bonferroni，且 alarm 必须严格等于两门都过。"""
+    r = pool_drift("大乐透", n_perm=1500)
+    n_zones = len(r["zones"])
+    assert n_zones == 2
+    assert r["n_perm"] == 1500
+    assert "判定口径" in r
+    for z in r["zones"]:
+        assert abs(z["alpha_adj"] - _DRIFT_FAMILY_ALPHA / n_zones) < 5e-4
+        gated = (z["p_perm"] <= z["alpha_adj"]) and (z["超阈幅度"] >= _DRIFT_MIN_MARGIN)
+        assert z["alarm"] is bool(gated), z
+        assert z["exceed"] is bool(z["js"] > z["null_p95"])
+    assert r["alarm"] == (len(r["alarm_zones"]) > 0)
+    # 裸超 P95 的分区 ⊆ 全部分区，且必须包含所有告警分区
+    assert set(r["raw_exceed_zones"]) <= {z["分区"] for z in r["zones"]}
+    assert set(r["alarm_zones"]) <= set(r["raw_exceed_zones"])
+
+
+def test_pool_drift_p95_stable_across_seeds():
+    """n_perm 提升后，不同 seed 估出的 P95 相对差应远小于效应量门。"""
+    a = pool_drift("大乐透", n_perm=1500, seed=1)
+    b = pool_drift("大乐透", n_perm=1500, seed=2)
+    for za, zb in zip(a["zones"], b["zones"]):
+        rel = abs(za["null_p95"] - zb["null_p95"]) / max(za["null_p95"], 1e-12)
+        assert rel < 0.05, (za["分区"], rel)
+
+
+def test_drift_verdict_feeds_verdict_as_watch():
+    """过门后的漂移只给 watch（不是 overfit_risk），且告警文案带 p 与 α。"""
+    drift = {
+        "alarm": True, "alarm_zones": ["蓝球"],
+        "zones": [{"分区": "蓝球", "js": 0.09, "null_p95": 0.05, "p_perm": 0.001,
+                   "alpha_adj": 0.025, "超阈幅度": 0.8, "alarm": True}],
+    }
+    verdict, alarms = _verdict({"pool_drift": drift})
+    assert verdict == "watch"
+    assert any("分布漂移" in a and "蓝球" in a and "p=0.0010" in a for a in alarms)
 
 
 def test_light_check_no_write():

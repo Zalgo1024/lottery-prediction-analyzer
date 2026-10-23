@@ -119,18 +119,24 @@ async function loadDetail() {
     if (rep && rep.metrics) {
       const m = rep.metrics;
       const g = m.train_test_gap, w = m.window_stability, p = m.param_sensitivity, dr = m.pool_drift;
-      const zoneRows = dr ? (dr.zones || []).map(z =>
-        `<tr><td>${esc(z["分区"])}</td><td>${num(z.js, 5)}</td><td>${num(z.null_p95, 5)}</td>
-         <td>${z.alarm ? '<span style="color:#c0392b;font-weight:600">超限</span>' : '<span style="color:#27ae60">正常</span>'}</td></tr>`).join("") : "";
+      const zoneRows = dr ? (dr.zones || []).map(z => {
+        const mg = (z["超阈幅度"] == null) ? "-" : ((z["超阈幅度"] >= 0 ? "+" : "") + (100 * z["超阈幅度"]).toFixed(1) + "%");
+        const pd = (z.p_perm == null) ? "-" : `${num(z.p_perm, 4)}${z.alpha_adj == null ? "" : " / α=" + num(z.alpha_adj, 4)}`;
+        const ex = z.exceed && !z.alarm ? '<span style="color:#b8860b">裸超 P95</span>' : "";
+        return `<tr><td>${esc(z["分区"])}</td><td>${num(z.js, 5)}</td><td>${num(z.null_p95, 5)}</td>
+         <td>${pd}</td><td>${mg}</td>
+         <td>${z.alarm ? '<span style="color:#c0392b;font-weight:600">超限</span>' : '<span style="color:#27ae60">正常</span>'} ${ex}</td></tr>`;
+      }).join("") : "";
       det.innerHTML = `
       <div style="display:flex;gap:24px;flex-wrap:wrap;padding:12px 16px;border:1px solid var(--color-border-secondary,#e5e7eb);border-radius:8px;background:#fff;font-size:13px">
         <div><b>train-test gap</b><br>gap=<span style="font-weight:600">${num(g && g.gap)}</span>（零分布 P95=${num(g && g.null_p95)}，${g ? g.n_folds : "-"} 折）</div>
         <div><b>窗口稳定性</b><br>stability=<span style="font-weight:600">${num(w && w.stability)}</span>（cross=${num(w && w.cross_jaccard)} ÷ noise=${num(w && w.noise_floor)}）</div>
         <div><b>参数敏感度</b><br>sensitivity=<span style="font-weight:600">${num(p && p.sensitivity)}</span>（Kendall τ=${num(p && p.mean_kendall_tau)}）</div>
-        <div><b>分布漂移</b><br>maxJS=<span style="font-weight:600">${num(dr && dr.max_js, 5)}</span>（${dr ? esc((dr.alarm_zones || []).join(",") || "无超限分区") : "-"}）</div>
+        <div><b>分布漂移</b><br>maxJS=<span style="font-weight:600">${num(dr && dr.max_js, 5)}</span>（${dr ? esc((dr.alarm_zones || []).join(",") || "无显著分区") : "-"}）</div>
       </div>
       ${zoneRows ? `<table class="table" style="width:100%;border-collapse:collapse;font-size:13px;margin-top:8px">
-        <thead><tr><th>分区</th><th>JS 散度</th><th>随机重切 P95</th><th>判定</th></tr></thead><tbody>${zoneRows}</tbody></table>` : ""}`;
+        <thead><tr><th>分区</th><th>JS 散度</th><th>随机重切 P95</th><th>置换 p 值</th><th>超阈幅度</th><th>判定</th></tr></thead><tbody>${zoneRows}</tbody></table>
+        <div style="font-size:12px;color:var(--color-text-secondary,#6b7280);margin-top:6px">${esc((dr && dr["判定口径"]) || "")}</div>` : ""}`;
     } else { det.innerHTML = ""; }
 
     renderTrend(d.trend || []);
@@ -159,7 +165,7 @@ function renderTrend(trend) {
   rbChart("chart-gap").setOption(mk("train_test_gap", "null_p95"));
   rbChart("chart-stab").setOption(mk("window_stability", null));
   rbChart("chart-sens").setOption(mk("param_sensitivity", null));
-  rbChart("chart-drift").setOption(mk("max_pool_drift_js", null));
+  rbChart("chart-drift").setOption(mk("max_pool_drift_js", "max_pool_drift_p95"));
 }
 
 RB_LOT.addEventListener("change", loadDetail);

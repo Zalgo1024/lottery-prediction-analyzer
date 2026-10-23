@@ -11,7 +11,12 @@
 - window_stability  相邻/两两滚动窗口下 top-K 候选的 Jaccard 重合率均值（低=选号随窗口跳变）
 - param_sensitivity 种子扰动(1-Jaccard) 与 置信度权重扰动(1-Kendall τ) 的混合敏感度
 - digital_pool_drift 近期 vs 基准期各分区号码分布的 JS 散度，
-                    告警阈值 = 同池随机重切零分布 P95（按分区独立校准）
+                    告警阈值 = 同池随机重切零分布 P95（按分区独立校准），
+                    再过两道门：置换 p 值须 ≤ α/分区数（Bonferroni）且
+                    超阈幅度 ≥ _DRIFT_MIN_MARGIN（Effect gate）
+                    ★ 只比 P95 不够：一份完整报告有 22 个分区检验，
+                      P(至少一次误报)=1-0.95^22≈68%；且蓝球这类小区间上，
+                      P95 本身的蒙特卡洛全距就与被检效应同量级（见 §漂移口径）
 
 七星彩第 7 位（0-14 现行段 vs 0-9 旧段）与大乐透红球的历史变点一律分段过滤
 （读 discovery/changepoints.json「现代段」口径，与 conformal 校准一致）——
@@ -55,6 +60,14 @@ _CHANGEPOINT_FILE = TRAINING_DIR.parent / "discovery" / "changepoints.json"
 _GAP_EFFECT_GATE = 0.05
 # JS 散度的置换校准分位数
 _DRIFT_P = 95
+# ★ 置换次数：n_perm=200 时 P95 的蒙特卡洛全距实测可达阈值的 11%，
+#   而 2026-10-23 大乐透蓝球那次「超限」幅度只有 9.2%
+#   ⇒ 判定精度比被检效应还粗，等于让 seed 决定告不告警。向量化后 2000 次仍比原实现快。
+_DRIFT_N_PERM = 2000
+# 效应量门控：JS 须超出该分区零分布 P95 的该比例，才算「超出量大于估计噪声」
+_DRIFT_MIN_MARGIN = 0.25
+# 分区内多重比较校正（Bonferroni 族错误率，族 = 本彩种的全部分区）
+_DRIFT_FAMILY_ALPHA = 0.05
 
 
 # ============================================================
@@ -408,14 +421,41 @@ def _js_divergence(p: np.ndarray, q: np.ndarray) -> float:
     return 0.5 * _kl(p, m) + 0.5 * _kl(q, m)
 
 
+def _drift_verdict(js: float, null: np.ndarray, alpha_adj: float) -> dict:
+    """单分区漂移判定：置换 p 值 + 效应量门控（两个条件都要过）。
+
+    why 不能只用「js > 零分布 P95」：
+      · P95 阈值天然有 5% 误报率，一份完整报告有 22 个分区检验
+        ⇒ P(至少亮一个) = 1−0.95²² ≈ 68%，等于常年背着假告警；
+      · 蓝球/单个位这类小区间，近期窗口只有 30~60 个球，
+        零分布 P95 的估计噪声与被检效应同量级，边缘超阈必然是噪声。
+    ⇒ ① p 值须低于族校正后的 α；② 超阈幅度须超过 _DRIFT_MIN_MARGIN。
+    注：n_perm 太低时 p_perm 下界 = 1/(n_perm+1)，永远达不到显著性，
+    例如 n_perm=30 ⇒ 下界 0.032 > α(0.025)，只能当冒烟用。
+    """
+    p95 = float(np.percentile(null, _DRIFT_P))
+    p_perm = float((1 + int(np.count_nonzero(null >= js))) / (1 + int(null.size)))
+    margin = (js / p95 - 1.0) if p95 > 0 else 0.0
+    return {
+        "null_p95": p95,
+        "p_perm": p_perm,
+        "超阈幅度": margin,
+        "exceed": bool(js > p95),
+        "alarm": bool(p_perm <= alpha_adj and margin >= _DRIFT_MIN_MARGIN),
+    }
+
+
 def pool_drift(lottery_name: str, recent_n: int = 30, base_n: int = 150,
-               n_perm: int = 200, seed: int = 20260905) -> dict:
+               n_perm: int = _DRIFT_N_PERM, seed: int = 20260905) -> dict:
     """
     近期(recent_n 期) vs 基准(其前 base_n 期)各分区号码分布的 JS 散度。
 
     校准：把 (recent+base) 期随机重切成 recent_n/base_n 两段，重复 n_perm 次
-    得到「纯随机下 JS 散度」的零分布（按分区独立）；真实 JS 超该分区零分布
-    P95 才告警。    含历史变点的彩种（七星彩第7位/大乐透红球）先裁剪到现代段。
+    得到「纯随机下 JS 散度」的零分布（按分区独立）；真实 JS 须同时满足
+    ① 置换 p ≤ 0.05/分区数（Bonferroni）且 ② 超 P95 幅度 ≥ 25% 才告警。
+    含历史变点的彩种（七星彩第7位/大乐透红球）先裁剪到现代段。
+
+    输出里 `exceed` 是「裸超 P95」（只报不判），`alarm` 才是过门后的告警。
     """
     cutoff = _modern_cutoff(lottery_name)
     recs = [r for r in load_lottery(lottery_name).records
@@ -432,48 +472,67 @@ def pool_drift(lottery_name: str, recent_n: int = 30, base_n: int = 150,
 
     recent = chron[-recent_n:]
     base = chron[-(recent_n + base_n):-recent_n]
+    pooled = recent + base
+
+    n_zones = max(1, len(schema.zones))
+    alpha_adj = _DRIFT_FAMILY_ALPHA / n_zones
 
     zone_reports = []
     rng = np.random.default_rng(seed)
     for zone in schema.zones:
         size = zone.max - zone.min + 1
 
-        def _dist(draws: List[dict]) -> np.ndarray:
-            v = np.zeros(size)
-            for d in draws:
-                for num in d.get(zone.name, []):
-                    if zone.min <= num <= zone.max:
-                        v[num - zone.min] += 1
-            return v
+        # 每期在该分区的号码计数矩阵（口径与原 _dist 一致：同号多次出现就计多次）
+        M = np.zeros((len(pooled), size))
+        for row, d in enumerate(pooled):
+            for num in d.get(zone.name, []):
+                if zone.min <= num <= zone.max:
+                    M[row, num - zone.min] += 1.0
 
-        p = _dist(recent)
-        q = _dist(base)
+        p = M[:recent_n].sum(axis=0)
+        q = M[recent_n:].sum(axis=0)
         js = _js_divergence(p, q)
 
-        # 置换零分布：同池随机重切
-        pooled = recent + base
-        null = []
-        for _ in range(n_perm):
-            perm = rng.permutation(len(pooled))
-            r2 = [pooled[i] for i in perm[:recent_n]]
-            b2 = [pooled[i] for i in perm[recent_n:]]
-            null.append(_js_divergence(_dist(r2), _dist(b2)))
-        p95 = float(np.percentile(null, _DRIFT_P))
+        # 置换零分布：同池随机重切（整期重切，保留「一期多号」的相依性）
+        idx_all = np.argsort(rng.random((n_perm, len(pooled))), axis=1)
+        null = np.empty(n_perm, dtype=float)
+        _CHUNK = 250
+        for s in range(0, n_perm, _CHUNK):
+            idx = idx_all[s:s + _CHUNK]
+            r_cnt = M[idx[:, :recent_n]].sum(axis=1)
+            b_cnt = M[idx[:, recent_n:]].sum(axis=1)
+            for i in range(idx.shape[0]):
+                null[s + i] = _js_divergence(r_cnt[i], b_cnt[i])
+        del idx_all
+
+        v = _drift_verdict(js, null, alpha_adj)
         zone_reports.append({
             "分区": zone.name,
             "js": round(js, 5),
-            "null_p95": round(p95, 5),
-            "alarm": bool(js > p95),
+            "null_p95": round(v["null_p95"], 5),
+            "p_perm": round(v["p_perm"], 4),
+            "alpha_adj": round(alpha_adj, 4),
+            "超阈幅度": round(v["超阈幅度"], 4),
+            "exceed": v["exceed"],
+            "alarm": v["alarm"],
         })
 
     alarms = [z for z in zone_reports if z["alarm"]]
     return {
         "recent_n": recent_n, "base_n": base_n,
         "modern_cutoff_issue": cutoff,
+        "n_perm": n_perm,
         "max_js": round(max(z["js"] for z in zone_reports), 5),
         "zones": zone_reports,
         "alarm_zones": [z["分区"] for z in alarms],
+        "raw_exceed_zones": [z["分区"] for z in zone_reports if z["exceed"]],
         "alarm": bool(alarms),
+        "判定口径": (
+            f"置换 p≤{_DRIFT_FAMILY_ALPHA}/{n_zones}（Bonferroni α={alpha_adj:.4f}）"
+            f" 且 超 P95 幅度≥{_DRIFT_MIN_MARGIN:.0%}；置换次数 {n_perm}。"
+            "『裸超 P95』只报不判——单次 P95 超阈本身有 5% 误报率，"
+            "本彩种全部分区合计的误报概率更高。"
+        ),
     }
 
 
@@ -505,9 +564,15 @@ def _verdict(metrics: dict) -> Tuple[str, List[str]]:
         )
     drift = metrics.get("pool_drift")
     if drift and drift["alarm"]:
-        alarms.append(
-            f"近期分布漂移：{','.join(drift['alarm_zones'])} 分区 JS 超随机重切 P95"
+        # 只有过了「置换 p + 效应量」两道门的分区才会出现在这里；
+        # 裸超 P95 的分区留在 drift["raw_exceed_zones"]，只报不判。
+        zs = [z for z in drift["zones"] if z.get("alarm")]
+        detail = "、".join(
+            f"{z['分区']}（JS={z['js']:.5f}, p={z['p_perm']:.4f}≤α={z['alpha_adj']:.4f}, "
+            f"超阈{100 * z['超阈幅度']:.0f}%）"
+            for z in zs
         )
+        alarms.append(f"近期分布漂移：{detail}，分区 JS 显著超随机重切零分布")
 
     if any("过拟合" in a for a in alarms):
         verdict = "overfit_risk"
@@ -641,6 +706,10 @@ def _append_trend(lottery_name: str, report: dict):
         trend = []
     m = report.get("metrics") or {}
     gap = m.get("train_test_gap") or {}
+    _dr = m.get("pool_drift") or {}
+    _drz = _dr.get("zones") or []
+    # 取「max JS 所在那个分区」自己的 P95 —— 不同分区区间大小不同，阈值不可混用
+    _dr_top = max(_drz, key=lambda z: z.get("js") or 0.0) if _drz else None
     entry = {
         "time": report.get("generated_at"),
         "issue": report.get("data_upto_issue"),
@@ -651,6 +720,17 @@ def _append_trend(lottery_name: str, report: dict):
         "window_stability": None if not m.get("window_stability") else m["window_stability"].get("stability"),
         "param_sensitivity": None if not m.get("param_sensitivity") else m["param_sensitivity"].get("sensitivity"),
         "max_pool_drift_js": None if not m.get("pool_drift") else m["pool_drift"].get("max_js"),
+        # 与 max_pool_drift_js 同分区的零分布 P95，供趋势图画出「噪声上界」参考线
+        "max_pool_drift_p95": None if not _dr_top else _dr_top.get("null_p95"),
+        # ★ 分区级明细：只存 max_js 时，「同一段窗口被连续多期重复计入」和
+        #   「新窗口再次触发」在趋势里长得一模一样（2026-10-23 大乐透蓝球即此坑：
+        #   2 次告警其实是同一窗口，期号 26119/26120 相邻且第二份数据未推进）。
+        "pool_drift_zones": None if not m.get("pool_drift") else [
+            {"分区": z.get("分区"), "js": z.get("js"),
+             "p_perm": z.get("p_perm"), "alarm": z.get("alarm"),
+             "exceed": z.get("exceed")}
+            for z in (_dr.get("zones") or [])
+        ],
         "alarms": report.get("alarms", []),
     }
     trend.append(entry)
