@@ -102,9 +102,9 @@ async function loadQuality(lot) {
         <div><strong>数据质量评分</strong><br><span style="font-size:26px;font-weight:700;color:${d.trust_score >= 80 ? "#27ae60" : d.trust_score >= 60 ? "#f39c12" : "#c0392b"}">${esc(d.trust_score)}</span>/100</div>
         <div><strong>评级</strong><br><span style="font-size:20px">${esc(d.grade)}</span></div>
         <div><strong>期数</strong><br>${esc(d.n_records || d.records || "-")}</div>
-        <div><strong>重复</strong><br>${esc(d.duplicates)}</div>
-        <div><strong>期号断裂</strong><br>${esc(d.issue_gaps)}</div>
-        <div><strong>最大日期间隔</strong><br>${esc(d.max_date_gap_days)}天</div>
+        <div><strong>重复</strong><br>${esc(d.duplicates)}${d.expected_duplicates == null ? "" : ` <span style="font-size:12px;color:var(--gray)">/ 生日悖论基线 ${esc(d.expected_duplicates)}</span>`}</div>
+        <div><strong>真缺期</strong><br>${esc(d.issue_gaps)} <span style="font-size:12px;color:var(--gray)">按年分组，跨年不计</span></div>
+        <div><strong>最大日期间隔</strong><br>${esc(d.max_date_gap_days)}天 <span style="font-size:12px;color:var(--gray)">多为休市</span></div>
       </div>
       <table class="table" style="width:100%;border-collapse:collapse;font-size:13px">
         <thead><tr><th>分区</th><th>检验</th><th>统计量</th><th>p值</th><th>实质显著</th></tr></thead>

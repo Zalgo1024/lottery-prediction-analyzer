@@ -116,34 +116,67 @@ def _inject_nav():
     return {"nav_groups": NAV_GROUPS, "nav_flat": nav_flat()}
 
 
-def main():
+def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="web", description="启动 Web 界面")
     parser.add_argument("--port", type=int, default=5000, help="端口号（默认 5000）")
     parser.add_argument("--debug", action="store_true", help="调试模式")
-    args = parser.parse_args()
+    parser.add_argument("--no-scheduler", action="store_true",
+                        help="不启动内置调度器与启动自愈（只提供 Web 界面）")
+    parser.add_argument("--no-worker", action="store_true",
+                        help="不启动持续计算核心与训练循环（不消费任务队列）")
+    parser.add_argument("--readonly", action="store_true",
+                        help="等价于 --no-scheduler --no-worker：纯只读界面实例")
+    return parser
+
+
+def _resolve_runtime_flags(args) -> tuple:
+    """把三个开关折算成 (no_sched, no_worker) 两个布尔。
+
+    ★ 这些开关存在的理由：此前**没有任何开关**，只要起第二个实例（换端口做对照
+    验证、反向代理后的只读实例）就会同时拉起调度器 + worker + 启动自愈 + 训练循环，
+    直接写生产 pending 和训练产物。2026-10-23 实测：第二个实例 10 秒内就触发了
+    2 条 auto_pipeline（双色球/排列3）。出号路径必须是单写者，
+    故默认行为不变，必须显式关闭。
+    """
+    return (bool(args.no_scheduler or args.readonly),
+            bool(args.no_worker or args.readonly))
+
+
+def main():
+    args = _build_arg_parser().parse_args()
+    no_sched, no_worker = _resolve_runtime_flags(args)
 
     log = setup_logger("web")
     log.info(f"启动 Web 服务: http://127.0.0.1:{args.port}")
-    # 启动内置自动调度器（替代 Windows 定时任务：开奖日后自动跑流水线，单进程、实时状态）
-    scheduler.start()
+
+    if no_sched:
+        log.warning("--no-scheduler：不启动内置调度器与启动自愈（本实例不出号、不入队）")
+    else:
+        # 启动内置自动调度器（替代 Windows 定时任务：开奖日后自动跑流水线，单进程、实时状态）
+        scheduler.start()
 
     # 启动持续计算核心（L4 第2期形态A：队列消费 + 事件驱动鲁棒性监控 + 心跳）
     # 容错：worker 属于可选子系统，任何异常都不能拖死 Flask 主进程
-    try:
-        start_worker(daemon=True)
-    except Exception as e:
-        log.warning(f"持续计算核心启动失败（Web 服务继续运行）: {e}")
+    if no_worker:
+        log.warning("--no-worker：不启动持续计算核心与训练循环（不消费任务队列、不写心跳）")
+    else:
+        try:
+            start_worker(daemon=True)
+        except Exception as e:
+            log.warning(f"持续计算核心启动失败（Web 服务继续运行）: {e}")
 
     # 启动时数据恢复：若程序关机/重启导致数据滞后，后台自动补齐（不等 22:05 调度）
-    from web.startup_recovery import run_startup_recovery
-    run_startup_recovery()
+    if not no_sched:
+        from web.startup_recovery import run_startup_recovery
+        run_startup_recovery()
 
     # 持续训练循环：空闲时段随机锚点走前验证 + 夜间 lightgbm 重训（可选子系统）
-    try:
-        from web.training_loop import start_training_loop
-        start_training_loop(daemon=True)
-    except Exception as e:
-        log.warning(f"持续训练循环启动失败（Web 服务继续运行）: {e}")
+    if not no_worker:
+        try:
+            from web.training_loop import start_training_loop
+            start_training_loop(daemon=True)
+        except Exception as e:
+            log.warning(f"持续训练循环启动失败（Web 服务继续运行）: {e}")
 
     # 后台预热数据缓存：启动时加载所有彩种到内存，首次访问首页/统计页秒开
     import threading

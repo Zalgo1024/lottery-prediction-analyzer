@@ -184,9 +184,11 @@ def _print_credibility(r: Dict):
         print()
     dq = r["data_quality"]
     print(f"  [数据质量] 评分={dq['trust_score']}/100  评级={dq['grade']}")
+    _base = dq.get("expected_duplicates")
+    _dup = f"{dq['duplicates']}" + (f"/基线{_base}" if _base is not None else "")
     print(f"            检验数={dq['n_tests']}  显著(校正后)={dq['n_rejected']}  "
-          f"重复={dq['duplicates']}  期号断裂={dq['issue_gaps']}  "
-          f"日期大间隔={dq['big_date_gaps']}(最大{dq['max_date_gap_days']}天)")
+          f"重复={_dup}  真缺期={dq['issue_gaps']}  "
+          f"大日期间隔={dq['big_date_gaps']}(最大{dq['max_date_gap_days']}天,多为休市)")
     for note in dq["notes"]:
         print(f"            · {note}")
     print()

@@ -5,24 +5,58 @@
   1. 均匀性 χ²（每分区）：各号码出现频率是否偏离均匀。七星彩第7位仅取 2020-10-11
      规则变更后的现代期（避免新旧两期混算的假象，详见项目记忆）。
   2. 游程检验（Wald-Wolfowitz，每分区）：序列是否呈"聚簇/震荡"偏离独立随机。
-  3. 完整性：重复开奖、期号断裂、日期大间隔。
+  3. 完整性：重复开奖（对比生日悖论基线）、真缺期（按年分组）、缺开奖日（按休市日历）。
   4. 多重比较：所有 χ² + 游程 p 值经 Benjamini-Hochberg 校正。
+
+★ 完整性三项全部按**基线**判，不按裸计数判（2026-10-23 修，此前三项都在罚"正常现象"）：
+  · 期号每年重编号（`26281 → 27001`），直接比整数会把 **22 个跨年**当成 22 处缺期；
+  · 重复开奖是**生日悖论**：3D 只有 1000 种组合、7788 期，必然有 6788 期重复；
+  · 日期间隔 >7 天几乎都是**春节休市**（另有 2019 国庆、2020 疫情），不是缺数据。
+  休市日历真源 `data/holiday.is_draw_day`；期号归一真源 `data/issue_key.issue_key`。
 
 产出单一"数据可信度评分"(0-100) 与评级，以及逐条可复核的检验明细。
 """
 
 from datetime import date
 import math
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 from scipy import stats
 
+from data.issue_key import IssueKeyError, issue_key
 from data.loader import load_lottery
 from data.schema import get_schema, record_zone_numbers
 
 # 七星彩第7位规则变更日（后区由 0-9 扩为 0-14）
 _QXC_CUTOFF = date(2020, 10, 11)
+
+# 重复开奖的「显著高于基线」门限（Poisson 近似的 z）。
+# 只在 z>5（p<3e-7）才扣分：生日悖论本身就能产生大量重复，
+# 而乐透型出现 1~2 次同号也只是「值得人工核对」，不该直接判成数据错误。
+_DUP_PENALTY_Z = 5.0
+
+
+def _outcome_space(lottery_name: str) -> Optional[int]:
+    """单注结局空间大小（组合数）。取不到 ⇒ None（宁可不算也不瞎估）。"""
+    try:
+        from ev.profit.rules import rules_for           # noqa: PLC0415
+        return int(rules_for(lottery_name).outcome_size)
+    except Exception:                                   # noqa: BLE001
+        return None
+
+
+def _expected_duplicates(n: int, space: Optional[int]) -> Optional[float]:
+    """n 期、结局空间 space 下的**期望重复期数**（生日悖论基线）。
+
+    有放回均匀抽样，独立期数期望 = space·(1−e^(−n/space))，
+    故「重复（此前已出现过）的期数」期望 = n − space·(1−e^(−n/space))。
+    3D 实测：n=7788, space=1000 ⇒ 基线 6788.4，观测 6788 ⇒ 完全正常。
+    """
+    if not space or space <= 0 or n <= 0:
+        return None
+    return n - space * (1.0 - math.exp(-n / space))
+
 
 
 def _ww_runs_z(binary) -> tuple:
@@ -164,7 +198,7 @@ def data_quality_report(lottery_name: str, fdr_alpha: float = 0.05) -> Dict:
             })
 
     # —— 完整性 ——
-    # 重复开奖
+    # 重复开奖（★ 与生日悖论基线比，不按裸计数判）
     seen = {}
     dup = 0
     for rec in chron:
@@ -173,18 +207,46 @@ def data_quality_report(lottery_name: str, fdr_alpha: float = 0.05) -> Dict:
             dup += 1
         else:
             seen[key] = rec.期号
+    space = _outcome_space(lottery_name)
+    dup_base = _expected_duplicates(n, space)
+    dup_z = None
+    if dup_base and dup_base > 0:
+        dup_z = (dup - dup_base) / math.sqrt(dup_base)
 
-    # 期号断裂
-    issues = sorted(r.期号 for r in chron if r.期号 is not None)
-    gaps = sum(1 for a, b in zip(issues, issues[1:]) if (b - a) > 1) if len(issues) > 1 else 0
+    # 真缺期：★ 期号每年重编号，必须先归一成 (年, 序号)，只在同一年内判跳号。
+    #   直接比整数会把每年 1 次的 `26281 → 27001` 当成缺期：实测 5 个彩种
+    #   各虚报 19~23 处，而真实缺期只有排列5 的 2 期。
+    keys: List[tuple] = []
+    for rec in chron:
+        if rec.期号 is None:
+            continue
+        try:
+            keys.append(issue_key(lottery_name, rec.期号))
+        except IssueKeyError:
+            continue
+    keys.sort()
+    gaps = 0
+    gap_samples: List[Dict] = []
+    for (ya, sa), (yb, sb) in zip(keys, keys[1:]):
+        if ya != yb:
+            continue                                   # 跨年不算断裂
+        skip = sb - sa - 1
+        if skip > 0:
+            gaps += skip
+            if len(gap_samples) < 5:
+                gap_samples.append({"前": f"{ya}-{sa:03d}", "后": f"{yb}-{sb:03d}", "缺": skip})
 
-    # 日期大间隔（>7 天视为异常间隔，节假日除外需人工判断）
-    dates = [r.开奖日期 for r in chron if r.开奖日期]
-    date_gaps = []
-    for a, b in zip(dates, dates[1:]):
-        date_gaps.append((b - a).days)
+    # 日期间隔：只做**原始观测**，不做日历推断。
+    #   ★ 此前用「间隔 >7 天 = 异常」当完整性缺陷，实测 22~24 处 ≈ 历史年数 ——
+    #   全部是春节休市（另有 2019 国庆 9 天、2020 疫情 51 天），等于每年白扣 5 分。
+    #   ★ 试过按 `data/holiday.is_draw_day` 数「应有但缺失的开奖日」，但开奖日程史上有
+    #   变更（双色球 2003~2004 只开周日+周四，周二 2004 年年中才加入），拿当前日程
+    #   回推会凭空多出 80+ 天；按年自校准也救不回来（2004 年中途变日程）。
+    #   ⇒ 缺期只认 `issue_gaps`（按年分组的期号连续性，与开奖日程无关）。
+    dates = sorted(r.开奖日期 for r in chron if r.开奖日期)
+    date_gaps = [(b - a).days for a, b in zip(dates, dates[1:])]
     max_date_gap = max(date_gaps) if date_gaps else 0
-    big_gaps = sum(1 for g in date_gaps if g > 7)
+    big_gaps = sum(1 for g in date_gaps if g > 7)      # 只报不罚：绝大多数是休市
 
     # —— FDR 校正 ——
     pvals = [t["p值"] for t in tests]
@@ -223,13 +285,14 @@ def data_quality_report(lottery_name: str, fdr_alpha: float = 0.05) -> Dict:
     total = len(tests)
     fail_ratio = (n_rejected / total) if total else 0.0
     score = 100.0 * (1 - fail_ratio)
-    # 完整性惩罚
-    if dup > 0:
-        score -= min(15.0, dup * 5.0)
+    # 完整性惩罚（★ 全部按基线判，不按裸计数判）
+    #   · 重复开奖：只在显著高于生日悖论基线（z>5）时扣分；
+    #   · 缺期：只认 `gaps`（按年分组的期号连续性，与开奖日程无关）；
+    #   · 日期间隔 >7 天**不再罚**：那是春节休市（22~24 处 ≈ 历史年数）。
+    if dup_z is not None and dup_z > _DUP_PENALTY_Z:
+        score -= min(15.0, 5.0 * (dup_z - _DUP_PENALTY_Z + 1.0))
     if gaps > 0:
         score -= min(5.0, gaps * 0.5)
-    if big_gaps > 0:
-        score -= min(5.0, big_gaps * 0.3)
     score = max(0.0, min(100.0, score))
 
     if score >= 90:
@@ -243,12 +306,25 @@ def data_quality_report(lottery_name: str, fdr_alpha: float = 0.05) -> Dict:
 
     notes = []
     if dup > 0:
-        notes.append(f"发现 {dup} 期与历史某期完全相同的开奖组合（相隔多年，概率约 1/千万级，"
-                     f"偶有巧合，不必然为数据源错误）。")
+        if dup_base is not None:
+            if dup_z is not None and dup_z > _DUP_PENALTY_Z:
+                notes.append(f"重复开奖 {dup} 期，显著高于生日悖论基线 {dup_base:.1f} 期"
+                             f"（组合空间 {space:,}，z={dup_z:.1f}）⇒ 需核对数据源是否录重。")
+            elif dup_z is not None and dup_z > 3.0:
+                notes.append(f"重复开奖 {dup} 期，略高于生日悖论基线 {dup_base:.1f} 期"
+                             f"（组合空间 {space:,}，z={dup_z:.1f}）⇒ 仅提示，不作数据错误判定。")
+            else:
+                notes.append(f"重复开奖 {dup} 期，与生日悖论基线 {dup_base:.1f} 期一致"
+                             f"（组合空间 {space:,}）⇒ 正常现象，非数据错误。")
+        else:
+            notes.append(f"重复开奖 {dup} 期（组合空间未知，未做基线判定）。")
     if gaps > 0:
-        notes.append(f"期号断裂 {gaps} 处（可能缺期或数据源跳号）。")
+        sample = "、".join(f"{g['前']}→{g['后']} 缺{g['缺']}" for g in gap_samples)
+        notes.append(f"真缺期 {gaps} 期（按年分组统计，跨年重编号不计）：{sample}"
+                     + ("…" if gaps > sum(g["缺"] for g in gap_samples) else ""))
     if big_gaps > 0:
-        notes.append(f"日期间隔 >7 天 {big_gaps} 处（多为休市/节假日，需人工确认）。")
+        notes.append(f"开奖日期间隔 >7 天 {big_gaps} 处（≈ 历史年数，多为春节休市；"
+                     f"另有 2019 国庆 / 2020 疫情），仅供人工参考，不计入评分。")
     practical = [t for t in tests if t["实质显著"]]
     if practical:
         names = [f"{t['分区']}/{t['检验']}" for t in practical]
@@ -269,7 +345,11 @@ def data_quality_report(lottery_name: str, fdr_alpha: float = 0.05) -> Dict:
         "n_tests": total,
         "n_rejected": n_rejected,
         "duplicates": dup,
+        "outcome_space": space,
+        "expected_duplicates": None if dup_base is None else round(dup_base, 2),
+        "dup_z": None if dup_z is None else round(dup_z, 2),
         "issue_gaps": gaps,
+        "issue_gap_samples": gap_samples,
         "max_date_gap_days": max_date_gap,
         "big_date_gaps": big_gaps,
         "trust_score": round(score, 1),
