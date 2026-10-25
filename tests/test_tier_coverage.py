@@ -128,3 +128,42 @@ def test_empty_conditions_raise():
     with pytest.raises(ValueError):
         select_tier_coverage("福彩3D", build_pool("福彩3D", 50, seed=0), 5,
                              {"kind": "grade", "grade": "组选3"})
+
+
+# ---------------------------------------------------------------- trace（P5 增强）
+def test_trace_off_by_default_has_no_trace_key(pool):
+    """默认（trace=False）不得出现「贪心轨迹」键 —— 诊断必须是显式选择。"""
+    _t, meta = select_tier_coverage(LOT, pool, 20, "四等", ISSUE, seed=0)
+    assert "贪心轨迹" not in meta
+
+
+def test_trace_on_records_every_step(pool):
+    """trace=True ⇒ 每步一条记录；累计覆盖权重单调不减且末值 == 通道权重和。"""
+    tickets, meta = select_tier_coverage(LOT, pool, 30, "四等", ISSUE, seed=0, trace=True)
+    tr = meta["贪心轨迹"]
+    steps = tr["逐步"]
+    assert tr["汇总"]["步数"] == len(steps) == len(tickets) == 30
+    assert [s["步号"] for s in steps] == list(range(1, 31))
+    cum = [s["累计覆盖权重"] for s in steps]
+    assert all(b >= a - 1e-9 for a, b in zip(cum, cum[1:])), "累计覆盖权重必须单调不减"
+    assert cum[-1] == pytest.approx(meta["通道权重和"], abs=1e-6)
+    for s in steps:
+        assert {"步号", "票下标", "本步边际", "新增通道数", "新增通道",
+                "累计覆盖权重", "当前最大重叠"} <= set(s)
+
+
+def test_trace_does_not_change_selection(pool):
+    """★ 纯诊断：trace=True/False 必须选出**同一批票**（同 seed）。"""
+    a, _ = select_tier_coverage(LOT, pool, 30, "四等", ISSUE, seed=0, trace=False)
+    b, _ = select_tier_coverage(LOT, pool, 30, "四等", ISSUE, seed=0, trace=True)
+    assert [t["红球"] for t in a] == [t["红球"] for t in b]
+
+
+def test_trace_records_cap_relaxation_events():
+    """小池逼出 cap 放宽时，放宽事件数必须 == meta「放宽次数」。"""
+    small = build_pool(LOT, 60, seed=0)
+    tickets, meta = select_tier_coverage(LOT, small, 200, "四等", ISSUE, seed=0, trace=True)
+    tr = meta["贪心轨迹"]
+    assert len(tr["汇总"]["cap放宽步号"]) == meta["放宽次数"] > 0
+    assert tr["汇总"]["最终重叠上限"] == meta["重叠上限"]
+    assert tr["汇总"]["步数"] == len(tickets) == meta["选中注数"]

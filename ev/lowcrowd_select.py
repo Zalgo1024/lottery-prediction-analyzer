@@ -317,3 +317,260 @@ def select_lowcrowd_from_pool(lottery: str, pool: Sequence[Dict[str, Any]], K: i
     caliber = "冻结β（与 ev/selection 同口径）" if beta is None else "walk-forward 块重拟合β"
     return select_lowcrowd(lottery, pool, K, u, lam=lam, gate_q=gate_q,
                            cap=cap, beta_caliber=caliber)
+
+
+# ==================================================================== ★ P5：联合目标
+# select_joint 想修的正是 Stage 1 抓到的那个病：select_lowcrowd 的覆盖项用的是
+# **通道计数代理**（每注 35 个 ≥10元 通道键里有几个是新覆盖的），而 Stage 1 实测
+# 「优化上界 ≠ 优化 P(并集)」——tier_coverage 优化的就是上界， union_greedy 直接在
+# 采样结局上优化 P(并集)，两者差 3pp 量级。
+#
+# 所以联合目标 = 把低拥挤的 **冷门权重** 与 **采样结局上的真实并集边际** 放在同一个
+# 打分里：
+#     val(i) = (1−λ)·[g_i 的并集边际] + λ·cold(i)
+#
+# ★ 两条不能省的设计：
+#   1) `cov_source="proxy"` 必须与 select_lowcrowd **逐位一致**（这是它被允许
+#      进生产之前必须过的保真性门槛 —— 新算法先把老路径原样复现一遍，
+#      才谈得上"新"的东西带来差别）；
+#   2) λ 必须是真杠杆（λ=0 与 λ=0.5 选出的票集要真的不同），
+#      否则又是一次「纯排序 ⇒ λ 空操作」。
+# ====================================================================
+
+_POP8 = np.array([bin(i).count("1") for i in range(256)], dtype=np.uint8)
+
+# 联合通道：'proxy'=旧代理（必须与 select_lowcrowd 一致）；'union'=采样结局上的真实边际
+COV_SOURCES = ("proxy", "union")
+
+
+def joint_union_masks(lottery: str, tickets: Sequence[Dict[str, Any]],
+                      target: Any, issue: Any, *, seed: int = 0,
+                      m_fit: int = 100_000) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """给一批票建「票 × 采样结局」位图（P5 联合目标的输入）。
+
+    与 `ev/arena/design.py::select_union_greedy` 用的是**同一套**采样与压位口径，
+    ★ 但注意这只是 MC 估计：m_fit 越大越准，代价是内存 `n_tickets × m_fit / 8` 字节。
+    """
+    from ev.arena.design import outcome_gate, outcome_masks, sample_draws
+    from ev.profit.rules import rules_for
+
+    tickets = list(tickets)
+    if not tickets:
+        raise ValueError("候选票为空")
+    gate, w_out, m_in, n_in = outcome_gate(lottery, target, issue)
+    r = rules_for(lottery, issue)
+    n_out = int(r.outer_range[1])
+    k_out = int(r.outer_width)
+    if not getattr(r, "outer_choose", False):
+        raise ValueError(f"{lottery} 不是红蓝型彩种，联合并集通道未实现")
+
+    rng = np.random.default_rng(int(seed))
+    Rf, Bf = sample_draws(rng, n_out, k_out, n_in, m_in, int(m_fit))
+    masks = outcome_masks(tickets, lottery, Rf, Bf, gate)
+    meta = {"采样结局数": int(masks.shape[1] * 8), "拟合seed": int(seed),
+            "MC规模": int(m_fit), "目标": str(target)}
+    return masks, meta
+
+
+def _joint_beam_pick(r: int, gkeys: List[List[int]], gmask: np.ndarray,
+                     gcold: np.ndarray, K: int, cap: int, lam: float, *,
+                     cov_source: str = "proxy", masks: Optional[np.ndarray] = None,
+                     beam_w: int = BEAM_W) -> Tuple[List[int], set]:
+    """beam 贪心（联合通道版）。
+
+    `cov_source="proxy"` 时**逐位复刻** `_beam_pick`（同样打分、同样的窗内交换顺序），
+    这是 select_joint 被允许当新方法用的前提：先把老路径原样复现一遍。
+    """
+    if cov_source not in COV_SOURCES:
+        raise ValueError(f"未知 cov_source {cov_source!r}，可选 {COV_SOURCES}")
+    if cov_source == "union" and masks is None:
+        raise ValueError("cov_source='union' 必须给 `masks`")
+    if cov_source == "union" and masks.shape[0] != r:
+        raise ValueError(f"masks 行数 {masks.shape[0]} != 候选数 {r}")
+
+    total_out = int(masks.shape[1] * 8) if masks is not None else 1
+    cov_bits = np.zeros(masks.shape[1], dtype=np.uint8) if masks is not None else None
+
+    order = np.arange(r, dtype=np.int64)
+    picked: List[int] = []
+    pm = np.zeros((0, gmask.shape[1]), dtype=np.int32)
+    covered: set = set()
+    pos = 0
+    while len(picked) < K and pos < r:
+        wnd = order[pos:pos + beam_w]
+        if len(picked):
+            ov = gmask[wnd] @ pm.T                 # (w, P) int32
+            ok = ov.max(axis=1) <= cap
+        else:
+            ok = np.ones(len(wnd), dtype=bool)
+        # ★★ 两条通道的量纲差一个数量级以上：
+        #     cold ∈ [0,1]（窗内的冷门秩归一），而并集边际是「新增覆盖结局占比」，
+        #     量级只有 p_single ≈ 0.067 且随步数衰减。直接线性加权时
+        #     λ=0.5 与 λ=1.0 会选出同一批票（实测 Jaccard=1.0）⇒ λ 在 [0.3,1] 上退化。
+        #     故在**当前窗口的可行候选内**各自 z 标准化后再加权：
+        #       · 标准化在窗内是单调变换 ⇒ λ=0 仍是「窗内并集边际最大」，
+        #         λ=1 仍是「窗内最冷」，端点语义不变；
+        #       · 0<λ<1 才是真正的联合。
+        vals: List[float] = []
+        cols: List[float] = []
+        feas: List[int] = []
+        for j in range(len(wnd)):
+            if not ok[j]:
+                continue
+            i = int(wnd[j])
+            if cov_source == "proxy":
+                g = 0
+                for k in gkeys[i]:
+                    if k not in covered:
+                        g += 1
+                g = g / float(KEYS_PER_TICKET)
+            else:
+                g = float(_POP8[masks[i] & ~cov_bits].sum(dtype=np.int64)) / float(total_out)
+            vals.append(g)
+            cols.append(float(gcold[i]))
+            feas.append(j)
+
+        if not feas:
+            pos += len(wnd)
+            continue
+
+        if cov_source == "union":
+            c = np.asarray(vals, dtype=np.float64)
+            d = np.asarray(cols, dtype=np.float64)
+            sc, sd = float(c.std(ddof=0)), float(d.std(ddof=0))
+            zu = (c - c.mean()) / sc if sc > 1e-12 else np.zeros_like(c)
+            zd = (d - d.mean()) / sd if sd > 1e-12 else np.zeros_like(d)
+            comb = (1.0 - float(lam)) * zu + float(lam) * zd
+        else:
+            # proxy 分支必须与 `_beam_pick` 逐位一致 ⇒ **不许**标准化
+            comb = np.array([(1.0 - lam) * v + lam * c for v, c in zip(vals, cols)],
+                            dtype=np.float64)
+
+        bj = int(np.argmax(comb))
+        best, bi = float(comb[bj]), feas[bj]
+        if bi != 0:
+            order[pos], order[pos + bi] = order[pos + bi], order[pos]
+        chosen = int(order[pos])
+        picked.append(chosen)
+        pm = np.vstack([pm, gmask[chosen:chosen + 1]])
+        covered.update(gkeys[chosen])
+        if cov_bits is not None:
+            cov_bits = cov_bits | masks[chosen]
+        pos += 1
+    return picked, covered
+
+
+def select_joint(lottery: str, pool: Sequence[Dict[str, Any]], K: int,
+                 u: np.ndarray, *, lam: float = 0.5, gate_q: float = 0.30,
+                 cap: Optional[int] = None, beam_w: int = BEAM_W,
+                 cov_source: str = "union", target: Any = None,
+                 issue: Any = None, seed: int = 0, m_fit: int = 100_000,
+                 union_pool_cap: int = 4000,
+                 beta_caliber: str = "冻结β"
+                 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """联合目标选号：覆盖通道 + 冷门通道，同一个打分里加权。
+
+    参数
+    ----
+    cov_source   'proxy' = 旧通道计数代理（≙ select_lowcrowd 的覆盖项）；
+                 'union' = 采样结局上的真实 P(并集) 边际（本轮新增）
+    union_pool_cap  'union' 模式下最多给多少张票建位图（按最冷排序截断），
+                    控制内存 `n × m_fit / 8`；截断原因会写进 meta。
+
+    ★ `u` 必须与 `pool` **逐元素对齐**，长度不等一律抛 —— 长度不等时 numpy 会
+      先 broadcast 或后面静默错位，选出来的票会对应错误的拥挤度。
+    """
+    from ev import popularity_proxy as pp
+    from ev.selection import _OVERLAP_CAP
+
+    if cap is None:
+        cap = int(_OVERLAP_CAP.get(lottery, 3))
+    if cov_source not in COV_SOURCES:
+        raise ValueError(f"未知 cov_source {cov_source!r}，可选 {COV_SOURCES}")
+
+    pool = list(pool)
+    u = np.asarray(u, dtype=np.float64)
+    if u.shape[0] != len(pool):
+        raise ValueError(f"u 长度 {u.shape[0]} != 候选池 {len(pool)}（必须逐元素对齐）")
+
+    M = len(pool)
+    meta: Dict[str, Any] = {
+        "选择器": "select_joint（覆盖 + 冷门 联合目标）",
+        "覆盖通道": cov_source, "彩种": lottery, "λ": float(lam),
+        "目标注数": int(K), "重叠上限": int(cap), "beam窗口": int(beam_w),
+        "β口径": beta_caliber,
+        "循环性声明": pp.CROWD_PROXY_CAVEAT,
+        "分位口径": pp.QUANTILE_CALIBER,
+    }
+
+    finite = np.isfinite(u)
+    if M == 0 or not finite.any():
+        meta["降级"] = "拥挤度代理不可用（未 Go 或不支持该彩种）→ 不出号，由调用方显式降级"
+        return [], meta
+
+    ladder = _ladder(float(gate_q))
+    chosen: List[int] = []
+    covered: set = set()
+    q_used, n_relax, m_used = None, 0, 0
+    for q in ladder:
+        idx = np.where(finite & (u <= q + 1e-12))[0]
+        if len(idx) < K:
+            n_relax += 1
+            continue
+        idx = idx[np.argsort(u[idx], kind="stable")]      # 冷 → 热
+        r = len(idx)
+        gcold = 1.0 - np.arange(r, dtype=np.float64) / max(r - 1, 1)
+        gkeys = [keys_of(pool[int(i)]) for i in idx]
+        gmask = np.vstack([_red_indicator(pool[int(i)]) for i in idx])
+
+        masks = None
+        trunc = None
+        if cov_source == "union":
+            cand = np.arange(r)
+            if r > int(union_pool_cap):
+                cand = cand[:int(union_pool_cap)]
+                trunc = int(union_pool_cap)
+            sub = [pool[int(idx[i])] for i in cand]
+            full, mm = joint_union_masks(lottery, sub, target, issue,
+                                         seed=seed, m_fit=m_fit)
+            # 位图按 cand 局部编号；窗口外的票给一张全 0 位图（永远选不上）
+            masks = np.zeros((r, full.shape[1]), dtype=np.uint8)
+            masks[cand] = full
+            meta.update({"联合位图": mm})
+            if trunc is not None:
+                meta["联合位图截断"] = f"候选 {r} → 取最冷 {trunc} 张建位图"
+        picked, cov = _joint_beam_pick(r, gkeys, gmask, gcold, K, cap, float(lam),
+                                       cov_source=cov_source, masks=masks, beam_w=beam_w)
+        if len(picked) >= K:
+            chosen = [int(idx[i]) for i in picked]
+            covered, q_used, m_used = cov, float(q), r
+            break
+        if len(picked) > len(chosen):
+            chosen, covered, q_used, m_used = [int(idx[i]) for i in picked], cov, float(q), r
+        n_relax += 1
+
+    tickets = [pool[i] for i in chosen]
+    us = u[finite]
+    meta.update({
+        "门控": {
+            "请求分位": float(gate_q), "生效分位": q_used,
+            "放宽次数": int(n_relax),
+            "门控前候选数": int(M), "门控后候选数": int(m_used),
+            "门控后容量": _greedy_capacity(tickets, cap, stop_at=None) if tickets else 0,
+            "全池分位": {"min": round(float(us.min()), 4),
+                         "median": round(float(np.median(us)), 4),
+                         "max": round(float(us.max()), 4)},
+        },
+        "覆盖": {
+            "选中覆盖键": len(covered),
+            "理论上限": KEYS_PER_TICKET * int(K),
+            "目标奖级": "≥10 元（五等：4红 或 3红+1蓝）" if cov_source == "proxy"
+                        else f"P(并集) MC 边际（{target}）",
+        },
+        "实出注数": len(tickets),
+        "z口径": "门控后候选池内秩归一（1=最冷，0=最热）",
+    })
+    if len(tickets) < K:
+        meta["不足"] = (f"门控至 1.0 仍只出 {len(tickets)}/{K} 注，"
+                        f"缺口由调用方按既定补齐口径处理")
+    return tickets, meta

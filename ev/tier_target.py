@@ -74,6 +74,13 @@ def normalize_target(target: Any = None) -> Dict[str, Any]:
         return {"kind": "payout", "min_payout": float(target)}
     if isinstance(target, str):
         s = target.strip()
+        # ★ 接受 "≥10元" / ">=10元" / "至少10元" 这类写法：格名（`双色球-K200-≥10元`）
+        #   就是这种形式，而 `float("≥10")` 会炸。旧实现在这里静默不匹配，只有
+        #   走格名字符串的调用方会踩到（预注册里传的是 dict，所以一直没暴露）。
+        for pre in ("≥", ">=", ">", "至少"):
+            if s.startswith(pre):
+                s = s[len(pre):].strip()
+                break
         if s.endswith("元"):
             return {"kind": "payout", "min_payout": float(s[:-1])}
         try:

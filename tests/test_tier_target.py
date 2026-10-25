@@ -22,6 +22,11 @@ def test_normalize_target_forms():
     assert TT.normalize_target("四等奖") == {"kind": "grade", "grade": "四等"}
     assert TT.normalize_target(10) == {"kind": "payout", "min_payout": 10.0}
     assert TT.normalize_target("10元") == {"kind": "payout", "min_payout": 10.0}
+    # ★ 格名就是 `双色球-K200-≥10元` 这个形式；`float("≥10")` 会炸。
+    #   `run_cell` 直接吃格名字符串时会踩到，预注册里传 dict 所以一直没暴露。
+    assert TT.normalize_target("≥10元") == {"kind": "payout", "min_payout": 10.0}
+    assert TT.normalize_target(">=10元") == {"kind": "payout", "min_payout": 10.0}
+    assert TT.normalize_target("至少10元") == {"kind": "payout", "min_payout": 10.0}
     assert TT.normalize_target({"kind": "grade", "grade": "五等"})["grade"] == "五等"
     assert TT.label_of(None) == "≥四等"
     assert TT.label_of(10) == "单注≥10元"

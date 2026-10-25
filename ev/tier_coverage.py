@@ -13,7 +13,7 @@
 
 本模块用**加权 max-coverage 贪心**逼近「不相交」：每步选「新增通道权重和」最大的票。
 权重 = 该通道对应的结局概率，故贪心优化的是 Σ权重（P(并集) 的**上界**），
-真实 P(并集) 由 `exact_portfolio_coverage` 或实测回测给出。
+真实 P(并集) 由 `exact_union_probability`（外层×内层全枚举）或实测回测给出。
 
 诚实边界（写死在这里，改代码不许绕过）
 ------------------------------------
@@ -26,6 +26,8 @@
 from __future__ import annotations
 
 import logging
+import math
+from itertools import combinations
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -81,7 +83,8 @@ def _worst_grade(grades: Any) -> Optional[str]:
 def select_tier_coverage(lottery: str, pool: Sequence[Dict[str, Any]], K: int,
                          target: Any = None, issue: Any = None,
                          cap: Optional[int] = None, seed: int = 0,
-                         with_exact: bool = False) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+                         with_exact: bool = False,
+                         trace: bool = False) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """加权 max-coverage 贪心选号。
 
     参数
@@ -95,6 +98,10 @@ def select_tier_coverage(lottery: str, pool: Sequence[Dict[str, Any]], K: int,
            混进「选号差异」里）
     seed   仅用于给同分候选做确定性扰动（不影响覆盖目标本身）
     with_exact  是否额外算一次**精确** P(至少一注达标)（走 exact_metrics，慢）
+    trace  是否记录**逐步贪心轨迹**（纯诊断，P5 增强）：每步的池内下标、
+           边际覆盖权重、累计覆盖权重、当前最大红球重叠与 cap 放宽事件，
+           汇总进 `meta["贪心轨迹"]`。★ 不改变选号结果（trace=True/False
+           必须选出**同一批票**），也不参与任何判据。
 
     返回 (选中的票, meta)。凑不满 K 时 meta 记录 `容量不足` 与放宽次数，由调用方兜底。
     """
@@ -146,6 +153,10 @@ def select_tier_coverage(lottery: str, pool: Sequence[Dict[str, Any]], K: int,
     taken = np.zeros(m, dtype=bool)
     cur_cap, relax = cap, 0
     covered_weight = 0.0
+    # ---- trace：逐步贪心轨迹（仅 trace=True 填充，纯诊断不改选号）
+    steps: List[Dict[str, Any]] = []
+    relax_at: List[int] = []              # cap 放宽发生的步号
+    sat_at: Optional[int] = None          # 覆盖饱和步号（全部通道被覆盖的那一步）
 
     while len(picked) < K:
         ok = (~taken) & (maxov <= cur_cap)
@@ -154,20 +165,37 @@ def select_tier_coverage(lottery: str, pool: Sequence[Dict[str, Any]], K: int,
                 break
             cur_cap += 1
             relax += 1
+            if trace:
+                relax_at.append(len(picked) + 1)
             continue
         score = np.where(ok, gain + jitter, -np.inf)
         i = int(np.argmax(score))
         if not np.isfinite(score[i]):
             break
+        marginal = float(gain[i])            # 本步边际 = 选中前 gain[i]（随后会被扣减）
         picked.append(i)
         taken[i] = True
         maxov = np.maximum(maxov, A @ A[i])
+        new_chs: List[int] = []
         for c, w in ticket_cols[i]:
             if not covered[c]:
                 covered[c] = True
                 covered_weight += w
+                new_chs.append(int(c))
                 for j in owners[c]:
                     gain[j] -= w
+        if trace:
+            steps.append({
+                "步号": len(picked),
+                "票下标": int(i),
+                "本步边际": round(marginal, 6),
+                "新增通道数": len(new_chs),
+                "新增通道": new_chs,
+                "累计覆盖权重": round(float(covered_weight), 6),
+                "当前最大重叠": int(maxov.max()),
+            })
+            if sat_at is None and bool(covered.all()):
+                sat_at = len(picked)
 
     tickets = [pool[i] for i in picked]
     p1 = TT.single_ticket_probability(lottery, conds, issue)
@@ -206,6 +234,25 @@ def select_tier_coverage(lottery: str, pool: Sequence[Dict[str, Any]], K: int,
     }
     if len(tickets) < K:
         meta["容量不足"] = f"只选出 {len(tickets)}/{K} 注（池 {m}，上限 cap={cur_cap}）"
+    if trace:
+        # ★ 纯诊断：不参与任何判据、不进预注册契约。语义对齐 design.greedy_union 的
+        #   trace，但这里要逐步才看得见「边际怎么衰减、何时零边际、cap 何时放宽」。
+        meta["贪心轨迹"] = {
+            "口径": ("每步记录选中的池内下标、边际覆盖权重（= 累计覆盖权重的增量）、"
+                     "累计覆盖权重、当前与已选集合的最大红球重叠；另记 cap 放宽事件。"
+                     "纯诊断，不改变选号结果。"),
+            "逐步": steps,
+            "汇总": {
+                "步数": len(steps),
+                "末步累计覆盖权重": round(float(covered_weight), 6),
+                "覆盖饱和步号": sat_at,
+                "零边际首现步号": next((s["步号"] for s in steps if s["新增通道数"] == 0), None),
+                "cap放宽步号": relax_at,
+                "候选池规模": m,
+                "初始重叠上限": int(cap),
+                "最终重叠上限": int(cur_cap),
+            },
+        }
     from ev.mechanism.narrative import TIER_COVERAGE_CAVEAT
 
     meta["诚实边界"] = TIER_COVERAGE_CAVEAT
@@ -242,7 +289,142 @@ def exact_portfolio_coverage(lottery: str, tickets: Sequence[Dict[str, Any]],
     if set(TT.grade_conditions_at_or_above(lottery, worst, issue)) != set(res["conditions"]):
         raise ValueError(f"{lottery} 目标 {res['label']} 的达标奖级不连续，无法用单个 min_grade 表达")
 
-    ctx = P.build_ctx(lottery, issue)
-    m = EV.exact_metrics(lottery, list(tickets), ctx, kappa=kappa,
-                         want_dist=False, min_grade=worst)
-    return float(m["P_达标"])
+    # ★ 2026-10-24 起改走 `exact_union_probability`（外层×内层全枚举，无独立性近似）。
+    #   旧实现走 `EV.exact_metrics(...).P_达标`，它在「命中数桶」内用 `1-(1-p)^H`，
+    #   即假设同桶各票的达标事件独立。内层槽位极小（双色球蓝球 16 选 1、
+    #   大乐透 12 选 2）⇒ 同桶票的内层命中互斥，独立近似不成立，实测偏差为
+    #   −11σ（双色球，低估）到 +703σ（大乐透，高估 52pp），幅度远大于效应量。
+    #   该函数已与均匀开奖 MC 回放逐格对账在 ±1.3σ 内。
+    if float(kappa) != 0.0:
+        raise NotImplementedError(
+            "kappa≠0 的外层加权分布尚无无近似枚举实现；"
+            "旧实现的桶内独立性近似在 κ≠0 下同样不成立，不提供静默回退。")
+    return exact_union_probability(lottery, tickets, target=target, issue=issue)
+
+
+# ---------------------------------------------------------------- 无近似枚举
+# 外层结局枚举规模上限（防呆）：双色球 C(33,6)=1,107,568、大乐透 C(35,5)=324,632
+MAX_OUTER_ENUM = 2_000_000
+# 内层结局枚举规模上限（防呆）：双色球 C(16,1)=16、大乐透 C(12,2)=66
+MAX_INNER_ENUM = 4096
+
+
+def _popcount64(x: np.ndarray) -> np.ndarray:
+    """uint64 数组的 popcount（不依赖 numpy 版本）。"""
+    b = np.ascontiguousarray(x).view(np.uint8).reshape(-1, 8)
+    return np.unpackbits(b, axis=1).sum(axis=1, dtype=np.int64)
+
+
+def _inner_pool_size(r, m_in: int) -> int:
+    """内层**池大小**（双色球 16、大乐透 12），由 `C(n, m) == r.inner_size` 反解。
+
+    ⚠️ `r.inner_size` 是内层**结局总数**（双色球 C(16,1)=16、大乐透 C(12,2)=66），
+       不是池大小。双色球两者恰好相等，大乐透不等（66 vs 12）；
+       直接拿 `inner_size` 当池大小会枚举出 C(66,2)=2145 个伪内层结局。
+    """
+    total = int(r.inner_size)
+    for n in range(m_in, 64):
+        if math.comb(n, m_in) == total:
+            return n
+    raise ValueError(f"无法从 inner_size={total}、m={m_in} 反解内层池大小")
+
+
+def exact_union_probability(lottery: str, tickets: Sequence[Dict[str, Any]],
+                            target: Any = None, issue: Any = None,
+                            *, chunk: int = 1024) -> float:
+    """整组票「至少一注达标」的**精确**概率 —— 无独立性近似。
+
+    做法（外层 × 内层**全枚举** + 位掩码求并）：
+      1. 内层结局 B 全枚举（双色球 C(16,1)=16；大乐透 C(12,2)=66）；
+      2. 对每张票 i、每个外层命中数 h，预计算「哪些 B 使 (h, |B∩b_i|) 达标」
+         的位掩码 `mask[h, i]`；
+      3. 外层结局 ρ 全枚举，取 K 张票的掩码按位或 ⇒ 达标的内层结局数 ÷ N_in；
+      4. 对外层结局取均值（外层均匀）。
+
+    与旧口径的差别：旧口径在命中数桶内假设同桶票独立；本函数不做任何独立性假设，
+    因此**支持非连续奖级目标**（例：只中四等不中五等），不受 `min_grade` 表达限制。
+
+    ⚠️ 仅支持红蓝型彩种（`rules.outer_choose` 为真）且 κ=0（外层均匀）。
+       位置型彩种 / κ≠0 / 枚举规模超上限 ⇒ `ValueError`，不静默回退。
+    ⚠️ 该值是**模型口径**（外层均匀 ⇒ 等价于公平开奖下的真实频率），
+       与实测回测的 realized 比率不是一回事，两者不许混报。
+    """
+    from ev.profit.rules import rules_for
+    from ev.profit.outcomes import outer_encoding, _encode_outer, tickets_to_outer
+
+    tks = list(tickets)
+    K = len(tks)
+    if K == 0:
+        return 0.0
+
+    r = rules_for(lottery, issue)
+    if not getattr(r, "outer_choose", False):
+        raise ValueError(f"{lottery} 不是红蓝型彩种，无近似的并集枚举未实现")
+    r0 = rules_for(lottery)
+    if (int(r0.outer_width), int(r0.outer_range[1])) != \
+            (int(r.outer_width), int(r.outer_range[1])):
+        raise ValueError(
+            f"{lottery} 期号 {issue} 的外层结构（{int(r.outer_width)}/"
+            f"{int(r.outer_range[1])}）与枚举表（{int(r0.outer_width)}/"
+            f"{int(r0.outer_range[1])}）不一致，无法枚举")
+
+    res = TT.resolve_conditions(lottery, target, issue)
+    grades = set(res["grades"])
+    w_out = int(r.outer_width)
+    # 开奖抽几个内层号 = grade_table 的 j 上限（双色球 1，大乐透 2）
+    m_in = max(jj for (_h, jj) in r.grade_table)
+    n_in = _inner_pool_size(r, m_in)      # 内层池大小（16 / 12），不是 inner_size
+
+    n_inner_enum = math.comb(n_in, m_in)
+    if m_in < 1 or n_inner_enum > MAX_INNER_ENUM:
+        raise ValueError(f"{lottery} 内层枚举规模 C({n_in},{m_in}) 超出上限 {MAX_INNER_ENUM}")
+
+    inners = np.array(list(combinations(range(n_in), m_in)), dtype=np.int16)
+    N_in = int(inners.shape[0])
+    W = (N_in + 63) // 64
+
+    gate = np.zeros((w_out + 1, m_in + 1), dtype=bool)
+    for (hh, jj), gname in r.grade_table.items():
+        if hh <= w_out and jj <= m_in and gname in grades:
+            gate[hh, jj] = True
+    if not gate.any():
+        return 0.0
+
+    # ---- 每张票的内层命中数 j_i(B)  (K, N_in)
+    blue_sets = np.zeros((K, n_in), dtype=np.int16)
+    for i, t in enumerate(tks):
+        v = t.get("蓝球")
+        for x in (list(v) if isinstance(v, (list, tuple)) else [v]):
+            if x is not None:
+                blue_sets[i, int(x) - 1] = 1
+    IM = np.zeros((n_in, N_in), dtype=np.int16)       # (内层号, 内层结局)
+    IM[inners.ravel(), np.repeat(np.arange(N_in), m_in)] = 1
+    j_mat = blue_sets @ IM                            # (K, N_in)
+
+    # ---- mask[h, i] : (w_out+1, K, W) uint64
+    mask = np.zeros((w_out + 1, K, W), dtype=np.uint64)
+    for h in range(w_out + 1):
+        ok = gate[h][j_mat]                           # (K, N_in) bool
+        for i in range(K):
+            for t in np.flatnonzero(ok[i]):
+                mask[h, i, int(t) >> 6] |= np.uint64(1 << (int(t) & 63))
+
+    # ---- 外层全枚举
+    E_all = outer_encoding(lottery)                   # (M_out, outer_size) uint8
+    M_out = int(E_all.shape[0])
+    if M_out > MAX_OUTER_ENUM:
+        raise ValueError(f"{lottery} 外层枚举规模 {M_out} 超出上限 {MAX_OUTER_ENUM}")
+    E_tk = _encode_outer(r, tickets_to_outer(lottery, tks)).T.copy()   # (d, K)
+
+    idx = np.arange(K, dtype=np.int64)[None, :]
+    total = np.zeros(M_out, dtype=np.int64)
+    for s in range(0, M_out, chunk):
+        e = min(s + chunk, M_out)
+        hits = (E_all[s:e].astype(np.float32) @ E_tk.astype(np.float32)).astype(np.int64)
+        orred = np.bitwise_or.reduce(mask[hits, idx], axis=1)         # (c, W)
+        cnt = np.zeros(orred.shape[0], dtype=np.int64)
+        for w in range(W):
+            cnt += _popcount64(orred[:, w])
+        total[s:e] = cnt
+
+    return float(total.mean()) / N_in

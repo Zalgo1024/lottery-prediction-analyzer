@@ -85,6 +85,8 @@ config/*
 !config/lowcrowd.json
 # 盈利策略的政策与情景配置（税率/κ 网格/情景倍数/台账开关），不是运行时状态也不是密钥
 !config/profit.json
+# 联合实验的预注册（期窗/常量/主终点/家族/停止规则 + 自校验哈希）—— 实验契约，必须入库
+!config/preregistration.json
 logs/flask_stdout.log
 logs/run_supervisor.log
 
