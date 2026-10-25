@@ -95,6 +95,9 @@ logs/run_supervisor.log
 .pytest_tmp_run.log
 .pytest_tmp_run2.log
 logs/_pytest_*.log
+# 仓库根目录散落的手动重定向日志（.pytest_full.log / .dry1.log / .preview*.log 等，
+# 2026-10-26 清理 38 个历史遗留时补此规则；logs/ 目录内仍只放行 logger.py）
+/*.log
 
 # ===== 本地 git 修复遗留（2026-10-08 重建仓库前的空壳 .git 备份，不入库） =====
 .git.broken-*/

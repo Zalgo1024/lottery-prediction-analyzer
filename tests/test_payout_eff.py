@@ -129,6 +129,7 @@ def test_effective_never_exceeds_nominal():
         assert r["净EV"] == pytest.approx(r["实得期望"] - COST)
 
 
+@pytest.mark.statsmodels
 def test_ssq_pool_path_activates():
     """双色球 WP1 GO → 一/二等奖走「奖池×E[1/(1+X)]」号码相关路径。"""
     r = payout_eff("双色球", {"红球": [1, 2, 3, 4, 5, 6], "蓝球": [7]})
@@ -137,6 +138,7 @@ def test_ssq_pool_path_activates():
     assert "流行度模型" in jz["来源"] and jz["实得单注"] > 0
 
 
+@pytest.mark.statsmodels
 def test_ssq_cold_combo_beats_hot():
     """冷门组合的一等奖实得应高于热门组合（WP1 模型的方向性检验）。
 

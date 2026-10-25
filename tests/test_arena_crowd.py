@@ -12,6 +12,7 @@ from ev import popularity_proxy as PP
 from ev.arena import crowd as CR
 
 
+@pytest.mark.statsmodels
 def test_supported_lottery_passes():
     g = CR.crowd_gate("双色球", n_periods=PP.MIN_TRAIN)
     assert g["可用"] is True
@@ -19,6 +20,7 @@ def test_supported_lottery_passes():
     assert g["卡在"] is None
 
 
+@pytest.mark.statsmodels
 def test_modeled_but_nogo_blocks_at_go_gate():
     """大乐透**建过模**但没过门槛 ⇒ 必须卡在「Go门槛」，不是「支持范围」。
 
@@ -46,6 +48,7 @@ def test_never_modeled_lottery_blocks_at_support_scope():
     assert "从未建模" in g["原因"]
 
 
+@pytest.mark.statsmodels
 def test_insufficient_train_periods_blocks():
     """支持且有 Go 门槛，但期数不够 walk-forward 最小训练量 ⇒ 也不可用。"""
     g = CR.crowd_gate("双色球", n_periods=PP.MIN_TRAIN - 1)
@@ -63,6 +66,7 @@ def test_require_usable_raises_with_reason():
         CR.require_usable("大乐透", n_periods=3000)
 
 
+@pytest.mark.statsmodels
 def test_require_usable_returns_probe_when_ok():
     g = CR.require_usable("双色球", n_periods=5000)
     assert g["探测"]["支持范围"]["通过"] is True

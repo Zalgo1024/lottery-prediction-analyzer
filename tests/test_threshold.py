@@ -55,6 +55,7 @@ def test_mu_nonpositive_honest():
     assert "不可估" in out["口径说明"]
 
 
+@pytest.mark.statsmodels
 def test_feasibility_below_threshold(monkeypatch):
     """④ 池低于门槛 → 「池未达门槛」+ 诚实边界必在。"""
     monkeypatch.setattr("ev.rollover._load_history",
@@ -65,6 +66,7 @@ def test_feasibility_below_threshold(monkeypatch):
     assert set(out["两档门槛"]) == {"冷门(μ_cold)", "随机(μ_rand=λ)"}
 
 
+@pytest.mark.statsmodels
 def test_feasibility_marginal_is_cents(monkeypatch):
     """⑤ 池达门槛 → 真实量级下边际必然是分元级（注数×p1×边际）。"""
     monkeypatch.setattr("ev.rollover._load_history",

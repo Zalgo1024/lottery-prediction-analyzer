@@ -107,6 +107,7 @@ class TestRealData:
         zb = next(z for z in b["分区"] if z["分区"] == "红球")
         assert za["组合e-max"] == zb["组合e-max"] == 2.0701
 
+    @pytest.mark.realdata
     def test_hypothesis_coverage_at_least_25(self):
         """★ P6 放宽：登记假设**至少** 25 条，且每条都有 e-value 覆盖说明。
 

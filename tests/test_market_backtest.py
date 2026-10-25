@@ -9,6 +9,8 @@
 """
 from __future__ import annotations
 
+import pytest
+
 from ev import market_backtest as mb
 from ev import market_features as mf
 
@@ -42,6 +44,7 @@ def test_spearman_perfect():
 
 # --------------------------------------------------------------- 只读 loader
 
+@pytest.mark.realdata
 def test_load_seq_front_ssq_nonempty():
     rows = mf.load_seq_front("ssq", limit=50)
     assert len(rows) > 0
@@ -49,12 +52,14 @@ def test_load_seq_front_ssq_nonempty():
     assert isinstance(seq, list) and len(seq) == 6
 
 
+@pytest.mark.realdata
 def test_load_prize_region_ssq():
     rows = mf.load_prize_region("ssq")
     assert len(rows) > 0
     assert all(isinstance(r[2], int) for r in rows)
 
 
+@pytest.mark.realdata
 def test_load_region_sales_fucai():
     rows = mf.load_region_sales("福彩", limit=200)
     assert len(rows) > 0
@@ -62,6 +67,7 @@ def test_load_region_sales_fucai():
     assert len(ym) == 6 and ym.isdigit()  # 已规范为 YYYYMM
 
 
+@pytest.mark.realdata
 def test_province_sales_totals():
     tot = mf.province_sales_totals("福彩")
     assert "广东" in tot and tot["广东"] > 0
@@ -69,6 +75,7 @@ def test_province_sales_totals():
 
 # --------------------------------------------------------------- 数据质量闸门
 
+@pytest.mark.realdata
 def test_is_draw_order_gate():
     # 双色球为真实摇出顺序；七乐彩 seq_front 是整数序排列
     assert mb._is_draw_order("ssq") is True
@@ -77,17 +84,20 @@ def test_is_draw_order_gate():
 
 # --------------------------------------------------------------- 检验不误报
 
+@pytest.mark.realdata
 def test_uniformity_sd_no_false_deviation():
     u = mb.test_seq_front_uniformity("sd", limit=800)
     assert u["可用期数"] > 0
     assert "与均匀兼容" in u["结论"]  # Bonferroni 后不误报
 
 
+@pytest.mark.realdata
 def test_serial_sd_no_usable_dependence():
     s = mb.test_seq_front_serial("sd", limit=800)
     assert "无可用一阶依赖" in s["结论"]
 
 
+@pytest.mark.realdata
 def test_walk_forward_sd_no_signal():
     w = mb.walk_forward_order_predict("sd", window=150, limit=800)
     # 自适应命中率应≈理论 1/range=0.1，且不显著超过理论
@@ -95,6 +105,7 @@ def test_walk_forward_sd_no_signal():
     assert w["自适应_vs_理论_p"] >= 0.05
 
 
+@pytest.mark.realdata
 def test_qlc_order_tests_excluded():
     for fn in (mb.test_seq_front_uniformity, mb.test_seq_front_serial,
                mb.walk_forward_order_predict):
@@ -102,12 +113,14 @@ def test_qlc_order_tests_excluded():
         assert "非真实摇出顺序" in r["结论"]
 
 
+@pytest.mark.realdata
 def test_province_jackpot_vs_sales_ssq_correlated():
     p = mb.province_jackpot_vs_sales("ssq")
     # 头奖注数与全省总销量强正相关（卖得多中得多），与公平一致
     assert p["Spearman_rho"] is not None and p["Spearman_rho"] > 0.5
 
 
+@pytest.mark.realdata
 def test_run_lottery_runs():
     r = mb.run_lottery("sd", window=150, limit=600)
     assert r["代码"] == "sd"

@@ -139,6 +139,7 @@ def test_no_analytic_se_reaches_any_judgement_path():
         assert "解析" not in k, k
 
 
+@pytest.mark.statsmodels
 def test_real_gap_pipeline_does_not_fall_back_to_short_se():
     """真实管线跑一遍，γ 的 se 口径必须是长块（回退分支在生产路径不可达）。"""
     from ev.mechanism.gap_b_drawn_quantile import (

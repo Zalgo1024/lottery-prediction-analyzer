@@ -130,6 +130,7 @@ def test_preload_does_not_change_amounts():
     assert before == after
 
 
+@pytest.mark.realdata
 def test_preload_is_idempotent():
     PA.clear_preload()
     first = PA.preload(LOT, [26121])
@@ -153,6 +154,7 @@ def test_rule_issue_separates_grading_version():
     assert m_new["规则版本"] == new
 
 
+@pytest.mark.realdata
 def test_fixed_grade_never_looked_up_by_name_across_versions():
     """★★ 跨规则版本时**固定奖不许按奖级名查库**。
 
@@ -183,6 +185,7 @@ def test_fixed_grade_never_looked_up_by_name_across_versions():
     assert amt_same["一等"] > 0
 
 
+@pytest.mark.realdata
 def test_current_mode_dlt_return_rate_is_plausible():
     """反事实口径的期望返奖率必须落在官方量级（固定奖 27.75% + 浮动奖）。
 

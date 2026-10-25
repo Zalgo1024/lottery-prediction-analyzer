@@ -18,6 +18,10 @@ from ev.profit.solvers import solve_kappa_star
 
 LOT, ISSUE, K = "双色球", "2026280", 20
 
+# 四轴稳健性跑在真登记册/真倾斜上：market.db（outer_tilt 的 source）+ statsmodels
+# （robustness_check 内部的 GLM）缺一即降级，CI/全新克隆自动跳过（conftest 守卫）。
+pytestmark = [pytest.mark.realdata, pytest.mark.statsmodels]
+
 
 @pytest.fixture(scope="module")
 def fx():

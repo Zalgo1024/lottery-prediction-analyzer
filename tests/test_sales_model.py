@@ -92,6 +92,7 @@ class TestNoSelfDeception:
         r = sm._fit_continuous(f, "pool_t", sm._LAG_FEATS, test_frac=0.25)
         assert r["R²(log尺度, vs均值)"] < 0.3, f"随机奖池目标上出现虚假高 R²: {r}"
 
+    @pytest.mark.statsmodels
     def test_n1_no_edge_on_random_target(self):
         rng = np.random.default_rng(11)
         f = _random_target_frame(rng)

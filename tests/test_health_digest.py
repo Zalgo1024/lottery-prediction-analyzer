@@ -43,6 +43,15 @@ def env(tmp_path, monkeypatch):
     # 兜底：任何用例若不小心落到周检槽位，也绝不允许真跑六项全扫描 / 写真实报告
     monkeypatch.setattr(H, "run_full_health",
                         lambda **k: {"问题": [], "_stub": True})
+    # 兜底（2026-10-25 事故同款）：不读真实 market.db 的 sync_log。
+    #   2026-10-25 晚 update:all 因 sporttery 源超时 status=partial，真实状态
+    #   直接漏进 build_digest 的「问题」列表，把两个"无问题"用例染红。
+    #   真实补库健康度由 23:40 日报推送监控（那是它的岗位）；单测钉的是
+    #   digest 自身的组装逻辑，不该被上游 transient 抖动决定红绿。
+    monkeypatch.setattr(H, "_market_freshness", lambda: {
+        "可用": True, "状态": "ok", "距今小时": 1, "失败源": [],
+        "进行中": False, "最近更新": "测试桩", "更新期数": 0,
+        "最新开奖日": "2026-10-20", "抓取时间": "测试桩"})
     H._CACHE.clear()   # 接口走 cached_digest，用例之间必须清缓存
     (tmp_path / "health").mkdir()
 

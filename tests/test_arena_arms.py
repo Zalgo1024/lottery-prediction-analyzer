@@ -73,6 +73,7 @@ def test_tier_coverage_meta_reports_relaxation_field():
     assert "放宽次数" in meta and "重叠上限" in meta
 
 
+@pytest.mark.statsmodels
 def test_hybrid_arm_selects_full_k_on_ssq():
     """v1.4：hybrid 在双色球上必须真出数（λ=0.5 / union 锁定），不是「未实现」。"""
     pool = _pool()
@@ -89,6 +90,7 @@ def test_hybrid_arm_selects_full_k_on_ssq():
     assert (meta["联合位图"] or {})["MC规模"] == 5000
 
 
+@pytest.mark.statsmodels
 def test_hybrid_arm_is_reproducible():
     """同 seed 两次调用必须同票集（RNG 隔离 + 派生 seed 真的接进去了）。"""
     pool = _pool()
@@ -124,6 +126,7 @@ def test_hybrid_empty_result_raises_not_silent(monkeypatch):
                      {"kind": "payout", "min_payout": 10.0})
 
 
+@pytest.mark.statsmodels
 def test_hybrid_gate_relaxation_is_not_cap_pollution(monkeypatch):
     """★ 门控放宽 ≠ cap 污染：放宽记在「门控.放宽次数」，顶层「放宽次数」恒 0。
 

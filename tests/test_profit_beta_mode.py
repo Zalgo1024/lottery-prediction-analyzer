@@ -23,6 +23,7 @@ def wf_rows():
     return BT._wf_rows(LOT)
 
 
+@pytest.mark.statsmodels
 def test_wf_params_no_lookahead(wf_rows):
     """★ 训练集必须真值早于目标期（expanding window）。"""
     keys = [pit.issue_key(LOT, s) for s in wf_rows["issues"]]

@@ -19,11 +19,15 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------- 常量
 
-DB_PATH = "E:/707/market/market.db"
+# ★ 2026-10-26 修复：原来是硬编码绝对路径 "E:/707/market/market.db"——换一台
+# 机器（或任一不是 E: 盘的环境）就静默指向不存在的文件，报错信息还挂着本机路径。
+# 与 data/prize_amounts._db_path / market/build.py 一致改成 repo 相对。
+DB_PATH = str(Path(__file__).resolve().parents[1] / "market" / "market.db")
 
 CODE_TO_NAME = {
     "ssq": "双色球", "dlt": "大乐透", "pl3": "排列3", "pl5": "排列5",
@@ -52,7 +56,10 @@ LOT_SPEC: Dict[str, Dict[str, object]] = {
 def connect_ro() -> sqlite3.Connection:
     """只读连接（uri mode=ro），失败时给出清晰报错。"""
     try:
-        return sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+        # 反斜杠归一化：与 market/update.py 同款。Windows 上本机 SQLite
+        # 能直读反斜杠 URI，但按 URI 规范它并非转义符，跨版本/跨平台不稳。
+        return sqlite3.connect("file:%s?mode=ro" % DB_PATH.replace("\\", "/"),
+                               uri=True)
     except sqlite3.Error as e:  # pragma: no cover - 环境错误
         raise RuntimeError(f"无法以只读方式打开 market.db: {DB_PATH} ({e})")
 

@@ -46,6 +46,7 @@ def test_unsupported_lottery_degrades_explicitly():
     assert pp.go_or_none("大乐透") is False
 
 
+@pytest.mark.statsmodels
 def test_go_evidence_exposes_measured_numbers():
     """原因文案引用的数字必须**现取**，不许硬编码。
 
@@ -64,6 +65,7 @@ def test_go_evidence_exposes_measured_numbers():
     assert "从未建模" in ev2["verdict"]
 
 
+@pytest.mark.statsmodels
 def test_go_verdict_driven_by_significance_not_sign_count():
     """闸门 Go/No-Go 必须看**显著性折数**(cv_sig_folds)，不是纯符号计数(cv_better_folds)。
 

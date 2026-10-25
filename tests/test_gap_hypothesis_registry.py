@@ -161,6 +161,7 @@ def test_register_is_idempotent(tmp_path, monkeypatch):
     assert len(names) == len(set(names))
 
 
+@pytest.mark.realdata
 def test_real_registry_untouched():
     """★ 测试不得污染真登记册：真身仍是 25 条已判假设。
 

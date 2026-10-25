@@ -197,6 +197,7 @@ def test_report_equivalence_verdict_on_balanced_data(monkeypatch, tmp_path):
 
 
 # ---------------- 漂移监控 ----------------
+@pytest.mark.statsmodels
 def test_drift_report_go_path():
     from ev.popularity import drift_report
 

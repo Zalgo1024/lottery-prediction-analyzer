@@ -155,6 +155,7 @@ def test_ladder_defaults_are_monotone_and_end_at_no_gate():
 
 # ------------------------------------------------------------ ⑤ 共线事实（为什么要这样设计）
 
+@pytest.mark.statsmodels
 def test_pure_crowd_sort_is_collinear_with_net_ev():
     """★ 共线：μ 越大（越热门）⇒ 一等奖实得 E[min(cap,池/(1+X))] 越小，严格单调。
 

@@ -12,6 +12,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from data import feedback as pn_fb
 from data import push_image as pi
 from data import push_notify as pn
@@ -560,6 +562,7 @@ class ImageRenderTests(unittest.TestCase):
         self.assertEqual(pi._clean("✅ A  ✅ B"), "A B")
         self.assertEqual(pi._clean("纯中文标题"), "纯中文标题")
 
+    @pytest.mark.winfont
     def test_emoji_subtitle_renders_without_missing_glyph(self):
         import warnings
         recs = [{"issue": "26104", "num": "01 02 03", "match": "红中1", "prize": "六等奖"}]
@@ -620,6 +623,7 @@ class WinCardTests(unittest.TestCase):
         for kw in ("单注奖金", "¥5", "固定奖金", "红球2/6", "策略", "机制倾斜", "来源"):
             self.assertIn(kw, joined)
 
+    @pytest.mark.winfont
     def test_card_renders_without_glyph_warning(self):
         """★ 不能用字体缺字形的符号（✓ U+2713 在 YaHei 里是豆腐块）。"""
         import warnings
