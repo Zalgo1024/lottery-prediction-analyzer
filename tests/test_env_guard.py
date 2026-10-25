@@ -47,6 +47,19 @@ def _skip_reason(item: _FakeItem) -> str:
     return ""
 
 
+def _pin_full_env(monkeypatch):
+    """把四个组件先全部钉成「在位」，再由用例单独摘掉被测的那一个。
+
+    不加这一步，CI 上（market.db / statsmodels / 中文字体本来都缺）就会出现
+    「只摘 statsmodels，却连带跳了 realdata」——断言的是隔离性，自己却没隔离
+    变量，2026-10-26 首次推送到 CI 时正是这三例红。
+    """
+    monkeypatch.setattr(C, "HAS_MARKET_DB", True)
+    monkeypatch.setattr(C, "HAS_STATSMODELS", True)
+    monkeypatch.setattr(C, "HAS_REGISTRY", True)
+    monkeypatch.setattr(C, "_CJK_FONT", True)
+
+
 # ---------------------------------------------------------------- 1. 标记登记
 def test_markers_registered_in_pytest_ini():
     """三个环境标记必须登记在 pytest.ini（--strict-markers 的配套声明）。"""
@@ -79,6 +92,7 @@ def test_env_flags_agree_with_reality():
 # ---------------------------------------------------------------- 3. 跳过决策
 def test_missing_component_skips_only_its_own_mark(monkeypatch):
     """缺 market.db ⇒ 只跳 realdata；statsmodels/winfont/无标记用例不受影响。"""
+    _pin_full_env(monkeypatch)
     monkeypatch.setattr(C, "HAS_MARKET_DB", False)
     items = [_FakeItem("realdata"), _FakeItem("statsmodels"),
              _FakeItem("winfont"), _FakeItem()]
@@ -90,6 +104,7 @@ def test_missing_component_skips_only_its_own_mark(monkeypatch):
 
 
 def test_missing_statsmodels_skips_only_statsmodels(monkeypatch):
+    _pin_full_env(monkeypatch)
     monkeypatch.setattr(C, "HAS_STATSMODELS", False)
     items = [_FakeItem("realdata"), _FakeItem("statsmodels"), _FakeItem()]
     C.pytest_collection_modifyitems(None, items)
@@ -99,6 +114,7 @@ def test_missing_statsmodels_skips_only_statsmodels(monkeypatch):
 
 
 def test_missing_font_skips_only_winfont(monkeypatch):
+    _pin_full_env(monkeypatch)
     monkeypatch.setattr(C, "_CJK_FONT", False)
     items = [_FakeItem("winfont"), _FakeItem("realdata"), _FakeItem()]
     C.pytest_collection_modifyitems(None, items)
@@ -109,11 +125,13 @@ def test_missing_font_skips_only_winfont(monkeypatch):
 
 def test_missing_registry_also_skips_realdata(monkeypatch):
     """登记册缺失同样走 realdata（理由里要点名，不能只说"缺数据"）。"""
+    _pin_full_env(monkeypatch)
     monkeypatch.setattr(C, "HAS_REGISTRY", False)
     items = [_FakeItem("realdata")]
     C.pytest_collection_modifyitems(None, items)
     reason = _skip_reason(items[0])
     assert "登记册" in reason
+    assert "market/market.db" not in reason   # 只摘登记册，不该顺带说缺库
 
 
 def test_complete_env_skips_nothing(monkeypatch):
