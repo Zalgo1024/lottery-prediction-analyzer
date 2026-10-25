@@ -16,6 +16,10 @@ import pytest
 
 _TARGETS = (
     ("data.push_notify", "STORE_PATH", "push_notify.json"),
+    # 跨进程节流状态文件（2026-10-24 新增）。不加这一条，用例会把真实
+    # config/.push_pace.json 写成"刚刚发过"，让**下一次真实推送白等 3.2 秒**；
+    # 反过来，真实文件里的旧时间戳也会让用例莫名其妙变慢。
+    ("data.push_notify", "PACE_PATH", ".push_pace.json"),
     ("data.ticket_size", "STORE_PATH", "ticket_size.json"),
     ("web.training_loop", "STORE_PATH", "training_loop.json"),
     # ev/mechanism/gap_cache.py 的磁盘缓存目录（测量结果 JSON）。

@@ -6,6 +6,7 @@
 
 import io
 import json
+import struct
 import tempfile
 import unittest
 from pathlib import Path
@@ -115,6 +116,46 @@ class FormatTests(unittest.TestCase):
         t = {"号码": {"第2位": [2], "第1位": [1], "第7位": [7], "第10位": [3]}}
         # 第10位 解析为 10 但键名只有 第1位/第2位/第7位/第10位 → 按数值排序 [1,2,7,10→key3]
         self.assertEqual(pn.format_ticket_line(t), "1 2 7 3")
+
+
+class DrawLineTests(unittest.TestCase):
+    """2026-10-24 回归：数字型彩种的开奖号码曾经整行丢失。
+
+    根因：`_latest_draw` / `_fmt_draw_numbers` 用 `is not None` 判 `红球`，
+    而数字型记录身上也有 `红球` 属性、值是 `[]` ⇒ 走进乐透型分支 ⇒
+    「最新开奖 26282（2026-10-23）：」冒号后面空白。真值判断才是对的。
+    """
+
+    def test_lotto_draw_line(self):
+        got = pn._fmt_draw_numbers({"期号": "26121", "日期": "2026-10-22",
+                                   "红球": [2, 7, 20, 24, 26, 30], "蓝球": [2]})
+        self.assertEqual(got, "最新开奖 26121（2026-10-22）：02 07 20 24 26 30 + 02")
+
+    def test_digital_draw_line_not_swallowed_by_empty_reds(self):
+        # 关键：红球=[] 必须落到「号码」分支，而不是被当成乐透型吃掉
+        got = pn._fmt_draw_numbers({"期号": "26282", "日期": "2026-10-23",
+                                   "红球": [], "蓝球": [],
+                                   "号码": {"第1位": [6], "第2位": [4], "第3位": [7]}})
+        self.assertEqual(got, "最新开奖 26282（2026-10-23）：6 4 7")
+
+    def test_digital_zones_sorted_numerically(self):
+        # 字符串排序会把 第10位 排到 第2位 前面；必须按数值
+        got = pn._fmt_draw_numbers({"期号": "1", "号码": {"第10位": [3], "第2位": [2],
+                                                        "第1位": [1]}})
+        self.assertEqual(got, "最新开奖 1（）：1 2 3")
+
+    def test_empty_draw_returns_blank(self):
+        self.assertEqual(pn._fmt_draw_numbers({}), "")
+        self.assertEqual(pn._fmt_draw_numbers(None), "")
+
+    def test_latest_draw_never_returns_empty_numbers_for_digital(self):
+        """真实数据：4 个数字型彩种的最新开奖行冒号后必须有号码。"""
+        for lot in ("排列3", "排列5", "福彩3D", "七星彩"):
+            draw = pn._latest_draw(lot)
+            line = pn._fmt_draw_numbers(draw)
+            self.assertIn("：", line, f"{lot} 开奖行缺冒号: {line!r}")
+            self.assertTrue(line.split("：")[-1].strip(),
+                            f"{lot} 开奖号码为空: {line!r}")
 
 
 class MessageTests(unittest.TestCase):
@@ -382,7 +423,7 @@ class WecomPipelineTests(unittest.TestCase):
         pn._reset_pace()
 
     def test_end_to_end_wecom(self):
-        """端到端（图片模式）：短文字 markdown + 号码图，全部走通。"""
+        """端到端（图片模式）：1 条分隔头 + 3 张图，且顺序为 开奖→出号→结算。"""
         with _TmpStore():
             pn.save_config({"provider": "wecom", "token": "k1", "enabled": True,
                             "推送间隔秒": 0,
@@ -406,16 +447,28 @@ class WecomPipelineTests(unittest.TestCase):
                     fresh_prediction=True)
         self.assertIsNotNone(r)
         self.assertTrue(r["ok"])
-        # ① 出号文字 ② 号码图 ③ 结算文字 ④ 中奖图
+
+        types = [b.get("msgtype") for b in bodies]
+        # ① 分隔头（唯一文本）→ ② 开奖图 → ③ 出号图 → ④ 结算图
+        self.assertEqual(types, ["markdown", "image", "image", "image"])
+
         texts = [b["markdown"]["content"] for b in bodies if b.get("msgtype") == "markdown"]
-        images = [b for b in bodies if b.get("msgtype") == "image"]
-        self.assertEqual(len(images), 2)
+        self.assertEqual(len(texts), 1)
         joined = "\n".join(texts)
-        self.assertIn("彩票助手｜双色球", joined)     # 标题并入正文
-        self.assertIn("本期出号", joined)             # ① 号码
-        self.assertIn("共 1 注", joined)              # ② 数量
-        self.assertIn("六等奖", joined)               # ③ 中奖记录
-        self.assertIn("100.64.0.5", joined)           # 看板深链
+        self.assertIn("━━━ 双色球 ━━━", joined)     # 彩种分隔头
+        self.assertIn("本期出号", joined)           # 出号注数
+        self.assertIn("1 注", joined)
+        self.assertIn("六等奖", joined)             # 结算摘要
+        self.assertIn("100.64.0.5", joined)         # 看板深链
+        self.assertIn("请勿用于投注决策", joined)    # 诚实条件
+        self.assertIn("本次 3 张图", joined)         # 张数清单
+
+        # 每张图都是合法 PNG（base64 解码后校验魔数）
+        import base64 as _b64
+        for b in bodies:
+            if b.get("msgtype") != "image":
+                continue
+            self.assertTrue(_b64.b64decode(b["image"]["base64"]).startswith(b"\x89PNG"))
 
     def test_image_payload_has_base64_and_md5(self):
         with _TmpStore():
@@ -516,6 +569,105 @@ class ImageRenderTests(unittest.TestCase):
                                        subtitle="🎉 命中 六等×1")
         self.assertTrue(png.startswith(b"\x89PNG"))
         self.assertFalse([x for x in caught if "Glyph" in str(x.message)])
+
+
+class WinCardTests(unittest.TestCase):
+    """中奖卡片（2026-10-24）：必须能说清「**具体哪几个球中了**」。
+
+    表格版只能说「这注中了六等奖」，看不出是哪几个球；卡片靠
+    【预测号码 vs 实际开奖】的球珠对照表达命中，所以**结构化号码 + 逐位比对**
+    是这张图的地基，缺了就只剩一行文本（等于退回表格）。
+    """
+
+    _REC = {
+        "lottery": "双色球", "issue": 26121, "prize": "六等", "valid": True,
+        "预测号码": {"红球": [3, 7, 8, 9, 26, 32], "蓝球": [2]},
+        "实际号码": {"红球": [2, 7, 20, 24, 26, 30], "蓝球": [2]},
+        "红球命中": 2, "蓝球命中": 1, "总命中": 3,
+        "策略": "遗漏值策略", "置信度": 0.2918,
+        "预测日期": "2026-10-21", "开奖日期": "2026-10-22",
+        "批次内序号": 183, "批次规模": 200, "来源": "predict",
+        "机制γ": -0.0111, "机制倾斜": {"倾斜": False},
+        "奖金": {"文本": "¥5", "来源": "固定奖金", "金额": 5.0, "浮动": False},
+    }
+
+    def test_zone_hits_lotto(self):
+        h = pi._zone_hits(self._REC["预测号码"], self._REC["实际号码"])
+        self.assertEqual(h["红球"], {7, 26})
+        self.assertEqual(h["蓝球"], {2})
+
+    def test_zone_hits_digital(self):
+        pred = {"第1位": [7], "第2位": [3], "第3位": [9]}
+        act = {"第1位": [3], "第2位": [7], "第3位": [9]}
+        h = pi._zone_hits(pred, act)
+        self.assertEqual(h["第3位"], {9})
+        self.assertEqual(h["第1位"], set())
+
+    def test_grade_label_adds_suffix(self):
+        self.assertEqual(pi._grade_label("六等"), "六等奖")
+        self.assertEqual(pi._grade_label("六等奖"), "六等奖")
+        self.assertEqual(pi._grade_label("组选6"), "组选6")
+
+    def test_hit_breakdown_two_flavors(self):
+        self.assertEqual(pi._hit_breakdown(self._REC), "红球2/6 · 蓝球1/1")
+        digital = {"分区命中": {"第1位": 0, "第4位": 1, "第7位": 1}}
+        self.assertEqual(pi._hit_breakdown(digital), "第4位·第7位（2/3）")
+        self.assertEqual(pi._hit_breakdown({"分区命中": {"第1位": 0}}), "全部未中（0/1）")
+
+    def test_meta_lines_expose_fields(self):
+        """卡片底部必须给出奖金/分区命中/策略/机制/来源——与看板记录卡片同字段。"""
+        joined = " ".join(pi._win_meta_lines(self._REC))
+        for kw in ("单注奖金", "¥5", "固定奖金", "红球2/6", "策略", "机制倾斜", "来源"):
+            self.assertIn(kw, joined)
+
+    def test_card_renders_without_glyph_warning(self):
+        """★ 不能用字体缺字形的符号（✓ U+2713 在 YaHei 里是豆腐块）。"""
+        import warnings
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            png = pi.render_wins_image([dict(self._REC)], title="双色球 · 开奖结算",
+                                       subtitle="新增 1 条中奖")
+        self.assertTrue(png.startswith(b"\x89PNG"))
+        self.assertFalse([x for x in caught if "Glyph" in str(x.message)])
+
+    def test_structured_card_larger_than_text_fallback(self):
+        """有结构化号码 → 两张球珠行 + 两行元信息，图必然比纯文本降级版大。"""
+        flat = [{"issue": "26121", "num": "01 02 03 04 05 06 + 07", "prize": "六等奖"}]
+        big = pi.render_wins_image([dict(self._REC)], title="t")
+        small = pi.render_wins_image(flat, title="t")
+        self.assertGreater(len(big), len(small))
+
+    def test_hit_record_is_structured(self):
+        """`digest_payload` 的 hit_records 必须带结构化号码，否则图只能退回表格。"""
+        from data import push_notify as pn
+        raw = {
+            "期号": 26121, "开奖日期": "2026-10-22", "预测日期": "2026-10-21",
+            "来源": "predict", "策略": "遗漏值策略", "置信度": 0.2918,
+            "预测红球": [3, 7, 8, 9, 26, 32], "预测蓝球": [2],
+            "实际红球": [2, 7, 20, 24, 26, 30], "实际蓝球": [2],
+            "红球命中": 2, "蓝球命中": 1, "总命中": 3,
+            "中奖等级": "六等", "valid_prediction": True,
+            "批次内序号": 183, "批次规模": 200,
+            "机制γ": -0.0111, "机制倾斜": {"倾斜": False},
+        }
+        rec = pn._hit_record(raw, "双色球")
+        self.assertEqual(rec["预测号码"], {"红球": [3, 7, 8, 9, 26, 32], "蓝球": [2]})
+        self.assertEqual(rec["实际号码"], {"红球": [2, 7, 20, 24, 26, 30], "蓝球": [2]})
+        # 老键必须保留：文本推送与行式回退还在用
+        self.assertEqual(rec["prize"], "六等")
+        self.assertEqual(rec["num"], "03 07 08 09 26 32 + 02")
+        self.assertIn("文本", rec["奖金"])
+
+    def test_hit_record_digital_zones(self):
+        from data import push_notify as pn
+        raw = {"期号": 26120, "中奖等级": "六等奖", "中奖玩法": "六等奖",
+               "预测号码": {"第1位": [2], "第7位": [5]},
+               "实际号码": {"第1位": [8], "第7位": [5]},
+               "分区命中": {"第1位": 0, "第7位": 1},
+               "总命中": 1, "总选择": 2, "valid_prediction": True}
+        rec = pn._hit_record(raw, "七星彩")
+        self.assertEqual(rec["预测号码"], {"第1位": [2], "第7位": [5]})
+        self.assertEqual(rec["总选择"], 2)
 
 
 class TicketImageTests(unittest.TestCase):
@@ -656,8 +808,10 @@ class DegradeTests(unittest.TestCase):
             sent.append(json.loads(req.data.decode("utf-8")))
             return _fake_urlopen({"errcode": 0, "errmsg": "ok"})(req, timeout)
 
-        with patch.object(pi, "render_tickets_image", _boom), \
+        with patch.object(pi, "render_draw_image", _boom), \
+                patch.object(pi, "render_tickets_image", _boom), \
                 patch.object(pi, "render_numbers_image", _boom), \
+                patch.object(pi, "render_wins_image", _boom), \
                 patch.object(pn.urllib.request, "urlopen", _capture):
             res = pn.push_lottery_images("双色球", predictions=[dict(self._ONE)],
                                         cfg=self._wecom_cfg())
@@ -668,14 +822,25 @@ class DegradeTests(unittest.TestCase):
         text = "\n".join(b["markdown"]["content"] for b in sent
                          if b.get("msgtype") == "markdown")
         self.assertIn("本期出号", text)
+        # 不得逐页回退：退化成**一条**号码文本，而不是每页一条
+        self.assertEqual(sum("本期出号" in (b.get("markdown") or {}).get("content", "")
+                             for b in sent if b.get("msgtype") == "markdown"), 1)
 
     def test_unsupported_provider_falls_back_to_text(self):
-        """pushplus / serverchan 不支持图片消息 → 自动回退 markdown。"""
+        """pushplus / serverchan 不支持图片 → **整条降级为一条** markdown（不逐图回退）。"""
         cfg = pn.sanitize({"provider": "pushplus", "token": "k", "enabled": True})
-        with patch.object(pn.urllib.request, "urlopen",
-                          _fake_urlopen({"code": 200, "msg": "ok"})):
+        sent = []
+
+        def _capture(req, timeout=None):
+            sent.append(json.loads(req.data.decode("utf-8")))
+            return _fake_urlopen({"code": 200, "msg": "ok"})(req, timeout)
+
+        with patch.object(pn.urllib.request, "urlopen", _capture):
             res = pn.push_lottery_images("双色球", predictions=[dict(self._ONE)], cfg=cfg)
         self.assertTrue(any(r.get("ok") for r in res))
+        # ★ 回归锁：非企微渠道绝不能因为"每张图各失败一次"而刷出 4~5 条重复文本
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0].get("msgtype"), None)      # pushplus 不是 msgtype 协议
 
     def test_images_disabled_by_config(self):
         cfg = pn.sanitize({"provider": "wecom", "token": "k", "enabled": True,
@@ -690,6 +855,7 @@ class DegradeTests(unittest.TestCase):
             res = pn.push_lottery_images("双色球", predictions=[dict(self._ONE)], cfg=cfg)
         self.assertTrue(any(r.get("ok") for r in res))
         self.assertTrue(all(b.get("msgtype") == "markdown" for b in seen))
+        self.assertEqual(len(seen), 1)
 
     def test_push_exception_never_raises(self):
         with _TmpStore():
@@ -698,6 +864,198 @@ class DegradeTests(unittest.TestCase):
                 r = pn.push_pipeline_result("双色球", predictions=[dict(self._ONE)])
         self.assertFalse(r["ok"])
         self.assertIn("boom", r["detail"])
+
+
+class DividerTests(unittest.TestCase):
+    """彩种分隔头（2026-10-24）：一个彩种**唯一**的一条文本。
+
+    「以彩票分类用文字做间隔」就是靠 `━━━ 双色球 ━━━` 这行；
+    原来分散在「出号短文字 / 结算短文字」里的信息全部并入这里。
+    """
+
+    @staticmethod
+    def _mk(**kw):
+        base = dict(
+            predictions=[{"号码": {"红球": [1, 2, 3, 4, 5, 6], "蓝球": [7]}}],
+            eval_result={"new_feedback_count": 2},
+            hit_records=[{"prize": "六等奖"}, {"prize": "六等奖"}, {"prize": "五等奖"}],
+            draw_numbers={"期号": "26121", "日期": "2026-10-22",
+                          "红球": [2, 7, 20, 24, 26, 30], "蓝球": [2]},
+            pred_info="目标期号 26122",
+            size_note="出号数量：动态滑轨，当前生效 200 注",
+            board_url="http://100.64.0.5:5000",
+            n_draw=1, n_num_pages=4, n_win_pages=1)
+        base.update(kw)
+        return pn.build_divider_message("双色球", **base)
+
+    def test_title_is_lottery_divider(self):
+        self.assertEqual(pn._divider_title("双色球"), "━━━ 双色球 ━━━")
+
+    def test_body_has_counts_pages_and_link(self):
+        title, body = self._mk()
+        self.assertEqual(title, "━━━ 双色球 ━━━")
+        self.assertIn("本次 6 张图", body)
+        self.assertIn("开奖结果 1 张 → 本期出号 4 张 → 开奖结算 1 张", body)
+        self.assertIn("本期出号 **1 注**", body)
+        self.assertIn("出号数量：动态滑轨，当前生效 200 注", body)
+        self.assertIn("本期结算 **3 条**：六等奖×2、五等奖×1", body)
+        self.assertIn("02 07 20 24 26 30 + 02", body)
+        self.assertIn("100.64.0.5", body)
+
+    def test_footer_carries_premise(self):
+        _title, body = self._mk()
+        self.assertIn("在「开奖对全部组合等可能」的前提下", body)
+        self.assertIn("未检出偏离 ≠ 证明开奖公平", body)
+
+    def test_no_forbidden_words(self):
+        """禁词一个都不许出现（`data/` 不在叙事扫描器范围内 ⇒ 靠自律 + 这条锁）。"""
+        _title, body = self._mk()
+        for w in ("证伪", "证否", "不可预测", "已证明公平", "公平随机", "写死"):
+            self.assertNotIn(w, body)
+
+    def test_none_when_no_image_planned(self):
+        title, body = pn.build_divider_message(
+            "双色球", predictions=[{"号码": {}}],
+            n_draw=0, n_num_pages=0, n_win_pages=0)
+        self.assertIsNone(title)
+        self.assertIsNone(body)
+
+    def test_digital_draw_line_present(self):
+        _title, body = pn.build_divider_message(
+            "排列3", predictions=[{"号码": {"第1位": [1]}}],
+            draw_numbers={"期号": "26282", "日期": "2026-10-23", "红球": [], "蓝球": [],
+                          "号码": {"第1位": [6], "第2位": [4], "第3位": [7]}},
+            n_draw=1, n_num_pages=1, n_win_pages=0)
+        self.assertIn("6 4 7", body)
+
+
+class DrawImageTests(unittest.TestCase):
+    """「今晚开奖」图（2026-10-24 新增）：大号球珠 + 分区条。"""
+
+    def test_lotto_draw_image(self):
+        png = pi.render_draw_image(
+            {"期号": "26121", "日期": "2026-10-22",
+             "红球": [2, 7, 20, 24, 26, 30], "蓝球": [2]},
+            lottery="双色球", title="双色球 · 开奖结果", subtitle="第 26121 期")
+        self.assertTrue(png.startswith(b"\x89PNG"))
+        self.assertLess(len(png), 40 * 1024)          # 单张远小于企微 2MB
+
+    def test_digital_draw_image(self):
+        png = pi.render_draw_image(
+            {"期号": "26282", "号码": {"第1位": [6], "第2位": [4], "第3位": [7]}},
+            lottery="排列3", title="排列3 · 开奖结果")
+        self.assertTrue(png.startswith(b"\x89PNG"))
+
+    def test_no_numbers_raises(self):
+        with self.assertRaises(ValueError):
+            pi.render_draw_image({}, lottery="排列3")
+        # ★ 数字型记录身上有 红球=[]，必须判成"没有号码"，不许画空图
+        with self.assertRaises(ValueError):
+            pi.render_draw_image({"期号": "1", "红球": [], "蓝球": []}, lottery="福彩3D")
+
+    def test_dimensions_within_bounds(self):
+        png = pi.render_draw_image({"期号": "1", "红球": [1, 2, 3, 4, 5, 6], "蓝球": [7]})
+        w, h = struct.unpack(">II", png[16:24])
+        self.assertLessEqual(w, 1000)
+        self.assertLessEqual(h, 800)
+
+    def test_title_switches_on_draw_day(self):
+        today = pn._today_str()
+        self.assertIn("今晚开奖", pn._draw_title("双色球", {"日期": today}))
+        self.assertIn("开奖结果", pn._draw_title("双色球", {"日期": "2000-01-01"}))
+
+    def test_disclaimer_drawn(self):
+        """企微图片消息没有 caption ⇒ 声明必须画进图里（不是只写在常量里）。"""
+        src = Path(pi.__file__).read_text(encoding="utf-8")
+        self.assertIn("_foot(fig, fig_h)", src)
+        self.assertIn("期望为负", pi.DISCLAIMER)
+
+
+class PagingTests(unittest.TestCase):
+    """号码图分页（2026-10-24）：全量 + 自动分页，且**推荐标记全局只出现一次**。"""
+
+    @staticmethod
+    def _tickets(n=200):
+        return [{"号码": {"红球": [1, 2, 3, 4, 5, 6], "蓝球": [i % 16 + 1]},
+                 "策略": "遗漏值策略", "置信度": 0.30 + (i % 7) * 0.01}
+                for i in range(n)]
+
+    def test_200_tickets_become_four_pages(self):
+        pages = pi.paginate_tickets(self._tickets(200))
+        self.assertEqual(len(pages), 4)
+        self.assertEqual(sum(len(g["tickets"]) for p in pages for g in p), 200)
+
+    def test_recommended_appears_exactly_once(self):
+        pages = pi.paginate_tickets(self._tickets(200))
+        rec = [g for p in pages for g in p if g["recommended"]]
+        self.assertEqual(len(rec), 1)
+        self.assertTrue(pages[0][0]["recommended"])
+
+    def test_group_numbers_are_global(self):
+        """分页后组号不许从 1 重来（否则第 2 页又是「第1组」）。"""
+        pages = pi.paginate_tickets(self._tickets(200))
+        nos = [g["no"] for p in pages for g in p]
+        self.assertEqual(nos, list(range(1, 41)))
+
+    def test_groups_passthrough_renders(self):
+        pages = pi.paginate_tickets(self._tickets(200))
+        png = pi.render_tickets_image(
+            [t for g in pages[1] for t in g["tickets"]], title="双色球 · 本期出号",
+            groups=pages[1], page=(2, 4))
+        self.assertTrue(png.startswith(b"\x89PNG"))
+
+    def test_small_set_is_single_page(self):
+        self.assertEqual(len(pi.paginate_tickets(self._tickets(5))), 1)
+        self.assertEqual(pi.paginate_tickets([]), [])
+
+
+class SharedPaceTests(unittest.TestCase):
+    """跨进程节流（`_pace_global`）：状态落盘，进程边界不再重置间隔。
+
+    背景：`scripts/auto_scheduled.ps1` 每个彩种起一个 `cli.py auto` 进程，
+    进程内的 `_LAST_SEND_TS` 到边界就没了 ⇒ 6 个彩种连跑 = 6 次"首次发送"。
+    """
+
+    def setUp(self):
+        pn._reset_pace()
+
+    def tearDown(self):
+        pn._reset_pace()
+
+    def test_second_call_defers(self):
+        cfg = pn.sanitize({"provider": "wecom", "token": "k", "enabled": True,
+                           "推送间隔秒": 3.2})
+        slept = []
+        with patch.object(pn.time, "sleep", lambda s: slept.append(s)):
+            pn._pace_global(cfg)
+            self.assertEqual(slept, [])
+            pn._pace_global(cfg)
+        self.assertEqual(len(slept), 1)
+        self.assertGreater(slept[0], 1.0)
+        self.assertLessEqual(slept[0], 3.2)
+
+    def test_disabled_when_zero(self):
+        with patch.object(pn.time, "sleep") as m:
+            pn._pace_global(pn.sanitize({"推送间隔秒": 0}))
+            pn._pace_global(pn.sanitize({"推送间隔秒": 0}))
+            m.assert_not_called()
+
+    def test_unwritable_path_never_raises(self):
+        cfg = pn.sanitize({"provider": "wecom", "token": "k", "enabled": True,
+                           "推送间隔秒": 3.2})
+        old = pn.PACE_PATH
+        try:
+            pn.PACE_PATH = Path("Z:/definitely/not/here/.push_pace.json")
+            pn._pace_global(cfg)          # 限流失败绝不阻断推送
+        finally:
+            pn.PACE_PATH = old
+
+    def test_reset_clears_state_file(self):
+        with patch.object(pn.time, "sleep"):
+            pn._pace_global(pn.sanitize({"推送间隔秒": 3.2}))
+        self.assertTrue(pn.PACE_PATH.exists())
+        pn._reset_pace()
+        self.assertFalse(pn.PACE_PATH.exists())
 
 
 class SelfCheckPushTests(unittest.TestCase):

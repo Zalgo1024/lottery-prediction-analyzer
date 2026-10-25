@@ -117,9 +117,13 @@ def test_ensure_pending_groups_repairs_overwritten(patched):
     assert set(fixed) == set(patched["lots"])
     assert all(v["原组数"] == 5 for v in fixed.values())
     assert len(patched["state"]["triggered"]) == len(patched["lots"])
-    # 触发参数必须带正确滑轨值，且是 fresh 模式
+    # ★ 2026-10-24：触发参数**不得**固化 groups。
+    #   原实现把 `resolve_groups()`（或自愈判据里的 slide）写进 params，出号在
+    #   几秒后执行时滑轨可能已变 ⇒ 用旧值覆盖 pending（实测日志
+    #   `显式出号注数 84 ≠ 看板滑轨 86/88` 连报两条）。现在一律留空，
+    #   由出号时刻的 `resolve_groups()` 读最新生效值。
     for lot, params in patched["state"]["triggered"]:
-        assert params["groups"] == patched["slide"][lot]
+        assert "groups" not in params or params["groups"] is None
         assert params["mode"] == "fresh"
 
 

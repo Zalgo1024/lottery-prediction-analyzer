@@ -19,6 +19,17 @@ import pytest
 import web.health_digest as H
 
 
+# ★ 2026-10-25 修：本文件原先把 `datetime.now()` 当基准 ⇒ 运行日恰逢 **周日**
+#   （`FULL_HEALTH_WEEKDAY = 6`）时，周检槽位会与日报槽位同时触发，
+#   `== ["daily"]` 必然挂掉；更糟的是测试会**真跑一遍六项全扫描**并把报告写进真实 logs/。
+#   ⇒ 钉死在固定的周三（weekday=2 ≠ 6），与运行日期彻底解耦。
+FIXED_DAY = datetime(2026, 10, 21)          # 2026-10-21 是周三
+
+
+def _at(hour: int, minute: int = 0) -> datetime:
+    return FIXED_DAY.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     """把 digest 的所有落盘路径钉到 tmp，并把重活（读 CSV/注数体检）替换成假数据。"""
@@ -29,6 +40,9 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(H, "STATE_PATH", tmp_path / "digest_state.json")
     monkeypatch.setattr(H, "HEALTH_DIR", tmp_path / "health")
     monkeypatch.setattr(H, "DIGEST_DIR", tmp_path / "automation")
+    # 兜底：任何用例若不小心落到周检槽位，也绝不允许真跑六项全扫描 / 写真实报告
+    monkeypatch.setattr(H, "run_full_health",
+                        lambda **k: {"问题": [], "_stub": True})
     H._CACHE.clear()   # 接口走 cached_digest，用例之间必须清缓存
     (tmp_path / "health").mkdir()
 
@@ -154,7 +168,7 @@ def test_run_digest_writes_file(env, monkeypatch):
 
 def test_maybe_run_before_due_hour_does_nothing(env):
     env["set_status"]([])
-    early = datetime.now().replace(hour=9, minute=0, second=0, microsecond=0)
+    early = _at(9, 0)
     assert H.maybe_run(early) is None
     assert not H.STATE_PATH.exists()
 
@@ -162,8 +176,7 @@ def test_maybe_run_before_due_hour_does_nothing(env):
 def test_maybe_run_daily_once_per_day(env, monkeypatch):
     env["set_status"]([])
     monkeypatch.setattr(H, "run_digest", lambda **k: {"问题": []})
-    late = datetime.now().replace(hour=H.DIGEST_HOUR, minute=H.DIGEST_MINUTE + 1,
-                                 second=0, microsecond=0)
+    late = _at(H.DIGEST_HOUR, H.DIGEST_MINUTE + 1)
     first = H.maybe_run(late)
     assert first and "daily" in first["已执行"]
     second = H.maybe_run(late)
@@ -174,7 +187,7 @@ def test_maybe_run_cold_start_has_own_slot(env, monkeypatch):
     """冷启补报与当日总结是两个槽：早上开机报了，晚上 23:40 还要再报一次。"""
     env["set_status"]([])
     monkeypatch.setattr(H, "run_digest", lambda **k: {"问题": []})
-    morning = datetime.now().replace(hour=8, minute=0, second=0, microsecond=0)
+    morning = _at(8, 0)
     assert H.maybe_run(morning, cold_start=True)["已执行"] == ["boot"]
     late = morning.replace(hour=H.DIGEST_HOUR, minute=H.DIGEST_MINUTE + 1)
     assert H.maybe_run(late)["已执行"] == ["daily"]
@@ -184,7 +197,7 @@ def test_maybe_run_cold_start_once_per_day(env, monkeypatch):
     """看门狗反复重启不该反复补报。"""
     env["set_status"]([])
     monkeypatch.setattr(H, "run_digest", lambda **k: {"问题": []})
-    morning = datetime.now().replace(hour=8, minute=0, second=0, microsecond=0)
+    morning = _at(8, 0)
     assert H.maybe_run(morning, cold_start=True) is not None
     assert H.maybe_run(morning, cold_start=True) is None
 
@@ -235,13 +248,12 @@ def test_digest_no_truncation_flag_when_window_short(env):
 
 # ------------------------------------------------------------ is_due（调度器每 60s 调一次，必须毫秒级）
 def test_is_due_false_before_hour(env):
-    early = datetime.now().replace(hour=9, minute=0, second=0, microsecond=0)
+    early = _at(9, 0)
     assert H.is_due(early) is False
 
 
 def test_is_due_true_after_hour(env):
-    late = datetime.now().replace(hour=H.DIGEST_HOUR, minute=H.DIGEST_MINUTE + 1,
-                                  second=0, microsecond=0)
+    late = _at(H.DIGEST_HOUR, H.DIGEST_MINUTE + 1)
     assert H.is_due(late) is True
 
 
@@ -249,8 +261,7 @@ def test_is_due_false_once_daily_slot_used(env, monkeypatch):
     """跑过之后必须立刻变 False，否则调度器会每 60s 起一个线程重跑一次。"""
     env["set_status"]([])
     monkeypatch.setattr(H, "run_digest", lambda **k: {"问题": []})
-    late = datetime.now().replace(hour=H.DIGEST_HOUR, minute=H.DIGEST_MINUTE + 1,
-                                  second=0, microsecond=0)
+    late = _at(H.DIGEST_HOUR, H.DIGEST_MINUTE + 1)
     assert H.is_due(late) is True
     H.maybe_run(late)
     assert H.is_due(late) is False

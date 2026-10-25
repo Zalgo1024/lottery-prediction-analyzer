@@ -1,19 +1,24 @@
 """微信推送通知（企业微信群机器人 / PushPlus / Server酱）—— 出号与中奖记录送上门。
 
-设计（2026-09-16 建立；2026-09-17 增企业微信群机器人；2026-09-18 升级为**图片推送**）：
-  - 自动流水线每跑完一个彩种，把「最新开奖 + 上期结算 + 本期出号」推出去；
-  - **图片为主**（`data/push_image.py` 渲染 PNG）：号码与中奖**全部展示、不截断**
-    —— 企业微信 markdown 单条只有 4096 字节，号码一多必被砍；图片没有这个限制。
-    每个彩种最多 4 条：① 出号短文字 → ② 号码图 → ③ 结算短文字 → ④ 中奖图
-    （无中奖时只有 ①②；`图片推送=false` 时全部回退为文本）；
+设计（2026-09-16 建立；2026-09-17 增企业微信群机器人；2026-09-18 升级为**图片推送**；
+2026-10-24 改为「按彩种分组：一条分隔头 + 一组图」）：
+  - 自动流水线每跑完一个彩种，把「今晚开奖 + 本期出号 + 上期结算」推出去；
+  - **每个彩种一组**：① 一条纯文本分隔头（`━━━ 双色球 ━━━`，正文含期号 / 张数清单 /
+    出号注数 / 结算摘要 / 开奖号码 / 看板链接 / 诚实条件）→ ② 开奖图 1 张 →
+    ③ 本期出号图 N 张（全量，`PAGE_TICKETS` 注/页）→ ④ 开奖结算图 M 张。
+    三类内容各自成图且**图内有分区条**，不再把号码、开奖、中奖全堆在一条消息里；
+  - 图片为主（`data/push_image.py` 渲染 PNG）：号码与中奖**全部展示、不截断**
+    —— 企业微信 markdown 单条只有 4096 字节，号码一多必被砍；图片没有这个限制；
   - 渠道：**企业微信群机器人**（qyapi.weixin.qq.com，免费且不限额，推荐）/
     PushPlus（pushplus.plus）/ Server酱（sct.ftqq.com，免费 5 条/天）；
-    后两者不支持图片 → 自动降级为 markdown 文本；
+    **只有企微支持图片**，其它渠道整条降级为**一条** markdown 文本
+    （不许"逐图失败各回退一次"，那会让对方收到 4~5 条重复长文）；
   - 配置持久化 config/push_notify.json（与 ticket_size 同款原子写；config/ 整体 gitignore）；
   - **失败永不阻塞主流水线**：所有对外入口内部吞掉一切异常，只返回结果 dict；
-  - **每日上限默认 0 = 不限制**（2026-09-18 用户确认取消；设为 >0 可重新启用保护）；
-  - **自动节流**：企微每个机器人 20 条/分钟，`_pace()` 保证相邻发送间隔 ≥ `推送间隔秒`
-    （默认 3.2s ≈ 18.75 条/分钟），避免一个开奖夜（6 彩种 × 最多 4 条）被限速丢弃。
+  - **每日上限默认 0 = 不限制**；达到上限时的计数按**消息条数**累计（一个彩种 4~7 条）；
+  - **自动节流**：企微每个机器人 20 条/分钟。`_pace()` 管进程内相邻间隔，
+    `_pace_global()` 把上次发送时间落到 `config/.push_pace.json` 管**跨进程**
+    （`scripts/auto_scheduled.ps1` 每个彩种一个 `cli.py auto` 进程，进程内状态会被重置）。
 
 渠道差异：
   - 企业微信群机器人**只能单向推送**（webhook 无回执通道），因此在群里无法
@@ -39,15 +44,19 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+from collections import Counter
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 logger = logging.getLogger(__name__)
 
 _BASE_DIR = Path(__file__).resolve().parent.parent
 CONFIG_DIR = _BASE_DIR / "config"
 STORE_PATH = CONFIG_DIR / "push_notify.json"
+# 跨进程节流状态（`scripts/auto_scheduled.ps1` 每个彩种起一个进程，
+#   进程内的 `_LAST_SEND_TS` 在进程边界会被重置 ⇒ 必须落盘共享）
+PACE_PATH = CONFIG_DIR / ".push_pace.json"
 
 PROVIDER_OFF = "off"
 PROVIDER_WECOM = "wecom"
@@ -172,12 +181,13 @@ def _quota_ok(cfg: Dict[str, Any]) -> bool:
     return int(stats.get("今日已推", 0) or 0) < limit
 
 
-def _mark_pushed(cfg: Dict[str, Any], ok: bool, detail: str) -> None:
+def _mark_pushed(cfg: Dict[str, Any], ok: bool, detail: str, count: int = 1) -> None:
+    """记一次推送。`count` = 本次实际发出的**消息条数**（一个彩种现在 4~7 条）。"""
     stats = cfg.get("stats") or {}
     if stats.get("日期") != _today_str():
         stats = {"日期": _today_str(), "今日已推": 0}
     if ok:
-        stats["今日已推"] = int(stats.get("今日已推", 0) or 0) + 1
+        stats["今日已推"] = int(stats.get("今日已推", 0) or 0) + max(1, int(count or 1))
     stats["最近推送"] = {
         "时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "结果": "成功" if ok else "失败",
@@ -217,9 +227,46 @@ def _pace(cfg: Dict[str, Any]) -> None:
 
 
 def _reset_pace() -> None:
-    """仅供测试：清空节流时间戳。"""
+    """仅供测试：清空节流时间戳（进程内 + 跨进程状态文件）。"""
     global _LAST_SEND_TS
     _LAST_SEND_TS = 0.0
+    try:
+        PACE_PATH.unlink()
+    except OSError:
+        pass
+
+
+def _pace_global(cfg: Dict[str, Any]) -> None:
+    """**跨进程**最小发送间隔（默认同 `推送间隔秒`）。
+
+    为什么必须有：`scripts/auto_scheduled.ps1` 对每个彩种单独起一个
+    `python cli.py auto`，进程边界会把 `_LAST_SEND_TS` 重置 —— 6 个彩种连着跑，
+    等于 6 次"本进程第一次发送"，进程内节流全部失效，企微会按 20 条/分钟限速丢消息。
+
+    做法：`config/.push_pace.json` 存上次发送的 wall-clock 时间。**先占位再睡**：
+    写入 `max(now, last+interval)` 后按差值 sleep，这样并发方读到的是"已被预约"的
+    时间点，不会两个进程一起发。异常一律**放行**——限流绝不能阻断推送。
+    """
+    try:
+        interval = float(cfg.get("推送间隔秒", DEFAULTS["推送间隔秒"]) or 0)
+    except (TypeError, ValueError):
+        interval = DEFAULTS["推送间隔秒"]
+    if interval <= 0:
+        return
+    try:
+        last = 0.0
+        try:
+            raw = json.loads(PACE_PATH.read_text(encoding="utf-8"))
+            last = float((raw or {}).get("ts") or 0)
+        except (OSError, ValueError, TypeError, AttributeError):
+            last = 0.0
+        now = time.time()
+        wait = last + interval - now
+        _atomic_write_json(PACE_PATH, {"ts": max(now, last + interval)})
+        if wait > 0:
+            time.sleep(min(wait, 60.0))      # 上限防系统时钟跳变导致长睡
+    except Exception:  # pragma: no cover - 节流本身绝不阻断发送
+        pass
 
 
 # ------------------------------------------------------------
@@ -271,6 +318,7 @@ def send(title: str, content: str, cfg: Optional[Dict[str, Any]] = None) -> Dict
     try:
         if provider == PROVIDER_WECOM:
             _pace(cfg)
+            _pace_global(cfg)
             body = json.dumps({
                 "msgtype": "markdown",
                 "markdown": {"content": _wecom_render(title, content)},
@@ -332,6 +380,7 @@ def send_image(png: bytes, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, An
                 "detail": f"图片过大 {len(png)} 字节（上限 {WECOM_MAX_IMAGE_BYTES}）"}
     try:
         _pace(cfg)
+        _pace_global(cfg)
         body = json.dumps({
             "msgtype": "image",
             "image": {
@@ -391,13 +440,25 @@ def format_ticket_line(t: Dict[str, Any]) -> str:
     return line or "?"
 
 
+def _zone_sort_key(k: Any) -> int:
+    """`第2位` → 2。数字型/七星彩的分区键按**数值**排序（字符串排序会 10 位排在 2 位前）。"""
+    s = str(k)
+    digits = "".join(ch for ch in s if ch.isdigit())
+    try:
+        return int(digits) if digits else 99
+    except ValueError:
+        return 99
+
+
 def _fmt_draw_numbers(draw: Optional[Dict[str, Any]]) -> str:
     if not draw or not draw.get("期号"):
         return ""
     issue = draw.get("期号")
     day = draw.get("日期") or ""
-    nums = draw.get("红球")
-    if nums is not None:  # 乐透型
+    # ★ 同 `_latest_draw`：数字型的 红球 是 []，`[] is not None` 为真会让
+    #   数字型走进乐透型分支，拼出一个空号码行。必须用真值判断。
+    nums = draw.get("红球") or []
+    if nums:  # 乐透型
         blue = draw.get("蓝球") or []
         line = " ".join(f"{int(n):02d}" for n in nums)
         if blue:
@@ -405,7 +466,7 @@ def _fmt_draw_numbers(draw: Optional[Dict[str, Any]]) -> str:
         return f"最新开奖 {issue}（{day}）：{line}"
     zones = draw.get("号码") or {}
     digits = []
-    for k in sorted(zones.keys(), key=lambda s: str(s)):
+    for k in sorted(zones.keys(), key=_zone_sort_key):
         v = zones[k]
         if isinstance(v, list) and v:
             digits.append(str(v[0]))
@@ -448,6 +509,64 @@ def _grade_of(r: Dict[str, Any]) -> str:
     return str(r.get("中奖等级") or r.get("中奖玩法") or "")
 
 
+def _record_zones(r: Dict[str, Any], which: str) -> Dict[str, Any]:
+    """历史记录 → **结构化号码**（乐透 红/蓝球，数字型 各位置）。
+
+    ★ 卡片图要回答「具体哪几个球中了」：球珠靠分区信息定颜色、靠逐位比对定
+      实心/灰环，所以这里必须给结构化 dict，不能只给 `num` 那一串文本。
+    """
+    if which == "pred":
+        z, keys = r.get("预测号码"), ("预测红球", "预测蓝球")
+    else:
+        z, keys = r.get("实际号码"), ("实际红球", "实际蓝球")
+    if isinstance(z, dict) and z:
+        return {k: v for k, v in z.items() if v}
+    out: Dict[str, Any] = {}
+    for k in keys:
+        v = r.get(k)
+        if v:
+            out[k.replace("预测", "").replace("实际", "")] = v
+    return out
+
+
+def _hit_record(r: Dict[str, Any], lottery: str) -> Dict[str, Any]:
+    """一条中奖历史 → 推送卡片结构（**保留原有键**，另加卡片所需字段）。
+
+    保留 num/match/prize/issue/valid/type 是为了向后兼容：文本推送与行式回退仍在用。
+    """
+    grade = _grade_of(r)
+    try:
+        from data import prize_table as _pt
+        pay = _pt.prize_payout(lottery, grade, r.get("期号"))
+    except Exception:              # 奖金查不到不影响推送（卡片少一行药丸而已）
+        pay = {}
+    return {
+        "num": _fmt_feedback_ticket(r),
+        "match": _fmt_match(r),
+        "prize": grade,
+        "issue": r.get("期号") or r.get("目标期号"),
+        "valid": bool(r.get("valid_prediction", True)),
+        "type": r.get("记录类型", "预测" if r.get("valid_prediction", True) else "训练"),
+        # ---- 卡片字段 ----
+        "lottery": lottery,
+        "valid_prediction": bool(r.get("valid_prediction", True)),
+        "预测号码": _record_zones(r, "pred"),
+        "实际号码": _record_zones(r, "act"),
+        "预测红球": r.get("预测红球"), "预测蓝球": r.get("预测蓝球"),
+        "实际红球": r.get("实际红球"), "实际蓝球": r.get("实际蓝球"),
+        "红球命中": r.get("红球命中"), "蓝球命中": r.get("蓝球命中"),
+        "分区命中": r.get("分区命中"),
+        "总命中": r.get("总命中"), "总选择": r.get("总选择"),
+        "策略": r.get("策略"), "置信度": r.get("置信度"),
+        "预测日期": r.get("预测日期"), "开奖日期": r.get("开奖日期"),
+        "批次内序号": r.get("批次内序号"), "批次规模": r.get("批次规模"),
+        "机制γ": r.get("机制γ"), "机制倾斜": r.get("机制倾斜"),
+        "来源": r.get("来源"),
+        "奖金": ({k: pay.get(k) for k in ("金额", "浮动", "来源", "文本")}
+                 if isinstance(pay, dict) else {}),
+    }
+
+
 def _size_note(lottery: str, n: int) -> str:
     """本次出号数量说明：滑轨模式 + 当前生效注数（读不到就返回空串，绝不影响推送）。"""
     if n <= 0:
@@ -463,6 +582,14 @@ def _size_note(lottery: str, n: int) -> str:
         return note
     except Exception:
         return ""
+
+
+# 诚实条件的**单一真源**（文本推送与分隔头共用，避免出现两套口径）。
+# P5：原句「单注中奖概率恒定」是无前提的断言，只在「开奖对全部组合等可能」下成立
+# ——把前提写出来，并指明由谁检验。
+FOOTER_CONDITION = ("仅供研究记录；在「开奖对全部组合等可能」的前提下单注中奖概率恒定、"
+                    "整体期望为负，请勿用于投注决策。该前提由四轨测量独立检验"
+                    "（见 `python cli.py gap`）；未检出偏离 ≠ 证明开奖公平。")
 
 
 def build_pipeline_message(
@@ -532,11 +659,7 @@ def build_pipeline_message(
         sections.insert(0, head)
     title = f"彩票助手｜{lottery}"
     body = "\n\n".join(sections)
-    # P5：footer 改**条件式**。原句「单注中奖概率恒定」是无前提的断言，
-    # 它只在「开奖对全部组合等可能」下成立——把前提写出来，并指明由谁检验。
-    body += ("\n\n> 仅供研究记录；在「开奖对全部组合等可能」的前提下单注中奖概率恒定、"
-             "整体期望为负，请勿用于投注决策。该前提由四轨测量独立检验"
-             "（见 `python cli.py gap`）；未检出偏离 ≠ 证明开奖公平。")
+    body += "\n\n> " + FOOTER_CONDITION
     _tilt = _mechanism_footer_line(lottery)
     if _tilt:
         body += f"\n> {_tilt}"
@@ -649,6 +772,211 @@ def _render_numbers_png(lottery: str, predictions: List[Dict[str, Any]], subtitl
     raise RuntimeError("; ".join(errors)[:200])
 
 
+# ------------------------------------------------------------
+# 分隔头 + 「一组图」编排小件（2026-10-24 改版）
+# ------------------------------------------------------------
+DIVIDER_CHAR = "━"
+PUSH_MAX_MSGS = 12        # 单次软预算：超了只告警，**绝不砍内容**（注数必须全画）
+
+
+def _divider_title(lottery: str) -> str:
+    """彩种分隔头：`━━━ 双色球 ━━━`——「以彩票分类做文字间隔」的载体。"""
+    bar = DIVIDER_CHAR * 3
+    return f"{bar} {lottery} {bar}"
+
+
+def _grade_text(r: Dict[str, Any]) -> str:
+    """中奖记录的等级文本：乐透型在 `prize`，数字型可能落在 `grade`/`中奖玩法`。"""
+    return str(r.get("prize") or r.get("grade") or _grade_of(r) or "未中")
+
+
+def _grade_tally(hit_records: Sequence[Dict[str, Any]], top: int = 4) -> str:
+    """`六等奖×2、五等奖×1`——按出现次数降序，多的排前面。"""
+    cnt = Counter(_grade_text(r) for r in (hit_records or []))
+    if not cnt:
+        return ""
+    items = sorted(cnt.items(), key=lambda kv: (-kv[1], kv[0]))
+    s = "、".join(f"{k}×{v}" for k, v in items[:top])
+    return s + ("…" if len(items) > top else "")
+
+
+def build_divider_message(
+    lottery: str,
+    *,
+    predictions: Optional[List[Dict[str, Any]]] = None,
+    eval_result: Optional[Dict[str, Any]] = None,
+    hit_summary: str = "",
+    hit_records: Optional[List[Dict[str, Any]]] = None,
+    draw_numbers: Optional[Dict[str, Any]] = None,
+    pred_info: str = "",
+    size_note: str = "",
+    board_url: str = "",
+    n_draw: int = 0,
+    n_num_pages: int = 0,
+    n_win_pages: int = 0,
+) -> tuple:
+    """组装彩种**分隔头**——该彩种本次唯一的一条文本。无内容返回 (None, None)。
+
+    原先的「出号短文字」「结算短文字」两条取消，职责全部并入这里：
+    期号 / 张数清单 / 出号注数 / 结算摘要 / 开奖号码 / 看板链接 / 诚实条件。
+    """
+    predictions = predictions or []
+    hit_records = hit_records or []
+    new_cnt = int((eval_result or {}).get("new_feedback_count", 0) or 0)
+
+    segs = []
+    if n_draw:
+        segs.append(f"开奖结果 {n_draw} 张")
+    if n_num_pages:
+        segs.append(f"本期出号 {n_num_pages} 张")
+    if n_win_pages:
+        segs.append(f"开奖结算 {n_win_pages} 张")
+    if not segs:
+        return None, None
+
+    parts: List[str] = []
+    head = ""
+    try:
+        meta = _pending_meta_lines(lottery, predictions)
+        head = meta[0] if meta else ""
+    except Exception:                    # 元信息失败绝不影响推送
+        head = ""
+    head = head or pred_info
+    if head:
+        parts.append(f"**{head}**")
+
+    total = int(n_draw) + int(n_num_pages) + int(n_win_pages)
+    parts.append(f"本次 {total} 张图：{' → '.join(segs)}")
+
+    bullets: List[str] = []
+    if predictions:
+        s = f"· 本期出号 **{len(predictions)} 注**"
+        if size_note:
+            s += f"（{size_note}）"
+        bullets.append(s)
+    if new_cnt > 0 or hit_records:
+        tally = _grade_tally(hit_records)
+        s = f"· 本期结算 **{len(hit_records) or new_cnt} 条**"
+        if tally:
+            s += f"：{tally}"
+        elif hit_summary:
+            s += f"：{hit_summary}"
+        bullets.append(s)
+    draw_line = _fmt_draw_numbers(draw_numbers)
+    if draw_line:
+        bullets.append(f"· {draw_line}")
+    if bullets:
+        parts.append("\n".join(bullets))
+
+    if board_url:
+        parts.append(f"[打开看板 · 调出号数量 / 看全部记录]({board_url})")
+
+    parts.append(f"> {FOOTER_CONDITION}")
+    tilt = _mechanism_footer_line(lottery)
+    if tilt:                             # ★ 以前这行只存在于"图片失败回退"的文本里，
+        parts.append(f"> {tilt}")        #   正常推送根本发不出去；现在并入分隔头。
+    return _divider_title(lottery), "\n\n".join(parts)
+
+
+def _draw_flat_numbers(draw: Optional[Dict[str, Any]]) -> List[int]:
+    """开奖 dict → 扁平号码列表（只用于判断"有没有号码"，不改顺序语义）。"""
+    if not draw:
+        return []
+    reds = draw.get("红球") or []
+    if reds:
+        return [int(n) for n in reds] + [int(n) for n in (draw.get("蓝球") or [])]
+    out: List[int] = []
+    zones = draw.get("号码") or {}
+    for k in sorted(zones.keys(), key=_zone_sort_key):
+        v = zones[k]
+        if isinstance(v, list):
+            for n in v:
+                try:
+                    out.append(int(n))
+                except (TypeError, ValueError):
+                    pass
+    return out
+
+
+def _draw_has_numbers(draw: Optional[Dict[str, Any]]) -> bool:
+    return bool(_draw_flat_numbers(draw))
+
+
+_WEEK_CN = "一二三四五六日"
+
+
+def _draw_title(lottery: str, draw: Optional[Dict[str, Any]]) -> str:
+    """开奖日 == 今天才写「今晚开奖」，否则写「开奖结果」（不夸大）。"""
+    day = str((draw or {}).get("日期") or "")[:10].replace("/", "-")
+    when = "今晚开奖" if day and day == _today_str() else "开奖结果"
+    return f"{lottery} · {when}"
+
+
+def _draw_subtitle(draw: Optional[Dict[str, Any]]) -> str:
+    draw = draw or {}
+    issue = draw.get("期号")
+    day = str(draw.get("日期") or "")[:10]
+    wk = ""
+    try:
+        d = datetime.strptime(day.replace("/", "-"), "%Y-%m-%d")
+        wk = f"（周{_WEEK_CN[d.weekday()]}）"
+    except (ValueError, TypeError):
+        wk = ""
+    parts = []
+    if issue:
+        parts.append(f"第 {issue} 期")
+    if day:
+        parts.append(f"{day}{wk}")
+    return " · ".join(parts)
+
+
+def _draw_notes(
+    predictions: Optional[List[Dict[str, Any]]],
+    hit_records: Optional[List[Dict[str, Any]]],
+    new_cnt: int,
+    *,
+    pred_info: str = "",
+    size_note: str = "",
+) -> List[str]:
+    """开奖图「本期摘要」行：把出号/结算口径写在同一张图上，避免只看图就看不懂。"""
+    notes: List[str] = []
+    if predictions:
+        s = f"本期出号 {len(predictions)} 注"
+        if pred_info:
+            s += f"（{pred_info}）"
+        notes.append(s)
+        if size_note:
+            notes.append(size_note)
+    if new_cnt > 0 or hit_records:
+        tally = _grade_tally(hit_records or [])
+        s = f"本期结算 {len(hit_records or []) or new_cnt} 条"
+        if tally:
+            s += f"：{tally}"
+        notes.append(s)
+    return notes
+
+
+def _render_set(renders: Sequence[Callable[[], bytes]], tag: str) -> List[bytes]:
+    """把一组渲染函数**先全部渲染完**再返回 PNG 列表。
+
+    任一页失败 → 返回 `[]`：整组降级为一条文本，**不半页发送**
+    （否则用户看到"第 1/4 页"，剩下 3 页消失且没有任何说明）。
+    """
+    out: List[bytes] = []
+    for i, fn in enumerate(renders, 1):
+        try:
+            out.append(fn())
+        except Exception as e:
+            logger.warning(f"{tag}: 第 {i}/{len(renders)} 张渲染失败（{e}）")
+            return []
+    return out
+
+
+def _send_pngs(pngs: Sequence[bytes], cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """逐张发送已渲染好的 PNG（发送失败只记该张，不抛出）。"""
+    return [send_image(png, cfg) for png in (pngs or [])]
+
+
 def push_lottery_images(
     lottery: str,
     *,
@@ -662,14 +990,17 @@ def push_lottery_images(
     board_url: str = "",
     cfg: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
-    """把一个彩种本次结果拆成多条「一行文字 + 图片」发出。**永不抛出**。
+    """把一个彩种本次结果发成「一条分隔头 + 一组图」。**永不抛出**。
 
-    返回每条发送的结果列表（未启用 / 无内容 → 空列表）：
-      ① 出号短文字 → ② 号码图
-      ③ 结算短文字 → ④ 中奖图   （仅当本次有新结算且命中记录非空）
+    消息序列（每个彩种一组）：
+      ① 分隔头（唯一文本）：`━━━ 双色球 ━━━` + 期号 / 张数 / 注数 / 结算 / 开奖 / 链接
+      ② 今晚开奖图  —— 有开奖号码时 1 张
+      ③ 本期出号图  —— **全量**，`PAGE_TICKETS` 注/页（双色球 200 注 = 4 张）
+      ④ 开奖结算图  —— 仅本次有新结算且命中记录非空，`PAGE_WINS` 行/页
 
-    号码**全部展示**（图片不受 4096 字节限制）；`图片推送=false` 或渲染失败时
-    自动降级成 markdown 文本（受 4096 字节限制，最多展示 FALLBACK_MAX_SHOW 注）。
+    `图片推送=false` 或非企微渠道 → **只发一条** markdown 文本
+    （不许"逐图失败各回退一次"，否则 pushplus 会收到 4~5 条重复长文）。
+    返回每条发送的结果列表；未启用 / 无内容 → 空列表。
     """
     try:
         cfg = cfg if cfg is not None else sanitize(load_config())
@@ -685,59 +1016,123 @@ def push_lottery_images(
         want_settle = new_cnt > 0 and bool(cfg.get("推结算", True))
         if not want_nums and not want_settle:
             return []
-        use_image = bool(cfg.get("图片推送", True))
-        if use_image:
-            from data import push_image as _pimg   # 延迟导入：matplotlib 较重
+
+        # ★ 只有企微群机器人吃图片。其它渠道走图片只会"每张失败→回退一次"，
+        #   于是 pushplus/serverchan 收到 4~5 条重复长文本 —— 一律走单条文本。
+        use_image = bool(cfg.get("图片推送", True)) and cfg.get("provider") == PROVIDER_WECOM
+
+        if not use_image:
+            title, body = build_pipeline_message(
+                lottery,
+                predictions=predictions if want_nums else None,
+                eval_result=eval_result if want_settle else None,
+                hit_summary=hit_summary, hit_records=hit_records,
+                draw_numbers=draw_numbers, pred_info=pred_info,
+                size_note=size_note, board_url=board_url,
+                max_show=FALLBACK_MAX_SHOW)
+            return [send(title, body, cfg)] if title else []
+
+        from data import push_image as _pimg   # 延迟导入：matplotlib 较重
+
+        num_pages = _pimg.paginate_tickets(predictions) if want_nums else []
+        win_pages = ([hit_records[i:i + _pimg.PAGE_WINS]
+                      for i in range(0, len(hit_records), _pimg.PAGE_WINS)]
+                     if (want_settle and hit_records) else [])
+
+        # ---- ① 先把图**全部渲染好**（失败只丢该组）----
+        # 为什么先渲染再发：分隔头要写「本次 N 张图」，渲完才知道真实张数；
+        # 先发头再渲染会出现"说 3 张、实际只来 1 张"的不一致。
+        draw_png = b""
+        if _draw_has_numbers(draw_numbers):
+            try:
+                draw_png = _pimg.render_draw_image(
+                    draw_numbers, lottery=lottery,
+                    title=_draw_title(lottery, draw_numbers),
+                    subtitle=_draw_subtitle(draw_numbers),
+                    notes=_draw_notes(predictions, hit_records, new_cnt,
+                                      pred_info=pred_info, size_note=size_note))
+            except Exception as e:
+                logger.warning(f"{lottery} 开奖图渲染失败（{e}），跳过该图")
+
+        num_pngs: List[bytes] = []
+        num_renders: List[Callable[[], bytes]] = []
+        if want_nums:
+            meta = _pending_meta_lines(lottery, predictions)
+            n = len(num_pages)
+            for i, page_groups in enumerate(num_pages, 1):
+                flat = [t for g in page_groups for t in g["tickets"]]
+                lo = sum(len(g["tickets"]) for p in num_pages[:i - 1] for g in p) + 1
+                hi = lo + len(flat) - 1
+                sub = f"共 {len(predictions)} 注 · 第 {i}/{n} 页（第 {lo}–{hi} 注）"
+                # ★ 循环变量必须用默认参数绑定：lambda 晚绑定会把每页都画成最后一页
+                num_renders.append(lambda f=flat, g=page_groups, s=sub, k=i: (
+                    _pimg.render_tickets_image(
+                        f, title=f"{lottery} · 本期出号", subtitle=s,
+                        meta_lines=(meta if k == 1 else ()), groups=g, page=(k, n))))
+            num_pngs = _render_set(num_renders, f"{lottery} 出号图")
+
+        win_pngs: List[bytes] = []
+        if win_pages:
+            n = len(win_pages)
+            sub = hit_summary or f"新增 {new_cnt} 条命中"
+            win_pngs = _render_set(
+                [lambda c=c, k=k: _pimg.render_wins_image(
+                    c, title=f"{lottery} · 开奖结算", subtitle=sub, page=(k, n))
+                 for k, c in enumerate(win_pages, 1)],
+                f"{lottery} 结算图")
 
         out: List[Dict[str, Any]] = []
 
-        # ① 本期出号：一行短文字 + 号码图（全部注数，不截断）
+        # ---- ② 分隔头（本彩种唯一的一条文本，张数按**实际**渲染结果写）----
+        title, body = build_divider_message(
+            lottery, predictions=predictions, eval_result=eval_result,
+            hit_summary=hit_summary, hit_records=hit_records,
+            draw_numbers=draw_numbers, pred_info=pred_info, size_note=size_note,
+            board_url=board_url, n_draw=1 if draw_png else 0,
+            n_num_pages=len(num_pngs), n_win_pages=len(win_pngs))
+        if title:
+            out.append(send(title, body, cfg))
+
+        # ---- ③ 今晚开奖 ----
+        if draw_png:
+            out.extend(_send_pngs([draw_png], cfg))
+
+        # ---- ④ 本期出号（全量 + 自动分页）----
         if want_nums:
-            head = [f"**{lottery} 本期出号** 共 {len(predictions)} 注"
-                    + (f"（{pred_info}）" if pred_info else "")]
-            _d = _fmt_draw_numbers(draw_numbers)
-            if _d:
-                head.append(_d)
-            if size_note:
-                head.append(f"> {size_note}")
-            if board_url:
-                head.append(f"[打开看板 · 调出号数量 / 看全部记录]({board_url})")
-            out.append(send(f"彩票助手｜{lottery}", "\n\n".join(head), cfg))
+            if not num_pngs:
+                # 票面图整组失败 → 行式图兜底（同样分页）
+                lines = [format_ticket_line(t) for t in predictions]
+                chunks = [lines[i:i + _pimg.PAGE_LINES]
+                          for i in range(0, len(lines), _pimg.PAGE_LINES)]
+                num_pngs = _render_set(
+                    [lambda c=c, k=k: _pimg.render_numbers_image(
+                        c, title=f"{lottery} · 本期出号",
+                        subtitle=f"共 {len(predictions)} 注", page=(k, len(chunks)))
+                     for k, c in enumerate(chunks, 1)],
+                    f"{lottery} 出号图(行式)")
+            if num_pngs:
+                out.extend(_send_pngs(num_pngs, cfg))
+            else:
+                t2, b2 = build_pipeline_message(
+                    lottery, predictions=predictions, draw_numbers=draw_numbers,
+                    pred_info=pred_info, size_note=size_note,
+                    board_url=board_url, max_show=FALLBACK_MAX_SHOW)
+                if t2:
+                    out.append(send(t2, b2, cfg))
 
-            if use_image:
-                subtitle = " · ".join(x for x in (pred_info, f"共 {len(predictions)} 注") if x)
-                out.append(_image_or_text(
-                    render=lambda: _render_numbers_png(lottery, predictions, subtitle),
-                    fallback=lambda: build_pipeline_message(
-                        lottery, predictions=predictions, draw_numbers=draw_numbers,
-                        pred_info=pred_info, size_note=size_note, board_url=board_url,
-                        max_show=FALLBACK_MAX_SHOW),
-                    cfg=cfg, tag=f"{lottery} 号码图"))
+        # ---- ⑤ 开奖结算 ----
+        if win_pngs:
+            out.extend(_send_pngs(win_pngs, cfg))
+        elif win_pages:
+            t2, b2 = build_pipeline_message(
+                lottery, eval_result=eval_result, hit_summary=hit_summary,
+                hit_records=hit_records, max_show=FALLBACK_MAX_SHOW)
+            if t2:
+                out.append(send(t2, b2, cfg))
 
-        # ② 开奖结算：一行短文字 + 中奖图
-        if want_settle:
-            head = [f"**{lottery} 开奖结算** {hit_summary or f'新增 {new_cnt} 条反馈'}"]
-            for r in hit_records[:SETTLE_TEXT_MAX]:
-                num = r.get("num") or _fmt_feedback_ticket(r)
-                grade = r.get("prize") or r.get("grade") or "未中"
-                m = r.get("match") or _fmt_match(r)
-                issue = r.get("issue")
-                head.append("- " + (f"{issue} 期 " if issue else "") + num
-                            + (f" {m}" if m else "") + f" → **{grade}**")
-            if len(hit_records) > SETTLE_TEXT_MAX:
-                head.append(f"- …共 {len(hit_records)} 条中奖记录")
-            out.append(send(f"彩票助手｜{lottery} 开奖结算", "\n".join(head), cfg))
-
-            if use_image and hit_records:
-                out.append(_image_or_text(
-                    render=lambda: _pimg.render_wins_image(
-                        hit_records, title=f"{lottery} 开奖结算",
-                        subtitle=hit_summary or f"新增 {new_cnt} 条命中"),
-                    fallback=lambda: build_pipeline_message(
-                        lottery, eval_result=eval_result, hit_summary=hit_summary,
-                        hit_records=hit_records, max_show=FALLBACK_MAX_SHOW),
-                    cfg=cfg, tag=f"{lottery} 中奖图"))
-
+        if len(out) > PUSH_MAX_MSGS:
+            logger.warning(f"{lottery} 单次推送 {len(out)} 条 > 软预算 {PUSH_MAX_MSGS}"
+                           "（不砍内容：注数必须全画；必要时调大「推送间隔秒」）")
         return out
     except Exception as e:  # pragma: no cover - 推送绝不影响主流水线
         logger.warning(f"图片推送流程异常 {lottery}: {e}")
@@ -788,7 +1183,8 @@ def push_pipeline_result(
             return None
         ok = any(r.get("ok") for r in results)
         detail = str(results[-1].get("detail", ""))
-        _mark_pushed(cfg, ok, detail)
+        # ★ 按**消息条数**计额度：改版后一个彩种 4~7 条，按调用次数计会严重低估
+        _mark_pushed(cfg, ok, detail, count=len(results))
         logger.info(f"微信推送 {lottery}: ok={ok} 共 {len(results)} 条 ({detail[:80]})")
         return {"ok": ok, "detail": detail, "sent": len(results), "results": results}
     except Exception as e:  # pragma: no cover - 推送绝不影响主流水线
@@ -960,8 +1356,12 @@ def _latest_draw(lottery: str) -> Dict[str, Any]:
     try:
         from data.loader import load_lottery
         rec = load_lottery(lottery).records[0]
-        if hasattr(rec, "红球") and rec.红球 is not None:
-            return {"期号": rec.期号, "红球": rec.红球, "蓝球": rec.蓝球,
+        # ★ 必须用**真值**判断而不是 `is not None`：数字型（排列3/排列5/福彩3D）
+        #   身上也有 `红球` 属性，但值是空列表 []，`[] is not None` 为真 ⇒
+        #   旧写法会把数字型当成乐透型，返回 红球=[] ⇒「最新开奖 xxx：」后面空白。
+        reds = getattr(rec, "红球", None) or []
+        if reds:
+            return {"期号": rec.期号, "红球": reds, "蓝球": getattr(rec, "蓝球", None) or [],
                     "日期": str(rec.开奖日期) if rec.开奖日期 else ""}
         zones = getattr(rec, "zone_numbers", {}) or {}
         return {"期号": rec.期号, "号码": zones,
@@ -991,14 +1391,9 @@ def digest_payload(lottery: str) -> Optional[Dict[str, Any]]:
     hist = [r for r in fb.load_feedback_history(lottery)
             if fb._domain_of(r) == fb.DOMAIN_PROD][-200:]
     wins = [r for r in hist if _grade_of(r) and _grade_of(r) != "未中"]
-    hit_records = [{
-        "num": _fmt_feedback_ticket(r),
-        "match": _fmt_match(r),
-        "prize": _grade_of(r),
-        "issue": r.get("期号") or r.get("目标期号"),
-        "valid": bool(r.get("valid_prediction", True)),
-        "type": r.get("记录类型", "预测" if r.get("valid_prediction", True) else "训练"),
-    } for r in wins[-12:]] if wins else []
+    # ★ 2026-10-24：中奖图改成「逐注卡片」，卡片需要**结构化号码 + 奖金 + 策略**
+    #   才能画出「哪几个球中了」，故统一走 _hit_record 组装（老键全部保留）。
+    hit_records = [_hit_record(r, lottery) for r in wins[-12:]] if wins else []
 
     if not predictions and not wins:
         return None

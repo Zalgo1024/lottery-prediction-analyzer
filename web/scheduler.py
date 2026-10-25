@@ -17,7 +17,7 @@ import os
 import threading
 from datetime import datetime, timedelta
 
-from config import LOTTERY_CONFIG, BASE_DIR, resolve_groups
+from config import LOTTERY_CONFIG, BASE_DIR
 from data.holiday import is_draw_day
 from logs.logger import setup_logger
 
@@ -239,7 +239,12 @@ class AutoScheduler:
         try:
             from web.utils import start_auto_pipeline
             from web.task_store import task_store
-            tid = start_auto_pipeline(lottery, {"mode": "fresh", "groups": resolve_groups(lottery), "skip_predict": False})
+            # ★ 2026-10-24：不在此处固化 `resolve_groups(lottery)`。
+            #   原写法在**调度时刻**求值并写成显式 groups，而实际出号可能晚几秒到
+            #   几分钟；期间动态策略/用户滑轨改了注数，出号仍用旧值
+            #   （实查：日志 `显式出号注数 84 ≠ 看板滑轨 86/88` 连报两条）。
+            #   传 None ⇒ 出号时刻由 `resolve_groups()` 读最新生效值。
+            tid = start_auto_pipeline(lottery, {"mode": "fresh", "skip_predict": False})
             # 自动触发(respect_lock)时持有锁直到流水线线程完成，确保与计划任务串行；
             # 手动触发不等待，避免阻塞 API 调用。
             if respect_lock:

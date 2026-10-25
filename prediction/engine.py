@@ -15,6 +15,7 @@ import math
 import pickle
 import random
 import zlib
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -191,6 +192,101 @@ def _ps_zone_key(ps) -> tuple:
     """PredictSet 的分区指纹（用于「完全重复」判定，与号码顺序无关）。"""
     return tuple(sorted((str(k), tuple(int(x) for x in (v or [])))
                         for k, v in (getattr(ps, "zones", None) or {}).items()))
+
+
+def _ensure_zone_coverage(predicted_sets, schema, *, lottery_name: str = ""):
+    """在不改变注数的前提下，把「单号分区」的合法取值补齐覆盖。返回 (列表, KPI)。
+
+    ★ 为什么需要这道闸（2026-10-23 实锤）：
+      数字型每一位只有 10 个取值（七星彩特选号 15 个），但出号是**按位置独立加权采样**，
+      没有任何覆盖约束。44 注在 15 个取值上做独立采样，缺某个值的概率约 `(14/15)^44 ≈ 4.8%`；
+      实测 10-23 期七星彩 44 注的第 7 位恰好覆盖了 14 个值、**唯独漏掉开奖号 4**
+      ⇒ 该期 44 注全空。回溯 14 个批次，覆盖缺口共造成 3 个「整期全空」批次，
+      补全后可消除其中 2 个（含 10-23）。
+
+    ★ 诚实边界（必读）：
+      - 本函数**不改变注数**，也**不改变任何一注的单注中奖概率**（号码替换是等概率的
+        合法取值，不是"更准"）；整体 EV 仍为负。
+      - 它唯一改变的是「K 注的达标事件之间的相关性」：把重复取值摊开 ⇒ 并集概率上升。
+        这与 ev/ 侧的既有结论一致——选号唯一可动的量就是这个去相关，而不是单注概率。
+      - 只看本批次票集内部，**不读取任何开奖信息**，因此不存在事后拟合。
+
+    ★ 适用条件：所有分区 choose == 1（数字型 3D/排列3/排列5/七星彩）。
+      红/蓝型（双色球/大乐透，choose=6/5）语义不同，直接跳过，避免改变既有出号。
+
+    KPI：{"启用": bool, "补齐": {分区名: 补齐个数}, "缺口": {...}, "注数": n}
+      "缺口" = **补全后**仍未覆盖到的取值个数。注数少于分区取值数时必然 >0
+      （例如 3D 只有 5 注、每位 10 个取值 ⇒ 最多覆盖 5/10），属正常，不是失败。
+    """
+    zones_def = list(getattr(schema, "zones", None) or [])
+    out = list(predicted_sets)
+    empty = {"启用": False, "补齐": {}, "缺口": {}, "注数": len(out)}
+    if not zones_def or not out:
+        return out, empty
+    if any(int(getattr(z, "choose", 1) or 1) != 1 for z in zones_def):
+        return out, empty          # 红/蓝型：不动
+
+    # 分区名 -> 每注在该分区的取值（本批次的「表格视图」）
+    names = [str(z.name) for z in zones_def]
+    table: List[List[int]] = []
+    for ps in out:
+        row = []
+        for nm in names:
+            v = (getattr(ps, "zones", None) or {}).get(nm) or []
+            if len(v) != 1:
+                return out, empty   # 出现复式/非法形状 ⇒ 整体放弃，宁可不改
+            row.append(int(v[0]))
+        table.append(row)
+
+    # ★ 用**多重集**而不是 set：入参万一已含重复注（历史批次里出现过），set 会丢掉
+    #   重数，替换时把另一个同键票的占位一起抹掉，反而「改出」一注重复票。
+    keys: Counter = Counter(_ps_zone_key(ps) for ps in out)
+    filled: Dict[str, int] = {}
+    gaps: Dict[str, int] = {}
+
+    def _key_of(row: List[int]) -> tuple:
+        return tuple(sorted((nm, (row[k],)) for k, nm in enumerate(names)))
+
+    for i, z in enumerate(zones_def):
+        lo, hi = int(z.min), int(z.max)
+        full = list(range(lo, hi + 1))
+        counts = {v: 0 for v in full}
+        for row in table:
+            if row[i] in counts:
+                counts[row[i]] += 1
+        missing = [v for v in full if counts[v] == 0]
+        gaps[names[i]] = len(missing)
+        if not missing:
+            continue
+
+        # 缺几个补几个：每次挑「当前出现次数最多」的位让出来，减少集中度
+        for v in missing:
+            order = sorted(range(len(table)), key=lambda j: -counts.get(table[j][i], 0))
+            for j in order:
+                old = table[j][i]
+                if old == v or counts.get(old, 0) < 2:
+                    continue        # 替换后原取值不能消失（否则拆东墙补西墙）
+                trial = table[j][:i] + [v] + table[j][i + 1:]
+                tk = _key_of(trial)
+                if keys.get(tk, 0) > 0:
+                    continue        # 会与其他注完全重复
+                old_key = _key_of(table[j])
+                keys[old_key] -= 1
+                if keys[old_key] <= 0:
+                    del keys[old_key]
+                keys[tk] += 1
+                counts[old] -= 1
+                counts[v] += 1
+                table[j] = trial
+                # 只改分区值，strategy / confidence 归因字段保持不动
+                getattr(out[j], "zones", {})[names[i]] = [v]
+                filled[names[i]] = filled.get(names[i], 0) + 1
+                break
+
+    residue = {k: gaps[k] - filled.get(k, 0) for k in gaps if gaps[k]}
+    if filled:
+        logger.info(f"{lottery_name}: 覆盖补全 补齐={filled} 补全后缺口={residue}")
+    return out, {"启用": True, "补齐": filled, "缺口": residue, "注数": len(out)}
 
 
 def _pad_to_groups(predicted_sets, groups, schema, *, lottery_name: str,
@@ -1162,6 +1258,13 @@ def _predict_generic(lottery_name: str, data: LotteryData, cfg: dict, schema, gr
     )
     predicted_sets.sort(key=lambda x: x.confidence, reverse=True)
 
+    # ★ 2026-10-24：覆盖补全（数字型）。出号是按位置独立加权采样，没有覆盖约束 ⇒
+    #   44 注七星彩的第 7 位（15 个取值）会以 ~4.8% 的概率漏掉某个值，一旦漏的正是
+    #   开奖号，整批全空。本步在不改注数、不改单注概率的前提下把重复取值摊开。
+    predicted_sets, _cover_kpi = _ensure_zone_coverage(
+        predicted_sets, schema, lottery_name=lottery_name)
+    predicted_sets.sort(key=lambda x: x.confidence, reverse=True)
+
     # 目标期号与预测日期统一口径（同源推算，杜绝 (26103, 9/8) 式错对）
     from data.feedback import predict_target
     target_issue, target_day = predict_target(lottery_name)
@@ -1186,6 +1289,8 @@ def _predict_generic(lottery_name: str, data: LotteryData, cfg: dict, schema, gr
         result["剪枝统计"] = _prune_kpi
     if any(int((_pad_kpi or {}).get(k) or 0) for k in ("回填剪枝票", "随机补齐", "截断")):
         result["补齐统计"] = _pad_kpi
+    if (_cover_kpi or {}).get("补齐"):
+        result["覆盖补全"] = _cover_kpi
     if record_pending:
         try:
             record_pending_prediction(lottery_name, result)
@@ -1298,6 +1403,21 @@ def _stable_seed(lottery_name: str, issue: Any) -> int:
     return zlib.crc32(f"{lottery_name}|{issue}".encode("utf-8")) & 0xFFFFFFFF
 
 
+def _lowcrowd_unavailable_reason(lottery_name: str) -> str:
+    """拥挤度代理不可用时，给出准确的拒绝原因。
+
+    ★ 必须区分「建模了没通过 Go 门槛」（大乐透）与「从未建模」（七星彩等），
+       不许把前者说成后者 —— 前者有证据可查，后者只是「还没做」。
+    """
+    from ev import popularity_proxy as pp
+    ev = pp.go_evidence(lottery_name)
+    if ev.get("applicable"):
+        return (f"{lottery_name} 拥挤度代理已建模但未达 Go 门槛"
+                f"（样本 {ev.get('n', '未知')} 期，时序 CV {ev.get('cv_better_folds', '未知')}/5 折优于零模型）"
+                f"→ 不出号，不静默降级")
+    return f"{lottery_name} 拥挤度代理从未建模 → 不出号，不静默降级"
+
+
 def _predict_lowcrowd(lottery_name: str, groups: int, schema, cfg: dict, data,
                       freqs: dict, missing: dict, historical_hit_rate: float,
                       record_pending: bool = True) -> Dict[str, Any]:
@@ -1343,7 +1463,7 @@ def _predict_lowcrowd(lottery_name: str, groups: int, schema, cfg: dict, data,
             # 顶层「策略」：台账域靠它推导（写入 pending 前就成立，不用回退首注票面）
             "策略": LOWCROWD_STRATEGY,
             "拒绝": True, "号码组数": 0, "预测号码": [],
-            "原因": f"{lottery_name} 拥挤度代理不可用（首版仅双色球）→ 不出号，不静默降级",
+            "原因": _lowcrowd_unavailable_reason(lottery_name),
             "低拥挤": {"循环性声明": pp.CROWD_PROXY_CAVEAT},
         }
 
@@ -1428,7 +1548,7 @@ def maybe_run_lowcrowd_parallel_batch(lottery_name: str, *,
       · 不参与权重学习 / 命中率安全阀 / 动态注数滑轨（策略名 + 台账域双保险）；
       · 注数固定 `config/lowcrowd.json` 的 200，**不跟看板滑轨** ——
         与回测口径（K=200）可比，跟滑轨会让 K 逐期漂移、台账序列失去可比性；
-      · 只对拥挤度代理可用的彩种（首版双色球）；其它彩种显式跳过，不静默出号；
+      · 只对拥挤度代理达 Go 门槛的彩种（当前仅双色球；大乐透虽建模但未达门槛，同属跳过）；其它彩种显式跳过，不静默出号；
       · 任何异常一律吞掉并返回状态 —— 绝不阻塞、不回滚生产流程。
 
     幂等：同一 (目标期号, 研究域) 已有且注数一致就跳过。三条触发路径
@@ -1443,7 +1563,14 @@ def maybe_run_lowcrowd_parallel_batch(lottery_name: str, *,
         if not spec.get("启用"):
             return {"状态": "未启用"}
         if not pp.go_or_none(lottery_name):
-            return {"状态": "不支持彩种", "原因": "拥挤度代理仅双色球可用"}
+            # ★ 说清是「建模了没通过」还是「没建模」：大乐透属前者，别写成后者。
+            ev = pp.go_evidence(lottery_name)
+            why = ("拥挤度代理目前仅双色球可用；"
+                   f"{lottery_name} 已建模但未达 Go 门槛"
+                   f"（样本 {ev.get('n', '未知')} 期，CV {ev.get('cv_better_folds', '未知')}/5 折）"
+                   if ev.get("applicable") else
+                   f"拥挤度代理目前仅双色球可用；{lottery_name} 从未建模")
+            return {"状态": "不支持彩种", "原因": why}
 
         n = int(spec.get("注数") or 200)
         from data.feedback import (DOMAIN_RESEARCH, _domain_of, _next_issue,

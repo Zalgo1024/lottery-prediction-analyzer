@@ -85,7 +85,12 @@ def test_recent_hit_stats_all_lowcrowd_is_no_signal(monkeypatch):
     """只剩研究性入口 ⇒ 无信号（hit_rate=None），不许拿它去推动注数。"""
     monkeypatch.setattr(fb, "load_feedback_history",
                         lambda n, lookback=None: [_fb("低拥挤策略", win=True) for _ in range(5)])
-    assert fb._recent_hit_stats("双色球") == {"hit_n": 0, "hit_rate": None}
+    s = fb._recent_hit_stats("双色球")
+    # ★ 2026-10-24：返回体多了 `n_batches`（有效独立样本=批次数），故不再做整字典全等，
+    #   改为钉住语义字段；n_batches 必须同步归零，否则决策层会误判「样本足够」。
+    assert s["hit_n"] == 0
+    assert s["hit_rate"] is None
+    assert s.get("n_batches") == 0
 
 
 def test_last_compress_kpi_ignores_lowcrowd_batch(monkeypatch):

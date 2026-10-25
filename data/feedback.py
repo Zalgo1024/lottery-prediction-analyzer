@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import sys
+import tempfile
 import time
 from collections import defaultdict
 from datetime import date, datetime, timedelta
@@ -283,8 +284,43 @@ def pending_lock(lottery_name: str, timeout: float = 5.0):
 # 文件 IO 容错（并发读写/文件锁重试）
 # ============================================================
 
+def _quarantine_corrupt(path: Path, err: BaseException) -> Optional[Path]:
+    """把损坏的 JSON 文件**改名隔离**，返回隔离后的路径。
+
+    ★★ 为什么必须隔离而不是就地忽略（2026-10-24 事故）：
+    原实现遇到 `JSONDecodeError` 只打一条 warning 就返回 `default`（空列表）；
+    调用方 `append_feedback` 紧接着 `history.append(...)` 再 `save_*` 写回，
+    ⇒ **损坏数据被空列表覆盖，抢救窗口为 0**。排列3 的 2,354,307 字节历史
+    就是这样在头部被 NUL 空洞覆盖后，下一次结算就会永久清零的（本次靠
+    368,451 字节之后的残尾 + 9-11 备份才拼回 2069 条）。
+
+    改名（同目录、同卷）是原子的，且不破坏原字节，事后可人工/脚本抢救。
+    """
+    p = Path(path)
+    if _is_pytest() and _is_prod_feedback_path(p):
+        return None
+    try:
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        doomed = p.with_name(f"{p.name}.corrupt-{stamp}")
+        os.replace(p, doomed)
+        logger.error(
+            "反馈文件损坏已隔离: %s -> %s（原因: %s）。"
+            "★ 该文件不再被自动覆盖，请从残尾/备份抢救后再放回。",
+            p, doomed, type(err).__name__,
+        )
+        return doomed
+    except OSError as e:                     # 占用/权限：至少不要静默
+        logger.error("反馈文件损坏但隔离失败: %s -> %s（%s）",
+                     p, type(err).__name__, e)
+        return None
+
+
 def _safe_read_json(path: Path, default: Any = None, retries: int = 5) -> Any:
-    """带重试的 JSON 读取，缓解多进程并发导致的 Permission denied"""
+    """带重试的 JSON 读取，缓解多进程并发导致的 Permission denied
+
+    文件损坏时**隔离原文件**再返回 default（见 `_quarantine_corrupt`），
+    绝不把默认值原样留着让后续写入把它当成新内容覆盖掉。
+    """
     last_err = None
     for attempt in range(retries):
         try:
@@ -296,22 +332,27 @@ def _safe_read_json(path: Path, default: Any = None, retries: int = 5) -> Any:
             last_err = e
             time.sleep(0.03 * (attempt + 1))
         except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as e:
-            # 文件损坏（被中断写入/乱码）：不阻塞主流水线，按空值处理并告警。
-            # 损坏的 pending 会在下一次流水线运行时被正常预测覆盖重建。
-            logger.warning(f"反馈文件损坏（按空处理）: {path} -> {e}")
+            # 文件损坏（被中断写入/乱码）：隔离后按空值处理，不阻塞主流水线。
+            _quarantine_corrupt(Path(path), e)
             return default
     logger.warning(f"读取反馈文件失败（已重试 {retries} 次）: {path} -> {last_err}")
     raise last_err
 
 
 def _safe_write_json(path: Path, data: Any, retries: int = 5):
-    """带重试的 JSON 写入，缓解多进程并发导致的 Permission denied
+    """带重试的 **原子** JSON 写入，缓解多进程并发导致的 Permission denied
 
     ⚠️ 测试写保护：pytest 进程内禁止写入**生产**反馈目录（training/feedback/），
     否则 `predict()` 之类被测试直接调用的路径会用测试参数（如 groups=3）覆盖生产
     pending —— 2026-09-11 实锤：`tests/test_robust_tiers.py` 把排列5 26244 期
     pending 覆盖成 3 组。需要真实写入的测试请 monkeypatch `_pending_path` 等到
     tmp 目录（如 test_feedback_tiers 的 tmp_fb 夹具）。
+
+    ★★ 原子写（2026-10-24 事故后改）：原实现 `open(path, "w")` 会**立即把文件
+    截断为 0** 再流式 dump，进程中途被杀就留下半截文件；NTFS 上实测留下了
+    「`[]` + 368,449 个 NUL + 完整尾部」的空洞形态（排列3 历史）。
+    现改为 tmp + fsync + os.replace：读者只会看到旧的完整版本或新的完整版本，
+    不存在中间态。写入失败时目标是原文件，不会留半截。
     """
     if (_is_pytest() and _is_prod_feedback_path(path)
             and os.environ.get("WORKBUDDY_ALLOW_PROD_FB_WRITE") != "1"):
@@ -320,14 +361,27 @@ def _safe_write_json(path: Path, data: Any, retries: int = 5):
             "或显式设置 WORKBUDDY_ALLOW_PROD_FB_WRITE=1）", path,
         )
         return
+    p = Path(path)
     last_err = None
     for attempt in range(retries):
+        tmp = None
         try:
-            with open(path, "w", encoding="utf-8") as f:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=str(p.parent),
+                                       prefix=p.name + ".", suffix=".tmp")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2, default=str)
+                f.flush()
+                os.fsync(f.fileno())          # 数据落盘后再换名
+            os.replace(tmp, p)                # 同卷原子替换
             return
         except (PermissionError, OSError) as e:
             last_err = e
+            if tmp:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
             time.sleep(0.03 * (attempt + 1))
     logger.warning(f"写入反馈文件失败（已重试 {retries} 次）: {path} -> {last_err}")
     raise last_err
@@ -1406,7 +1460,14 @@ def _last_compress_kpi(lottery_name: str) -> Optional[Dict[str, Any]]:
 
 
 def _recent_hit_stats(lottery_name: str, lookback: int = 500) -> Dict[str, Any]:
-    """近期命中统计：(命中注数, 总注数, 命中率)。用于动态策略的偏离安全阀。"""
+    """近期命中统计：(命中注数, 总注数, 命中率, **独立批次数**)。
+
+    ★★ `n_batches` 是必返字段（2026-10-24）：动态策略的命中率安全阀原用
+    `hit_n`（注数）当样本量算 z，但同一批次内的票共享蓝球（双色球一批 ~88 注
+    只覆盖 12/16 个蓝球），中奖事件强相关 ⇒ 有效独立观测是**批次数**而不是注数。
+    实查 `lookback=500` 只覆盖 4 批，名义 z=-3.14 完全由噪声撑起。
+    调用方必须用 `n_batches` 判断样本是否足够（见 ticket_size.MIN_BATCHES_FOR_DEVIATION）。
+    """
     history = load_feedback_history(lottery_name)
     # 研究性入口不进命中率安全阀；★ 过滤后必须**重新计数**，不能用过滤前的 len。
     # ★ 并且必须先过滤再截断：研究批每期 200 行，先 history[-lookback:] 再过滤
@@ -1416,13 +1477,17 @@ def _recent_hit_stats(lottery_name: str, lookback: int = 500) -> Dict[str, Any]:
               and normalize_strategy_name(fb.get("策略", "")) not in NON_LEARNING_STRATEGIES][-int(lookback):]
     n = len(recent)
     if n == 0:
-        return {"hit_n": 0, "hit_rate": None}
+        return {"hit_n": 0, "hit_rate": None, "n_batches": 0}
     hits = 0
     for fb in recent:
         lvl = fb.get("中奖等级")
         if lvl and lvl != "未中":
             hits += 1
-    return {"hit_n": n, "hit_rate": hits / float(n)}
+    # 独立观测数 = 批次数（同批票相关）。无批次号的老记录退回按 (期号, 日期) 归组。
+    batches = {(fb.get("批次号")
+                or f"{fb.get('期号')}|{str(fb.get('评估时间') or '')[:10]}")
+               for fb in recent}
+    return {"hit_n": n, "hit_rate": hits / float(n), "n_batches": len(batches)}
 
 
 def _expected_win_rate(lottery_name: str) -> Optional[float]:
@@ -1447,11 +1512,24 @@ def _apply_dynamic_ticket_size(lottery_name: str,
     cfg = ts.sanitize(ts.load_config())
     if cfg.get("mode") != ts.MODE_DYNAMIC:
         return None
+    # ★ 用户锁定后不自动改注数（否则「调好的值被后台偷偷改回去」）
+    if cfg.get("锁定"):
+        return {"跳过": "已锁定，不自动调整注数"}
 
     cur = cfg["dynamic"].get(lottery_name) or ts.default_count(lottery_name)
     stats = _recent_hit_stats(lottery_name)
     kpi = _last_compress_kpi(lottery_name)
     exp = _expected_win_rate(lottery_name)
+
+    # 锚点只取**用户在固定模式里显式设过**的值。`sanitize` 会给缺省彩种补默认值
+    # （乐透 100 / 数字 5），那不是用户意图，不能拿来当下调地板。
+    _raw_fixed = (ts.load_config().get("fixed") or {})
+    _anchor = _raw_fixed.get(lottery_name)
+    if _anchor is not None:
+        try:
+            _anchor = int(_anchor)
+        except (TypeError, ValueError):
+            _anchor = None
 
     decision = ts.decide_next_count(
         lottery_name,
@@ -1460,12 +1538,17 @@ def _apply_dynamic_ticket_size(lottery_name: str,
         hit_rate=stats.get("hit_rate"),
         expected_rate=exp,
         hit_n=stats.get("hit_n"),
+        n_batches=stats.get("n_batches"),
+        anchor=_anchor,
     )
     if decision["next"] != int(cur):
         ts.apply_dynamic_result(lottery_name, decision["next"], decision["reason"])
         logger.info(f"动态出号数量 {lottery_name}: {cur} → {decision['next']}（{decision['reason']}）")
-    else:
-        ts.apply_dynamic_result(lottery_name, decision["next"], decision["reason"])
+    elif decision.get("诊断"):
+        logger.info(f"动态出号数量 {lottery_name}: 维持 {cur}；{decision['诊断']}")
+    # ★ 不变时不写盘：原实现在 else 分支也无条件 apply_dynamic_result，
+    #   导致每次评估都整文件重写（policy.理由 被反复覆盖成「维持当前注数」，
+    #   而文件 mtime 一直在变，看起来像注数被改过）。
     return {"上一期注数": int(cur), **decision}
 
 

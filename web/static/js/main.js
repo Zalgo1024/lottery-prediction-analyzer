@@ -955,6 +955,17 @@ function tsRender(d) {
     const applyBtn = $('ts-apply-btn');
     if (applyBtn) applyBtn.style.display = isDyn ? '' : 'none';
 
+    // ★ 锁定开关：勾上后动态策略不再自动改注数（用户调好的值不被后台改回去）
+    const lockBox = $('ts-lock');
+    if (lockBox) lockBox.checked = !!d['锁定'];
+    const lockHint = $('ts-lock-hint');
+    if (lockHint) {
+        lockHint.textContent = d['锁定']
+            ? '已锁定：动态策略不会自动改动注数（「按策略调整」按钮仍可手动触发）'
+            : '未锁定：动态模式下策略可能按冗余度自动下调注数';
+        lockHint.style.color = d['锁定'] ? '#2e7d32' : 'var(--gray)';
+    }
+
     let html = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px">';
     for (const it of (d.lotteries || [])) {
         const val = isDyn ? (it['动态值'] != null ? it['动态值'] : it['默认'])
@@ -1026,11 +1037,30 @@ async function tsSetMode(mode) {
     }
 }
 
+async function tsSetLock(locked) {
+    // 只提交 mode + 锁定，不带任何注数值 —— 避免「改开关顺手把没编辑的滑块值写进去」
+    try {
+        const d = await api('/api/settings/ticket-size', {
+            method: 'POST',
+            body: JSON.stringify({ mode: (_tsState && _tsState.mode) || 'fixed', '锁定': !!locked })
+        });
+        _tsState = d; tsRender(d);
+        tsMsg(locked ? '已锁定：系统不再自动改注数' : '已解锁：动态模式可自动调整');
+    } catch (e) {
+        alert('设置失败：' + e);
+    }
+}
+
 async function tsSave() {
     const mode = (_tsState && _tsState.mode) || 'fixed';
     const vals = tsCollectValues();
-    const body = { mode, fixed: vals };
-    if (mode === 'dynamic') body.dynamic = vals;
+    // ★ 只写「当前模式」那一个字段。滑轨显示的就是当前模式的值（动态模式显示动态值、
+    //   固定模式显示配置值）；若两个字段一起提交，动态模式下点一次保存就会把动态值
+    //   覆盖进 fixed —— fixed 是用户在固定模式下设定的意图锚点，被覆盖后永久丢失，
+    //   表现为「注数越用越少且再也回不到设定值」（2026-10-24 实锤：fixed 双色球
+    //   168→75、排列3 29→18，正好等于当时的动态值）。
+    const body = { mode };
+    body[mode === 'dynamic' ? 'dynamic' : 'fixed'] = vals;
     try {
         const d = await api('/api/settings/ticket-size', { method: 'POST', body: JSON.stringify(body) });
         _tsState = d; tsRender(d);
@@ -1156,8 +1186,15 @@ async function pnTest() {
     try {
         const d = await api('/api/settings/push-notify/test', { method: 'POST', body: JSON.stringify({}) });
         pnLoad();
-        const img = d.image ? (d.image.ok ? '，图片通道正常' : '，但图片失败：' + (d.image.detail || '')) : '';
-        pnMsg(d.ok ? ('测试消息已发出' + img + '，请查看群消息') : ('发送失败：' + (d.detail || d.error || '')));
+        // 2026-10-24：测试消息改成「分隔头 + 开奖图 + 出号图」，两个图片键分开报
+        const keys = [['image_draw', '开奖图'], ['image', '出号图']];
+        const fails = keys.filter(([k]) => d[k] && !d[k].ok)
+            .map(([k, name]) => name + '失败：' + (d[k].detail || ''));
+        const okImgs = keys.filter(([k]) => d[k] && d[k].ok).length;
+        const note = fails.length ? ('；' + fails.join('；'))
+            : (okImgs ? `，${okImgs} 张图通道正常` : '');
+        pnMsg(d.ok ? ('测试消息已发出（分隔头 + 图）' + note + '，请查看群消息')
+                   : ('发送失败：' + (d.detail || d.error || '')));
         if (!d.ok) alert('测试失败：' + (d.detail || d.error || '未知错误'));
     } catch (e) {
         alert('测试失败：' + e);

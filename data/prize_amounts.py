@@ -21,7 +21,7 @@ from __future__ import annotations
 import re
 import sqlite3
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 CODE = {"双色球": "ssq", "大乐透": "dlt", "七星彩": "qxc",
         "排列3": "pl3", "排列5": "pl5", "福彩3D": "sd"}
@@ -57,6 +57,109 @@ def normalize_level_name(name: str) -> Tuple[str, bool, bool]:
     return s.strip(), is_award, is_addon
 
 
+def _issue_candidates(lottery: str, issue: Any) -> List[str]:
+    """期号的多种库内格式（福彩 7 位 / 体彩 5 位 / 两位数年份）。
+
+    ★ 期号格式按源不同：福彩 cwl 是 7 位（2026120），体彩是 5 位（26120）。
+      直接拿一种格式去查会整片查空（曾让双色球所有奖级都回退到规则表）。
+    """
+    try:
+        from data.issue_key import issue_key
+        y, seq = issue_key(lottery, issue)
+        return sorted({str(issue), f"{y}{seq:03d}", f"{y % 100}{seq:03d}",
+                       f"{y % 100}{seq:02d}"})
+    except Exception:
+        return [str(issue)]
+
+
+def _fetch_rows(code: str, db: Path, cands: Sequence[str]) -> List[Tuple[str, int, str, float]]:
+    """直查：一个期号（多格式）的全部 prize 行。查不到/出错一律空列表。"""
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return []
+    ph = ",".join("?" * len(cands))
+    try:
+        return con.execute(
+            f"SELECT source, level, level_name, amount FROM prize "
+            f"WHERE lottery=? AND issue IN ({ph}) AND amount > 0",
+            (code, *cands)).fetchall()
+    except sqlite3.Error:
+        return []
+    finally:
+        con.close()
+
+
+# ---------------------------------------------------------------- 预载（批量 IO）
+# `(彩种, str(期号)) → prize 行`。**只省 IO，不改结算语义**：命中缓存后沿用与
+# 直查完全相同的行集合与源优先级逻辑。未预载的期号自动走 `_fetch_rows`。
+_ROWS: Dict[Tuple[str, str], List[Tuple[str, int, str, float]]] = {}
+
+
+def clear_preload() -> None:
+    """清空预载缓存（测试 / 数据刷新后调用）。"""
+    _ROWS.clear()
+
+
+def preload(lottery: str, issues: Sequence[Any], *, chunk: int = 300) -> Dict[str, Any]:
+    """把这些期号的 `prize` 行**一次批量**读进内存，返回载入统计。
+
+    为什么需要
+    ----------
+    `actual_per_bet` 每期每奖级开一次 sqlite 连接。arena 的净收益结算要按
+    3,518 期 × 7~9 个奖级取金额 ⇒ 三万次连接（纯 IO 约 1~2 分钟，且随期数线性涨）。
+    预载把它压成一次全表扫描 + 分块 IN 查询。
+
+    边界
+    ----
+    · 只做 IO 批量化，金额口径零变化（同一份行、同一套优先级）；
+    · 单块 300 个期号（SQLite 变量上限最保守的版本是 999）；
+    · 同一行可能被多个期号格式同时命中 → 按整行去重；
+    · 查不到的期号也会写入空列表（=「查过了，确实没有」），避免重复回源。
+    """
+    code = CODE.get(lottery)
+    db = _db_path()
+    if code is None or db is None:
+        return {"载入期数": 0, "载入行数": 0, "原因": "无彩种代码或 market.db 不存在"}
+    keys: List[Tuple[Any, List[str]]] = [(iss, _issue_candidates(lottery, iss))
+                                        for iss in issues]
+    # ★ 幂等：已载入的期号直接跳过（replay 每个臂都会调 preload，不跳会重复全表扫描）
+    keys = [(iss, cs) for iss, cs in keys if (lottery, str(iss)) not in _ROWS]
+    if not keys:
+        return {"载入期数": 0, "载入行数": 0, "跳过已载": len(issues),
+                "原因": "全部已预载"}
+    allc = sorted({c for _i, cs in keys for c in cs})
+    by_issue: Dict[str, List[Tuple[str, int, str, float]]] = {}
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    except sqlite3.Error as e:
+        return {"载入期数": 0, "载入行数": 0, "原因": f"打不开 market.db：{e}"}
+    try:
+        for s in range(0, len(allc), max(1, int(chunk))):
+            part = allc[s:s + max(1, int(chunk))]
+            ph = ",".join("?" * len(part))
+            for iss, src, lvl, name, amt in con.execute(
+                    f"SELECT issue, source, level, level_name, amount FROM prize "
+                    f"WHERE lottery=? AND issue IN ({ph}) AND amount > 0",
+                    (code, *part)).fetchall():
+                by_issue.setdefault(str(iss), []).append(
+                    (src, int(lvl), name, float(amt)))
+    except sqlite3.Error as e:
+        return {"载入期数": 0, "载入行数": 0, "原因": f"查询失败：{e}"}
+    finally:
+        con.close()
+
+    n_rows = 0
+    for iss, cands in keys:
+        got: List[Tuple[str, int, str, float]] = []
+        for c in cands:
+            got += by_issue.get(c, [])
+        merged = list({(r[0], r[1], r[2], r[3]): r for r in got}.values())
+        _ROWS[(lottery, str(iss))] = merged
+        n_rows += len(merged)
+    return {"载入期数": len(keys), "载入行数": n_rows, "期号格式数": len(allc)}
+
+
 def actual_per_bet(lottery: str, issue: Any, grade: str,
                    rule_amount: Optional[float] = None) -> Tuple[Optional[float], str]:
     """该期该奖级的实测单注金额 → (金额, note)。
@@ -67,29 +170,10 @@ def actual_per_bet(lottery: str, issue: Any, grade: str,
     db = _db_path()
     if code is None or db is None:
         return None, "规则表"
-    try:
-        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-    except sqlite3.Error:
-        return None, "规则表"
-    # ★ 期号格式按源不同：福彩 cwl 是 7 位（2026120），体彩是 5 位（26120）。
-    #   直接拿一种格式去查会整片查空（曾让双色球所有奖级都回退到规则表）。
-    try:
-        from data.issue_key import issue_key
-        y, seq = issue_key(lottery, issue)
-        cands = sorted({str(issue), f"{y}{seq:03d}", f"{y % 100}{seq:03d}",
-                        f"{y % 100}{seq:02d}"})
-    except Exception:
-        cands = [str(issue)]
-    ph = ",".join("?" * len(cands))
-    try:
-        rows: List[Tuple[str, int, str, float]] = con.execute(
-            f"SELECT source, level, level_name, amount FROM prize "
-            f"WHERE lottery=? AND issue IN ({ph}) AND amount > 0",
-            (code, *cands)).fetchall()
-    except sqlite3.Error:
-        return None, "规则表"
-    finally:
-        con.close()
+    cands = _issue_candidates(lottery, issue)
+    rows = _ROWS.get((lottery, str(issue)))
+    if rows is None:                     # 未预载 ⇒ 走原直查路径（行为完全一致）
+        rows = _fetch_rows(code, db, cands)
     if not rows:
         return None, "规则表"
 

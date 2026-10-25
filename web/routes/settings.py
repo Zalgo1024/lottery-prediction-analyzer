@@ -59,14 +59,36 @@ def api_ticket_size_set():
             return jsonify({"ok": False, "error": f"非法模式: {m}"}), 400
         cfg["mode"] = m
 
+    # ★ 上限**先于**注数处理：放宽上限后同一次请求里的新注数才不会被旧上限截断。
+    if isinstance(data.get("limits"), dict):
+        for lot, val in data["limits"].items():
+            if lot not in LOTTERY_CONFIG:
+                continue
+            try:
+                cfg["limits"][lot] = max(ts.MIN_TICKETS, min(ts.HARD_CAP, int(val)))
+            except (TypeError, ValueError):
+                continue
+
+    # ★ 锁定：true ⇒ 动态策略不再自动改注数（用户调好的值不被后台改回去）
+    if "锁定" in data:
+        cfg["锁定"] = bool(data["锁定"])
+
+    # ★ 服务端兜底：只接受与「生效模式」一致的那个字段。
+    #   滑轨只展示当前模式的值，若把另一个字段一起写进去，动态模式下点保存就会把
+    #   动态值覆盖进 fixed（用户意图锚点）⇒ 锚点永久丢失、注数单向下沉。
+    #   旧版前端可能仍同时提交两个字段，故在服务端再拦一道。
+    allow = "dynamic" if cfg.get("mode") == ts.MODE_DYNAMIC else "fixed"
+    limits = cfg.get("limits")
     for key in ("fixed", "dynamic"):
+        if key != allow:
+            continue
         incoming = data.get(key)
         if isinstance(incoming, dict):
             for lot, val in incoming.items():
                 if lot not in LOTTERY_CONFIG:
                     continue
                 try:
-                    cfg[key][lot] = ts._clamp(int(val), lot)
+                    cfg[key][lot] = ts._clamp(int(val), lot, limits)
                 except (TypeError, ValueError):
                     continue
 
@@ -100,8 +122,10 @@ def api_ticket_size_apply():
         dec = ts.decide_next_count(
             lot, current=cur, last_kpi=_last_compress_kpi(lot),
             hit_rate=st.get("hit_rate"), expected_rate=_expected_win_rate(lot),
-            hit_n=st.get("hit_n"))
-        ts.apply_dynamic_result(lot, dec["next"], dec["reason"])
+            hit_n=st.get("hit_n"), n_batches=st.get("n_batches"),
+            anchor=cfg["fixed"].get(lot))
+        # force=True：这里是用户**主动**点「按策略调整」，锁定不该拦住它
+        ts.apply_dynamic_result(lot, dec["next"], dec["reason"], force=True)
         results[lot] = {"上一期注数": int(cur), **dec}
 
     rates, stats = _expected_and_stats()
@@ -191,36 +215,53 @@ def api_push_set():
 def api_push_test():
     """发测试消息验证渠道连通性（计入统计）。
 
-    2026-09-18 起：若开启了「图片推送」且渠道是企业微信，**同时发一张示例号码图**，
-    这样在看板上点一下就能验证图片通道，而不用等到晚上自动化跑。
+    2026-10-24 起按**新的分组结构**发：分隔头 → 开奖图 → 出号图，
+    这样在看板上点一下就能把三类渲染器全部验证到，而不用等到晚上自动化跑。
     """
     from data import push_notify as pn
     cfg = pn.sanitize(pn.load_config())
     if not pn.effective_ready(cfg):
         return jsonify({"ok": False, "error": "请先选择渠道并填写 token，再开启推送"}), 400
-    result = pn.send("彩票助手·测试消息",
-                     "配置成功！此后自动流水线跑完会把**出号**、**出号数量**与**中奖记录**推到这里。\n\n"
-                     "> 仅供研究记录；单注中奖概率恒定，整体期望为负。", cfg)
+
+    with_img = bool(cfg.get("图片推送")) and cfg.get("provider") == pn.PROVIDER_WECOM
+    body = ("**配置成功** 此后自动流水线会把「今晚开奖 / 本期出号 / 开奖结算」"
+            "按彩种分组推到这里（每个彩种：一条分隔头 + 若干张图）。\n\n")
+    body += ("本次会发 3 条：分隔头（就是这条）→ 开奖图 → 出号图（示例数据）。\n\n"
+             if with_img else
+             "当前渠道不支持图片，后续推送会是单条 markdown 文本。\n\n")
+    body += f"> {pn.FOOTER_CONDITION}"
+    result = pn.send(pn._divider_title("推送测试"), body, cfg)
     pn._mark_pushed(cfg, result.get("ok", False), "测试：" + result.get("detail", ""))
     out = dict(result)
-    if cfg.get("图片推送") and cfg.get("provider") == pn.PROVIDER_WECOM:
-        try:
-            from data import push_image as pi
-            demo = [{"号码": {"红球": [3, 11, 21, 23, 29, 32], "蓝球": [5]},
-                     "策略": "ML策略", "置信度": 0.38},
-                    {"号码": {"红球": [4, 10, 13, 18, 28, 29], "蓝球": [13]},
-                     "策略": "区间均衡策略", "置信度": 0.37}]
-            try:    # 优先看板弹窗同款票面图
-                png = pi.render_tickets_image(
-                    demo, title="测试 · 号码图（示例）",
-                    subtitle="以上为随机示例，不是本期出号")
-            except Exception:
-                png = pi.render_numbers_image(
-                    [pn.format_ticket_line(t) for t in demo],
-                    title="测试 · 号码图（示例）", subtitle="以上为随机示例，不是本期出号")
-            img = pn.send_image(png, cfg)
-            pn._mark_pushed(cfg, img.get("ok", False), "测试图片：" + img.get("detail", ""))
-            out["image"] = img
-        except Exception as e:      # 图片通道失败不影响文本测试结果
-            out["image"] = {"ok": False, "detail": str(e)[:200]}
+    if not with_img:
+        return jsonify(out)
+
+    from data import push_image as pi
+    demo_draw = {"期号": "示例", "日期": pn._today_str(),
+                 "红球": [3, 11, 21, 23, 29, 32], "蓝球": [5]}
+    demo = [{"号码": {"红球": [3, 11, 21, 23, 29, 32], "蓝球": [5]},
+             "策略": "ML策略", "置信度": 0.38},
+            {"号码": {"红球": [4, 10, 13, 18, 28, 29], "蓝球": [13]},
+             "策略": "区间均衡策略", "置信度": 0.37}]
+
+    shots = []
+    try:                                    # ② 开奖图（新增）
+        shots.append(("image_draw", pi.render_draw_image(
+            demo_draw, lottery="双色球", title="双色球 · 开奖图（示例）",
+            subtitle="以上为随机示例，不是真实开奖")))
+    except Exception as e:
+        out["image_draw"] = {"ok": False, "detail": str(e)[:200]}
+    try:                                    # ③ 出号图（第 1 页）
+        pages = pi.paginate_tickets(demo)
+        shots.append(("image", pi.render_tickets_image(
+            demo, title="双色球 · 本期出号（示例）",
+            subtitle="以上为随机示例，不是本期出号",
+            groups=pages[0] if pages else None, page=(1, max(1, len(pages))))))
+    except Exception as e:
+        out["image"] = {"ok": False, "detail": str(e)[:200]}
+
+    for key, png in shots:
+        img = pn.send_image(png, cfg)
+        pn._mark_pushed(cfg, img.get("ok", False), f"测试图片：{img.get('detail', '')}")
+        out[key] = img
     return jsonify(out)

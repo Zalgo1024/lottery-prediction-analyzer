@@ -111,11 +111,12 @@ def _trigger_pipeline_if_needed(lottery_name: str):
         logger.info(f"启动恢复：{lottery_name} 本轮已触发过流水线，跳过重复触发")
         return
     try:
-        from config import resolve_groups
         from web.utils import start_auto_pipeline
+        # ★ 2026-10-24：不在触发时刻固化 groups，交给出号时刻的 resolve_groups()
+        #   读最新滑轨（同 web/scheduler.py 的理由：固化会让旧值覆盖用户新设定）。
         tid = start_auto_pipeline(
             lottery_name,
-            {"mode": "fresh", "groups": resolve_groups(lottery_name), "skip_predict": False},
+            {"mode": "fresh", "skip_predict": False},
         )
         logger.info(f"启动恢复：{lottery_name} 触发完整流水线补齐下一期预测 (task={tid})")
     except Exception as e:
@@ -240,7 +241,9 @@ def ensure_pending_groups() -> dict:
                 continue
             tid = start_auto_pipeline(
                 lottery_name,
-                {"mode": "fresh", "groups": slide, "skip_predict": False},
+                # ★ 同样不固化 slide：自愈的判据用触发时刻的 slide，但**生成时**
+                #   必须读最新滑轨，否则修复动作本身又会用旧值把 pending 写成旧注数。
+                {"mode": "fresh", "skip_predict": False},
             )
             logger.warning(f"启动自愈：{lottery_name} {reason} → 已触发流水线重生成 (task={tid})")
             fixed[lottery_name] = {
