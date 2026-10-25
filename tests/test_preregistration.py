@@ -18,14 +18,16 @@ from ev import preregistration as PR
 def test_load_ok():
     doc = PR.load()
     # ★ 版本号是硬编码的「锁」：改预注册必须同时改这里，避免静默换版本。
-    assert doc["版本"] == "1.5"
-    assert doc["锁定日"] == "2026-10-25"
+    assert doc["版本"] == "1.6"
+    assert doc["锁定日"] == "2026-10-26"
     # 集中度守门必须有**两级**：单臂大奖占比 + 配对级单期支配
     rules = "".join(doc["停止规则"])
     assert "单次大奖占总实得比" in rules
     assert "配对级" in rules and "贡献的 Δ 占比" in rules
     # v1.5：≥四等奖 前瞻终点块必须在（契约件，不是可选装饰）
     assert "前瞻终点_四等奖" in doc
+    # v1.6：一二三等奖 前瞻终点块必须在
+    assert "前瞻终点_一二三等奖" in doc
 
 
 def test_hash_mismatch_raises(tmp_path):
@@ -132,10 +134,36 @@ def test_v15_forward_tier4_registration():
     # 前瞻块不进 Stage 1 的 `格`（主假设唯一性契约不受影响）
     assert all(c.get("目标") != {"kind": "grade", "grade": "四等"} for c in doc["格"])
     assert sum(1 for c in doc["格"] if c.get("主假设")) == 1
-    # 变更日志末条必须自证「发布时已观测过历史窗 + 不覆盖」
-    entry = doc["变更日志"][-1]
-    assert "v1.5" in entry and "四等" in entry
+    # 变更日志里该条必须自证「发布时已观测过历史窗 + 不覆盖」
+    # ★ 同样搜全部条目：v1.6 追加后末条是 v1.6，盯末条会让 v1.5 的契约静默脱检
+    entry = next(e for e in doc["变更日志"] if "v1.5" in e and "四等" in e)
     assert "已经看过" in entry and "不覆盖" in entry and "探索性" in entry
+
+
+def test_v16_forward_top3_registration():
+    """v1.6：一二三等奖 只做**前瞻**登记 —— 确认力不覆盖历史窗。"""
+    doc = PR.load()
+    blk = doc["前瞻终点_一二三等奖"]
+    assert blk["彩种"] == ["双色球", "大乐透"]
+    assert blk["K"] == 200 and blk["预算元每期"] == 400
+    # 三个 grade 型目标，≥语义（≥一等=仅一等；≥二等=含一等；≥三等=含一二等）
+    assert blk["目标"] == [{"kind": "grade", "grade": "一等"},
+                           {"kind": "grade", "grade": "二等"},
+                           {"kind": "grade", "grade": "三等"}]
+    assert blk["预期判决"] == "不可判"
+    # 双口径都必须报；★ 本目标下 periodic 与 current 的门本身就不同（≥三等 三套条件集）
+    mode = blk["常量"]["规则口径"]
+    assert "current" in mode and "periodic" in mode
+    assert blk["常量"]["期窗"].startswith("前瞻")
+    # 前瞻块同样不进 Stage 1 的 `格`
+    for c in doc["格"]:
+        assert c.get("目标", {}).get("grade") not in ("一等", "二等", "三等")
+    assert sum(1 for c in doc["格"] if c.get("主假设")) == 1
+    # 变更日志必须自证：发布时未看过该目标的独立读数、但看过金额桶、不覆盖历史窗
+    entry = next(e for e in doc["变更日志"] if "v1.6" in e)
+    assert "尚未产生" in entry and "已经看过" in entry and "不覆盖" in entry
+    # 预期依据必须写进块内（不许只活在 changelog 里）
+    assert "期望命中" in blk["_预期依据"]
 
 
 # ---------------------------------------------------------------- 实跑对齐
