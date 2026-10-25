@@ -8,6 +8,7 @@
   4. walk-forward 的 β 只能用切点**之前**的数据拟合；拟合失败的块分位必须是 None
      （用相邻块的 β 顶替 = 前向泄漏）。
 """
+import math
 import numpy as np
 import pytest
 
@@ -25,16 +26,68 @@ def _tickets(n=8):
 
 # ------------------------------------------------------------ ① 支持范围
 
-def test_supported_scope_is_ssq_only():
+def test_supported_means_modeled_not_usable():
+    """「建过模」与「可用」是**两档**，不许合并成一个 `SUPPORTED`。
+
+    大乐透是反例：建过模（2,932 期完整拟合）但没过 Go 门槛。
+    若把它留在「不在支持范围 ⇒ 从未建模」那一档，原因文案会变成
+    「没做过」—— 而真相是「做了没通过」，两者对外可信度完全不同。
+    """
     assert pp.is_supported("双色球") is True
-    assert pp.is_supported("大乐透") is False
-    assert pp.is_supported("七星彩") is False
-    assert pp.SUPPORTED == ("双色球",)
+    assert pp.is_supported("大乐透") is True        # 建过模
+    assert pp.is_supported("七星彩") is False       # 从未建模
+    assert pp.SUPPORTED == ("双色球", "大乐透")
+    # ★ 关键反向断言：建过模 ⇒ 不等于可用
+    assert pp.go_or_none("大乐透") is False
 
 
 def test_unsupported_lottery_degrades_explicitly():
     """大乐透 popularity 未达 Go 门槛 ⇒ 必须显式降级（False），不许静默放行。"""
     assert pp.go_or_none("大乐透") is False
+
+
+def test_go_evidence_exposes_measured_numbers():
+    """原因文案引用的数字必须**现取**，不许硬编码。
+
+    硬编码的「CV 仅 2/5 折」会随数据增长静默过期，而读者看不出来 ——
+    这条测试要求 `go_evidence` 真的把实测字段交出去。
+    """
+    ev = pp.go_evidence("大乐透")
+    assert ev["applicable"] is True
+    assert int(ev["n"]) >= pp.MIN_TRAIN            # 样本远超门槛 ⇒ 阻塞不在数据量
+    assert 0 <= int(ev["cv_better_folds"]) < 3     # 未达 ≥3/5 门槛
+    assert ev["cv_full"] and ev["cv_null"]         # 两种偏差都得在，供对账
+    assert isinstance(ev["lrt_p"], float)
+    # 从未建模的彩种必须走另一档文案
+    ev2 = pp.go_evidence("七星彩")
+    assert ev2["applicable"] is False
+    assert "从未建模" in ev2["verdict"]
+
+
+def test_go_verdict_driven_by_significance_not_sign_count():
+    """闸门 Go/No-Go 必须看**显著性折数**(cv_sig_folds)，不是纯符号计数(cv_better_folds)。
+
+    纯符号计数（只要 full 平均偏差低 1e-9 就算「更优」）会被少数离群期支配而虚高。
+    这条哨兵锁住：go 由 cv_sig_folds（逐折单侧 Wilcoxon p<0.05 的折数）决定，
+    且双色球应达门槛(≥3)、大乐透应未达(<3)；另附全局池化随机化 p 同向佐证。
+    """
+    for lot, expect_go in (("双色球", True), ("大乐透", False)):
+        m = pp.go_or_none(lot)
+        ev = pp.go_evidence(lot)
+        assert "cv_sig_folds" in ev, "cv_sig_folds 字段被移除 = 显著性口径丢失"
+        n_folds = len(ev["cv_fold_wilcoxon_p"])
+        need = math.ceil(n_folds * 0.6)
+        # go 决策必须等于「LRT 显著 且 显著折数 ≥ 门槛」—— 锁死用显著性而非符号
+        assert m == (ev["lrt_p"] < 0.01 and ev["cv_sig_folds"] >= need), \
+            f"{lot}: go 未由显著性折数驱动"
+        if expect_go:
+            assert ev["cv_sig_folds"] >= need, f"{lot} 应达 Go 门槛"
+            assert ev["cv_global_perm_p"] is not None and ev["cv_global_perm_p"] < 0.05, \
+                f"{lot} 全局随机化应显著"
+        else:
+            assert ev["cv_sig_folds"] < need, f"{lot} 应未达 Go 门槛"
+            assert ev["cv_global_perm_p"] is not None and ev["cv_global_perm_p"] > 0.05, \
+                f"{lot} 全局随机化不应显著"
 
 
 def test_go_or_none_false_when_model_read_fails(monkeypatch):
@@ -177,7 +230,7 @@ def test_caveat_is_single_source_and_honest():
     assert pp.CROWD_PROXY_CAVEAT
     note = pp.proxy_note()
     assert note["循环性声明"] == pp.CROWD_PROXY_CAVEAT
-    assert note["支持范围"] == ["双色球"]
+    assert note["支持范围"] == ["双色球", "大乐透"]
     assert note["walk_forward"]["最小训练期数"] == pp.MIN_TRAIN
     # 反向黑名单：不许说成「已证明开奖公平」那一侧
     assert "已证明" not in pp.CROWD_PROXY_CAVEAT

@@ -17,8 +17,16 @@ ev/popularity_proxy.py —— 拥挤度**代理**层（低拥挤目标策略的�
   故 **μ 即 crowd 的自然度量**（差一个与组合无关的常数 P）。
   z(crowd) 取 z(β·f)，等价于对 log crowd 做标准化。
 
-支持范围：首版仅双色球（大乐透 popularity 模型 No-Go ⇒ 无数据驱动的拥挤度，
-必须显式降级，不许静默回退到启发式）。
+支持范围：双色球 + 大乐透 —— popularity 模块原生支持这两种（k=6/上界33 与 k=5/上界35）。
+
+★ 必须区分两件事，别混为一谈：
+  · 「不在支持范围」= **从未建模**（没为它写过特征、没跑过拟合）⇒ 例如七星彩；
+  · 「在支持范围但 No-Go」= **建过模、证据齐备，但判据没过** ⇒ 大乐透
+    （2,932 期完整拟合，LRT 显著而 CV 未达门槛，见 docs/P1_大乐透拥挤度重建_结论.md）。
+
+这两档在 `ev/arena/crowd.py` 的三重探测里是**不同的卡点**，`卡在` 字段必须分开报。
+把「做了但没通过」报成「没做过」是最像黑箱借口的一种说法 —— 前者有证据可查，
+后者听起来只是「我们还没来得及」。
 """
 from __future__ import annotations
 
@@ -40,21 +48,56 @@ CROWD_PROXY_CAVEAT = (
 # 用池内分位顶替会让 gate 的语义随池大小与 seed 漂移。
 QUANTILE_CALIBER = "popularity 组合分位（中点秩，相对全部红球组合）；0=最冷，1=最热"
 
-SUPPORTED = ("双色球",)
+SUPPORTED = ("双色球", "大乐透")
 
 MIN_TRAIN = 1200   # walk-forward 最小训练期数
 STEP = 50          # walk-forward 块步长（每期重拟合需约 3.5 小时，必须块式）
 
 
 def is_supported(lottery: str) -> bool:
-    """首版支持范围。"""
+    """有没有为这个彩种**建过**拥挤度代理（≠ 是否可用）。
+
+    建过模 ⇒ True，哪怕模型 No-Go；从未建模 ⇒ False。
+    可用性由 `go_or_none()` 单独判，两者是 `ev/arena/crowd.py` 三重探测里的两档。
+    """
     return lottery in SUPPORTED
+
+
+def go_evidence(lottery: str) -> Dict[str, Any]:
+    """把「为什么没过 Go 门槛」的**实测数字**取出来，供原因文案引用。
+
+    ★ 不许在文案里硬编码「CV 仅 2/5 折」这类数字 —— 数据每期都在长，
+      硬编码的结论会静默过期，而读者看不出来。一律从模型报告里现取。
+
+    返回 {"applicable","n","lrt_p","cv_better_folds","cv_full","cv_null","verdict"}；
+    取不到 → {"applicable": False, "verdict": "..."}（调用方须如实说「取不到」）。
+    """
+    out: Dict[str, Any] = {"applicable": False, "verdict": "取不到模型报告"}
+    if not is_supported(lottery):
+        out["verdict"] = f"{lottery} 不在支持范围 {list(SUPPORTED)} 内（从未建模）"
+        return out
+    try:
+        from ev.popularity import get_popularity_model
+        rep = (get_popularity_model(lottery) or {}).get("report", {}) or {}
+    except Exception as e:                                         # noqa: BLE001
+        out["verdict"] = f"读模型报告失败：{type(e).__name__}: {e}"
+        return out
+    if not rep:
+        return out
+    for k in ("applicable", "n", "lrt_p", "cv_better_folds", "cv_sig_folds",
+              "cv_fold_wilcoxon_p", "cv_global_perm_p", "cv_full",
+              "cv_null", "verdict", "go", "y_mean", "y_zero_rate"):
+        if k in rep:
+            out[k] = rep[k]
+    return out
 
 
 def go_or_none(lottery: str) -> bool:
     """拥挤度代理是否可用（双色球 True / 大乐透 False）。
 
-    大乐透 popularity 模型未达 Go 门槛（LRT 显著但 CV 仅 2/5 折优于零模型）
+    大乐透**建过模**（2,932 期）但未达 Go 门槛：LRT 显著（φ 校正后 p≈1.2e-6），
+    而时序 5 折 CV 仅 2/5 折优于零模型（门槛 ≥3）。NB2 复核后仍是 2/5 ——
+    详见 docs/P1_大乐透拥挤度重建_结论.md。
     ⇒ 无数据驱动的拥挤度，调用方**必须显式降级**，不许静默改用启发式代理。
     """
     if not is_supported(lottery):

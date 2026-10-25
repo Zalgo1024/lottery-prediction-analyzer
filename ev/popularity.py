@@ -21,7 +21,9 @@ ev/popularity.py —— 双色球/大乐透 组合流行度模型（NetPayout WP
 模型与验证（Go/No-Go，方案文档 §5-WP1）：
 - 全量拟合：GLM Poisson(log)，offset=log(票量)。
 - LRT：full(9特征) vs null(仅截距+offset)，χ²(k)，p<0.01 才算"信号存在"。
-- 时序 5 折 CV：expanding window，指标=测试折泊松偏差，full 须稳定优于 null。
+- 时序 5 折 CV：expanding window，指标=测试折逐期泊松偏差差，full 须**显著**优于 null
+  （逐折单侧 Wilcoxon 符号秩检验 p<0.05，≥60% 折显著才算过；另附全局池化随机化 p）。
+  仅用数值符号计数会虚高（被少数离群期支配），故决策用显著性而非符号。
 - **不显著 → 实得轨道降级为「未发现可量化收益」并公开否决（诚实产出）。**
 
 WP3 反事实回测（counterfactual_backtest）：
@@ -271,10 +273,11 @@ def fit_popularity(lottery: str) -> Dict[str, Any]:
     n, k_feat = X_raw.shape
     lrt_stat, lrt_p = fb["lrt_stat"], fb["lrt_p"]
 
-    # 时序 5 折 expanding CV
+    # 时序 5 折 expanding CV（保留逐期偏差，以做显著性检验）
     n_folds = 5
     fold = max(n // (n_folds + 1), 50)
     cv_full, cv_null = [], []
+    per_dev = []  # 每折：逐期偏差差 d_i = dev_null_i - dev_full_i（>0 表示 full 更好）
     for i in range(1, n_folds + 1):
         cut = fold * i
         if cut + fold > n:
@@ -291,20 +294,59 @@ def fit_popularity(lottery: str) -> Dict[str, Any]:
             gn = _fit_glm(tr_y, np.ones((len(tr_y), 1)), tr_off)
             mu_f = gf.predict(te_X, offset=te_off)
             mu_n = gn.predict(np.ones((len(te_y), 1)), offset=te_off)
-            cv_full.append(float(_poisson_deviance(te_y, mu_f).mean()))
-            cv_null.append(float(_poisson_deviance(te_y, mu_n).mean()))
+            dev_f = _poisson_deviance(te_y, mu_f)
+            dev_n = _poisson_deviance(te_y, mu_n)
+            cv_full.append(float(dev_f.mean()))
+            cv_null.append(float(dev_n.mean()))
+            per_dev.append(dev_n - dev_f)
         except Exception as e:
             logger.warning(f"[popularity] CV 第 {i} 折失败: {e}")
 
     # 裁决
+    # 旧口径（保留供对账）：纯数值符号计数 —— 只要 full 平均偏差低 1e-9 就算「该折更优」，
+    # 不检验差异是否显著，会虚高（被少数离群期支配）。
     cv_better = sum(1 for a, b in zip(cv_full, cv_null) if a < b - 1e-9)
-    go = (lrt_p < 0.01) and cv_better >= math.ceil(len(cv_full) * 0.6) and cv_full
+    need = math.ceil(len(cv_full) * 0.6)
+    # 新口径：逐折单侧 Wilcoxon 符号秩检验（对过度离散稳健，只看符号/秩不放大离群幅度）
+    # H0: 该折逐期偏差差的中位数 = 0；H1: > 0（full 真更好）。p<0.05 才算「该折显著更优」。
+    from scipy import stats as sps
+    cv_sig = 0
+    fold_wilcoxon_p = []
+    for d in per_dev:
+        d = np.asarray(d, dtype=np.float64)
+        d = d[np.isfinite(d)]
+        p = np.nan
+        if np.any(d != 0):
+            try:
+                p = float(sps.wilcoxon(d, alternative="greater").pvalue)
+            except Exception:
+                p = np.nan
+        if not math.isnan(p) and p < 0.05:
+            cv_sig += 1
+        fold_wilcoxon_p.append(None if math.isnan(p) else round(p, 4))
+    # 全局池化随机化检验：把各折逐期 d_i 合并，置换符号得单一 p
+    # （「full 整体是否真有改进」，对逐折数不过半时补一刀全局证据）
+    cv_global_perm_p = None
+    pooled = np.concatenate(per_dev) if per_dev else np.array([])
+    pooled = pooled[np.isfinite(pooled)]
+    if len(pooled) > 0:
+        rng = np.random.default_rng(20261025)
+        non0 = pooled[pooled != 0]
+        obs = float(pooled.mean())
+        B = 4000
+        perm_means = np.empty(B)
+        for b in range(B):
+            signs = rng.integers(0, 2, size=len(non0)) * 2 - 1
+            perm_means[b] = float((non0 * signs).mean())
+        cv_global_perm_p = float(np.mean(perm_means >= obs - 1e-12))
+
+    go = (lrt_p < 0.01) and cv_sig >= need
     if go:
-        verdict = (f"信号存在：LRT p={lrt_p:.2e} 且 {cv_better}/{len(cv_full)} 折 CV 优于零模型 "
-                   f"→ 可进入 WP2/WP3")
+        verdict = (f"信号存在：LRT p={lrt_p:.2e} 且 {cv_sig}/{len(per_dev)} 折 CV 逐期偏差"
+                   f"显著低于零模型（Wilcoxon 单侧 p<0.05）→ 可进入 WP2/WP3")
     else:
-        verdict = (f"未达门槛：LRT p={lrt_p:.3g}，CV 优于零模型 {cv_better}/{len(cv_full)} 折 "
-                   f"→ 形态信号不显著，实得轨道按方案公开否决")
+        verdict = (f"未达门槛：LRT p={lrt_p:.3g}，CV 显著优于零模型仅 {cv_sig}/{len(per_dev)} 折"
+                   f"（门槛 ≥{need}）→ 形态信号不显著，实得轨道按方案公开否决")
 
     return {
         "lottery": lottery,
@@ -324,7 +366,10 @@ def fit_popularity(lottery: str) -> Dict[str, Any]:
         "lrt_p": lrt_p,
         "cv_full": [round(v, 4) for v in cv_full],
         "cv_null": [round(v, 4) for v in cv_null],
-        "cv_better_folds": cv_better,
+        "cv_better_folds": cv_better,          # 旧口径（纯符号，供对账）
+        "cv_sig_folds": cv_sig,                # 新口径（显著性，决策用）
+        "cv_fold_wilcoxon_p": fold_wilcoxon_p,
+        "cv_global_perm_p": cv_global_perm_p,
         "verdict": verdict,
         "go": bool(go),
     }
