@@ -122,3 +122,7 @@ market/cache.db-journal
 market/.update.lock
 # 财政部月报附件缓存（2008 起约 330 个文件 / 11MB，可随时重新下载）
 market/.mof_cache/
+
+# ===== output/ 下的运行日志（跑数重定向产物，不入库；output/ 里的结论性 md/json 仍入库） =====
+output/*.log
+output/*.txt
