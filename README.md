@@ -2,7 +2,7 @@
 
 > **带严格统计检验的时间序列分析框架（彩票作为示例场景）**
 
-![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB) ![Tests](https://img.shields.io/badge/pytest-1807%20passed-3B6D11) ![Lotteries](https://img.shields.io/badge/%E5%BD%A9%E7%A7%8D-6-854F0B) ![License](https://img.shields.io/badge/License-AGPL--3.0-blue)
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB) ![Tests](https://img.shields.io/badge/pytest-1864%20passed-3B6D11) ![Lotteries](https://img.shields.io/badge/%E5%BD%A9%E7%A7%8D-6-854F0B) ![License](https://img.shields.io/badge/License-AGPL--3.0-blue)
 
 **为什么用彩票做示例场景？** 开奖数据足够纯——无协变量、无趋势、大样本、完全随机。这是检验一套时序分析方法"是否真有预测力"的最严苛测试场：任何看似有效的策略都要在这里接受检验。本框架的价值不在于"预测中了多少"，而在于**给出可复现的检验结论**。
 
@@ -42,7 +42,7 @@ python run.py                # 看门狗模式，访问 http://127.0.0.1:5000
 # 3. 或者只用 CLI
 python cli.py --help
 
-# 4. 跑测试套件（全量 1807 例）
+# 4. 跑测试套件（全量 1864 例）
 pytest -q                    # 约 6~7 分钟（慢点集中在真实 predict 全流程的契约测试）
 ```
 
@@ -355,8 +355,8 @@ POST /api/settings/push-notify/test     # 发一条测试消息（未配置返�
 ## 测试
 
 ```bash
-pytest -q              # 1807 passed（全量；含奖金表 33 例、写保护/分区归一化回归、撞号度量与中奖归因、批次契约、出号数量固定/动态、消息推送：图片渲染/发送节流/降级/全入口接线、随机锚点走前验证与持续训练循环、休市日历与真实开奖数据一致性、三口径 EV 对照/冷门口径 rollover/奖池门槛/Kelly 纪律仓位/限号前置与组合方差指标、策略历史实测命中统计（归一/过滤/基线/样本不足）、休市期全链路感知（看板滞后/下一期 + 调度器排班 + 启动自愈 + cli lag + 体检脚本 + 销量模型前瞻 + 休市提示条）、机制缝隙四轨测量（A/A′注数比、开出号分位、结构偏差、派奖期）+ 缝隙内选号与反馈闭环、机制缝隙策略层可见性与前瞻对照、叙事解绑文案扫描、生产 pending 防覆盖（record_pending 开关）、出号数量硬性拉平与注数一致性体检/启动自愈）
-pytest tests/          # 1798 passed（仅 tests/ 目录；另有 9 例在 scripts/ 下，故用 pytest -q 跑全量）
+pytest -q              # 1864 passed（全量；含奖金表 33 例、写保护/分区归一化回归、撞号度量与中奖归因、批次契约、出号数量固定/动态、消息推送：图片渲染/发送节流/降级/全入口接线、随机锚点走前验证与持续训练循环、休市日历与真实开奖数据一致性、三口径 EV 对照/冷门口径 rollover/奖池门槛/Kelly 纪律仓位/限号前置与组合方差指标、策略历史实测命中统计（归一/过滤/基线/样本不足）、休市期全链路感知（看板滞后/下一期 + 调度器排班 + 启动自愈 + cli lag + 体检脚本 + 销量模型前瞻 + 休市提示条）、机制缝隙四轨测量（A/A′注数比、开出号分位、结构偏差、派奖期）+ 缝隙内选号与反馈闭环、机制缝隙策略层可见性与前瞻对照、叙事解绑文案扫描、生产 pending 防覆盖（record_pending 开关）、出号数量硬性拉平与注数一致性体检/启动自愈）
+pytest tests/          # 1855 passed（仅 tests/ 目录；另有 9 例在 scripts/ 下，故用 pytest -q 跑全量）
 ```
 
 ## 维护（放着不管时会发生什么）
@@ -395,6 +395,7 @@ git bundle create E:/backups/707_<日期>.bundle --all   # git 全量备份
 ## 文档
 
 - [结题报告](docs/结题报告.md)（[Word](docs/结题报告.docx) / [PDF](docs/结题报告.pdf)）—— 完整的假设检验流水线方法论、实得优化轨道与工程体系说明
+- [四等门二次评估与三项落地（v1.9）](docs/四等门二次评估与三项落地_结论.md) —— 覆盖选择接生产（含「空间在 K·p≈1 处最大」的形状）、动态定额三机制、≥四等 门两条轨道结案
 - [预算约束下的奖级目标（v1.8）](docs/预算约束下的奖级目标_结论.md) —— 三条指令的落地：娱乐预算包络、δ 情景区间、六格按实际预算重做
 - [双轨组合优化（v1.7）](docs/双轨组合优化_结论.md) —— 覆盖设计（轨道 A）与稳健净 EV（轨道 B）的判决与「层 1 否决力」的由来
 - 配图与画图脚本：`docs/assets/`、`scripts/report_figures.py`

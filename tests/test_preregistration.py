@@ -18,7 +18,7 @@ from ev import preregistration as PR
 def test_load_ok():
     doc = PR.load()
     # ★ 版本号是硬编码的「锁」：改预注册必须同时改这里，避免静默换版本。
-    assert doc["版本"] == "1.8"
+    assert doc["版本"] == "1.9"
     assert doc["锁定日"] == "2026-10-26"
     # 集中度守门必须有**两级**：单臂大奖占比 + 配对级单期支配
     rules = "".join(doc["停止规则"])
@@ -34,6 +34,8 @@ def test_load_ok():
     assert "预算约束_奖级目标" in doc
     assert "δ情景" in doc
     assert "预算包络" in doc
+    # v1.9：≥四等 门二次评估（两条轨道都登记，且在跑数之前）
+    assert "四等门_二次评估" in doc
 
 
 def test_hash_mismatch_raises(tmp_path):
@@ -385,3 +387,36 @@ def test_stage2_does_not_break_stage1_primary_uniqueness():
     """Stage 2 单列 `格_Stage2` 的原因：保住 Stage 1「主假设恰好 1 个」的契约。"""
     assert sum(1 for c in PR.cells() if c.get("主假设")) == 1
     assert not PR.stage2().get("主假设"), "Stage 2 不设主假设：它量的是代价，不是候选策略"
+
+
+# ---------------------------------------------------------------- v1.9
+def test_v19_fourth_prize_reassessment_registration():
+    """v1.9：≥四等 门的两条轨道必须先把自由度钉死，再谈结论。"""
+    b = PR.load()["四等门_二次评估"]
+    t1 = b["轨道1_K扩展"]
+    t2 = b["轨道2_月度合并"]
+    # ① K 网格必须包含「K·p=1 的临界点」，否则判不了「跨 1 是不是真杠杆」
+    assert 2251 in t1["K网格"]
+    assert t1["重叠上限"] == 3
+    assert "40" in str(t1["候选池口径"])
+    # ② 月内上限必须是逐期上限的合并式，不是 13K 注的并集
+    assert "min(1,K·p)" in t2["月内上限公式"]
+    assert t2["期数每月"] == 13
+    # ③ 层 1 数字自洽：上限 ≥ 随机基线，且空间 = 上限 − 基线
+    for r in t2["格"]:
+        assert r["月内理论上限"] >= r["月内随机基线"] - 1e-12, r["彩种"]
+        assert r["月内可争取空间"] == pytest.approx(
+            r["月内理论上限"] - r["月内随机基线"], abs=1e-12)
+    # ④ 跨 1 所需注数必须与单注 p 自洽（ceiling(1/p)）
+    for c in t1["跨1所需"]:
+        assert c["K跨1所需"] == int(-(-1 // c["单注p"])), c["彩种"]
+        assert c["K跨1所需"] * c["单注p"] >= 1.0
+
+
+def test_v19_does_not_claim_confirmatory_power():
+    """两条轨道都在层 1 内判决 ⇒ 不许出现「已证实/已证明」这类确认性措辞。"""
+    b = PR.load()["四等门_二次评估"]
+    blob = json.dumps(b, ensure_ascii=False)
+    assert "不产生新的确认性声明" in blob
+    for bad in ("证伪", "证否", "已证明", "不可预测"):
+        assert bad not in blob, bad

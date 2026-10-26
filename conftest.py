@@ -33,6 +33,14 @@ _TARGETS = (
     # 娱乐预算账本（v1.8 新增，「本月已投」跨期状态）。不加这一条，用例会把真实
     # config/budget_ledger.json 写成「本月已投 400 元」，让当晚真实包络闸门误判额度耗尽。
     ("ev.budget_envelope", "LEDGER_PATH", "budget_ledger.json"),
+    # 手动定额表（v2 动态包络新增）。这是**唯一能上调额度**的通道，比账本更危险：
+    # 用例一旦写脏 config/budget_manual.json，真实判定会拿一个测试额度当上限，
+    # 而且 `default_envelope()` 每次都读它 ⇒ 影响面覆盖所有彩种。
+    ("ev.budget_envelope", "MANUAL_PATH", "budget_manual.json"),
+    # 覆盖选择的**本机**调参文件（v1.9）。默认值写在代码里，本文件只做覆盖。
+    # 不隔离的话，本机上「关掉双色球覆盖」的调参会把出号路径用例整批判红/判绿，
+    # 而 CI 上看不出原因（仓库里没有这个文件）。
+    ("prediction.coverage_production", "CONFIG_PATH", "coverage_production.json"),
 )
 
 

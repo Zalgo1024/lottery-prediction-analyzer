@@ -254,7 +254,9 @@ def _decide_core(lottery: str, issue: Any, tickets: Optional[Sequence[dict]] = N
 def decide(lottery: str, issue: Any, tickets: Optional[Sequence[dict]] = None,
            K: int = 20, min_history: int = 1200, allow_mc: bool = False,
            seed: int = 0, *, envelope: Any = None,
-           spent_this_month: float = 0.0) -> Dict[str, Any]:
+           spent_this_month: float = 0.0,
+           periods_done: Optional[int] = None,
+           periods_total: Optional[int] = None) -> Dict[str, Any]:
     """`_decide_core` + 可选的**娱乐预算包络闸门**（v1.8，用户指令一）。
 
     ★ 默认 `envelope=None` ⇒ 与 v1.7 返回**逐位相同**（不新增任何键），
@@ -262,6 +264,8 @@ def decide(lottery: str, issue: Any, tickets: Optional[Sequence[dict]] = None,
     ★ 传入 `envelope` 时只做一件事：把上游判决与包络**取更保守者**
       （见 `ev/budget_envelope.gate_verdict`，只降级不升级）。
       它不重判 EV —— EV 归本判定树，闸门只管「本月还剩多少钱」。
+    ★ `periods_done` / `periods_total`（v1.9）：传了才启用**机制①滚动分摊**
+      （单期上限 = 剩余额度 ÷ 剩余期数）；不传 ⇒ 静态单期上限，与 v1.8 一致。
     """
     out = _decide_core(lottery, issue, tickets=tickets, K=K,
                        min_history=min_history, allow_mc=allow_mc, seed=seed)
@@ -270,7 +274,9 @@ def decide(lottery: str, issue: Any, tickets: Optional[Sequence[dict]] = None,
 
     from ev import budget_envelope as BE
     gate = BE.gate_verdict(out.get("判决"), envelope, spent_this_month,
-                           want_tickets=out.get("注数"))
+                           want_tickets=out.get("注数"),
+                           periods_done=periods_done,
+                           periods_total=periods_total)
     out["包络"] = gate
     if gate["是否降级"]:
         out["上游判决"] = out.get("判决")

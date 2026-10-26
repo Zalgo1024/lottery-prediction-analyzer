@@ -1985,6 +1985,34 @@ def predict(
     if predicted_date is None:
         predicted_date = next_draw_date(lottery_name)
 
+    # ===== 覆盖选择（v1.9 接生产，双色球 ≥10元）=====
+    # ★ 只重排「至少中一次达标」的分布，**不改注数、不改单注概率、不改期望回款**。
+    #   判据是精确枚举概率（与开奖无关，无前视）；池由 (彩种,期号) 派生 seed，
+    #   同期跨进程可复现。任何异常一律沿用原票 —— 出号路径不许因为优化失败而断。
+    _cov_kpi = None
+    try:
+        from prediction import coverage_production as _CP
+        if _CP.is_enabled(lottery_name):
+            _cov_rows, _cov_kpi = _CP.select(lottery_name, len(predicted_sets),
+                                             issue=_tgt_issue)
+            if _cov_kpi.get("跳过"):
+                pass                                 # 空间不足 ⇒ 明确跳过，沿用原票
+            elif len(_cov_rows) == len(predicted_sets):
+                predicted_sets = [
+                    PredictSet(zones=row, confidence=0.0, strategy="覆盖选择",
+                               score_detail={"覆盖选择": "按整组覆盖设计；单注无策略置信度"})
+                    for row in _cov_rows
+                ]
+            else:                                    # 理论上被 _validate 挡住，双保险
+                _cov_kpi["是否替换"] = False
+                _cov_kpi["降级原因"] = (f"注数不符 {len(_cov_rows)} != "
+                                        f"{len(predicted_sets)} ⇒ 沿用原票")
+    except Exception as e:                           # noqa: BLE001
+        logger.warning(f"覆盖选择失败，沿用原票：{type(e).__name__}: {e}")
+        _cov_kpi = {"启用": True, "是否替换": False,
+                    "降级原因": f"{type(e).__name__}: {e}",
+                    "诚实声明": "覆盖选择失败 ⇒ 本次使用原策略票，未做任何覆盖优化"}
+
     # 预测模式标签：单策略模式保持原值，便于前端/战绩识别具体策略
     mode_label = mode if mode in ("fresh", "trained", "rule", "high_freq", "missing",
                                   "balanced", "lowcrowd") else "trained"
@@ -2003,6 +2031,10 @@ def predict(
     #   "质量线 + 重叠" 处真减注（回填只保底 min_keep）⇒ pending 组数 < 滑轨，
     #   复用判据永不成立。数字型路径（_predict_generic）一直有写，这里补齐。
     result["目标注数"] = groups
+    if _cov_kpi is not None:
+        # 覆盖选择的证据一并落库：选中臂、精确P、与随机基线的差、诚实声明。
+        # ★ 不许只报「提升」不报「回款不变」—— 诚实声明是同一块里的必填字段。
+        result["覆盖优化"] = _cov_kpi
     if _prune_kpi is not None:
         result["剪枝统计"] = _prune_kpi
     if any(int((_pad_kpi or {}).get(k) or 0) for k in ("回填剪枝票", "随机补齐", "截断")):
