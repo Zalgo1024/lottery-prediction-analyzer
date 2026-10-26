@@ -62,7 +62,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ok('侧栏含「鲁棒性检验」', nav.sideTexts.some(t => t.includes('鲁棒性')), nav.sideTexts.join('|'));
   ok('侧栏含「对比分析」', nav.sideTexts.some(t => t.includes('对比')), '');
   ok('顶栏含「命中」', nav.navTexts.some(t => t.includes('命中')), '');
-  ok('顶栏含「数据体检」', nav.navTexts.some(t => t.includes('数据体检')), '');
+  ok('顶栏含「证据看板」', nav.navTexts.some(t => t.includes('证据看板')), '');
   ok('两侧都有「开奖数据库」', nav.navTexts.some(t => t.includes('数据库')) && nav.sideTexts.some(t => t.includes('数据库')), '');
   ok('侧栏分成 3 组', nav.sections.length === 3, JSON.stringify(nav.sections));
 

@@ -7,6 +7,7 @@
     <!-- 内联 favicon：此前浏览器请求 /favicon.ico 一律 404，控制台每次都留一条红字 -->
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='10' cy='16' r='6' fill='%23ef4444'/%3E%3Ccircle cx='22' cy='16' r='6' fill='%232563eb'/%3E%3C/svg%3E">
     <link rel="stylesheet" href="/static/css/style.css?v={{ asset_ver('css/style.css') }}">
+    {% block head %}{% endblock %}
 </head>
 <body>
 
@@ -47,5 +48,6 @@
 </div>
 
 <script src="/static/js/main.js?v={{ asset_ver('js/main.js') }}"></script>
+{% block scripts %}{% endblock %}
 </body>
 </html>

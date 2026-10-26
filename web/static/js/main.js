@@ -63,7 +63,7 @@ function _mechanismCardHtml(m) {
     const title = `${ico('microscope')} 机制缝隙（四轨测量）`;
     const foot = `<p style="font-size:12px;color:var(--gray);margin-top:8px">`
         + `本卡只读测量缓存、不触发新测量，也<strong>不计入战绩统计</strong>；`
-        + `完整四轨裁决见 <a href="/audit" style="color:var(--primary)">数据体检看板 ⑧</a>，`
+        + `完整四轨裁决见 <a href="/audit" style="color:var(--primary)">测量与证据看板 ⑧</a>，`
         + `最新数据可运行 <code>python cli.py gap</code>。</p>`;
     if (!m || m.未测量) {
         return `<div class="card" style="margin-top:15px"><h3>${title}</h3>`

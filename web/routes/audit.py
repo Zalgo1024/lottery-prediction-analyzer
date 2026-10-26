@@ -1,18 +1,28 @@
 """
-数据体检看板 Web 路由（P3：开奖质量监控 + EV 看板 + P/L 反馈）
+测量与证据看板 Web 路由（八块只读指标）
 
-- GET /audit                         数据体检看板页面
-- GET /api/audit/quality/<lottery>   开奖质量监控（数据质量评分+异常分区）
-- GET /api/audit/ev/<lottery>        EV 看板（名义EV表 + 限号/撞号修正 + 冷门TOP）
-- GET /api/audit/rollover/<lottery>  双/大 Rollover-EV（参与信号）
-- GET /api/audit/pl/<lottery>        P/L 反馈摘要（命中率 | 模拟盈亏 | 权重）
-- GET /api/audit/distance/<lottery>  距离画像（观测 vs 随机基线）
-- GET /api/audit/payout_profile/<lottery> 实得画像（流行度LRT+反事实回测，NetPayout WP4）
-- GET /api/audit/trials/<lottery>          A/B 对照进度 + 人群漂移裁决（NetPayout WP5）
-- GET /api/audit/attribution/<lottery>    中奖归因（来源×策略×档位 + 最新批次撞号覆盖）
-- GET /api/audit/attribution_global       六彩种归因汇总
+★ 页面在导航里叫「证据看板」（侧栏「测量与证据看板」），本 docstring、导航 note、
+  模板 h2 三处用同一句话，避免重演「三者各说一套」。
 
-定位：只呈现各项质量与 EV 指标，不输出任何"中奖承诺"。
+- GET /audit                         测量与证据看板页面
+- GET /api/audit/quality/<lottery>   ① 开奖质量监控（数据质量评分+异常分区）
+- GET /api/audit/ev/<lottery>        ② EV 看板（名义EV表 + 限号/撞号修正 + 冷门TOP）
+- GET /api/audit/rollover/<lottery>  ② 双/大回落：Rollover-EV（参与信号）
+- GET /api/audit/pl/<lottery>        ③ P/L 反馈摘要（命中率 | 模拟盈亏 | 权重）
+- GET /api/audit/distance/<lottery>  ④ 距离画像（观测 vs 随机基线）
+- GET /api/audit/payout_profile/<lottery> ⑤ 实得画像（流行度LRT+反事实回测，NetPayout WP4）
+- GET /api/audit/trials/<lottery>         ⑥ A/B 对照进度 + 人群漂移裁决（NetPayout WP5）
+- GET /api/audit/attribution/<lottery>    ⑦ 中奖归因（来源×策略×档位 + 最新批次撞号覆盖）
+- GET /api/audit/attribution_global       ⑦ 六彩种归因汇总
+- GET /api/audit/gap/<lottery>            ⑧ 机制缝隙测量状态卡（四轨裁决）
+- GET /api/audit/gap_global               ⑧ 六彩种缝隙测量汇总
+- GET /api/audit/glossary                 本页术语与卡片口径（文案单一真源）
+
+定位：只呈现已测量的结果与它们的适用边界，不输出任何"中奖承诺"。
+
+★ 名词边界：本站真正的「数据体检」是离线脚本 `scripts/health_check.py` 与
+  `scripts/scan_data_integrity.py`（A~G 七项完整性扫描），结论落在
+  `logs/项目体检_*.md` 与推送里，**不在本页**。本页改名正是为了让出这个词。
 """
 
 from flask import Blueprint, jsonify, render_template, request
@@ -30,7 +40,9 @@ _ALL = ["双色球", "大乐透", "排列5", "福彩3D", "排列3", "七星彩"]
 
 @bp.route("/audit")
 def page():
-    return render_template("audit.html", all_lotteries=_ALL)
+    from web.audit_glossary import cards_public
+    # ★ 卡片骨架（序号/标题/id）来自术语模块，模板不再自己抄一遍标题清单。
+    return render_template("audit.html", all_lotteries=_ALL, audit_cards=cards_public())
 
 
 @bp.route("/api/audit/quality/<lottery>")
@@ -235,3 +247,16 @@ def api_gap_global():
     from ev.mechanism.snapshot import mechanism_snapshot_all
 
     return jsonify(mechanism_snapshot_all())
+
+
+@bp.route("/api/audit/glossary")
+@api_error_handler
+def api_glossary():
+    """本页术语与卡片口径（文案单一真源）。
+
+    ★ 前端的名词速查抽屉、术语 hover 气泡、每张卡的「在测什么 / 名词 / 口径与诚实边界」
+      三段都从这里取。**不许**在模板或 JS 里手抄这些文案——并发分支会各自过期。
+    """
+    from web.audit_glossary import glossary_payload
+
+    return jsonify(glossary_payload())

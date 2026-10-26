@@ -1,0 +1,394 @@
+/*
+ * /audit —— 测量与证据看板 专用样式
+ *
+ * ★ 为什么单独一份文件：
+ *   页面原本把同一段盒子样式内联抄了 8 遍，并同时跑着 4 套色板
+ *   （:root 的 Teal、带 fallback 的 Tailwind 灰蓝、Bootstrap 语义色、以及一组紫/灰）。
+ *   本文件把它们收敛成**一套**语义态变量 + `audit-` 前缀类名，
+ *   `style.css`（全站公共）保持不变。
+ *
+ * ★ 纪律：文案一律不进 CSS（不用 content:），所有说明文字走后端口径字段或前端 JS。
+ *   原因：`tests/test_narrative_unbinding.py` 只扫 .py/.html/.js，不扫 .css；
+ *   把文案藏进 CSS 就等于绕开红线扫描器，那是纪律漏洞不是偷懒。
+ */
+
+/* ------------------------------------------------------------ 语义态色板 */
+
+:root {
+    /* 卡片六态：ok 正常 / warn 注意 / none 无结论 / nodata 数据不足 /
+       unmeasured 未测量 / error 加载失败 */
+    --audit-ok: #2e7d32;
+    --audit-warn: #b9770e;
+    --audit-none: #5b8def;
+    --audit-nodata: #7f8c8d;
+    --audit-unmeasured: #8a6d00;
+    --audit-error: #c0392b;
+
+    /* 图表双色：取代原先内联的 #534AB7 / #B4B2A9 */
+    --audit-obs: #4ECDC4;
+    --audit-base: #B0BEC5;
+
+    /* 面两套历史伪变量（style.css 里根本没定义过，只有 fallback 在兜底），
+       在这里补真身，免得继续在各处写 var(--color-x, #y) */
+    --audit-border: #e5e7eb;
+    --audit-surface: #f9fafb;
+    --audit-surface-solid: #ffffff;
+}
+
+/* ------------------------------------------------------------ 工具栏 */
+
+.audit-toolbar {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    align-items: center;
+    margin: 15px 0;
+    padding: 10px 12px;
+    border: 1px solid var(--audit-border);
+    border-radius: 8px;
+    background: var(--audit-surface);
+}
+
+.audit-toolbar-spacer { flex: 1 1 auto; }
+
+.audit-toolbar select { padding: 8px 15px; border: 1px solid #ddd; border-radius: 5px; font-size: 14px; }
+
+.audit-tool-meta { color: var(--gray); font-size: 13px; }
+
+/* ------------------------------------------------------------ 第一层：摘要 */
+
+.audit-summary {
+    margin: 12px 0 18px;
+    padding: 14px 16px;
+    border: 1px solid var(--audit-border);
+    border-radius: 8px;
+    background: var(--audit-surface-solid);
+}
+
+.audit-sum-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
+    margin-top: 10px;
+}
+
+.audit-sum-card {
+    border: 1px solid var(--audit-border);
+    border-left: 4px solid var(--audit-nodata);
+    border-radius: 6px;
+    padding: 8px 10px;
+    background: var(--audit-surface);
+    cursor: pointer;
+    transition: background .12s ease;
+}
+
+.audit-sum-card:hover { background: #f0f4f8; }
+
+.audit-sum-card[data-s="ok"]         { border-left-color: var(--audit-ok); }
+.audit-sum-card[data-s="warn"]       { border-left-color: var(--audit-warn); }
+.audit-sum-card[data-s="none"]       { border-left-color: var(--audit-none); }
+.audit-sum-card[data-s="nodata"]     { border-left-color: var(--audit-nodata); }
+.audit-sum-card[data-s="unmeasured"] { border-left-color: var(--audit-unmeasured); }
+.audit-sum-card[data-s="error"]      { border-left-color: var(--audit-error); }
+
+.audit-sum-no { font-size: 12px; color: var(--gray); }
+.audit-sum-name { font-size: 13px; font-weight: 600; color: var(--dark); margin: 2px 0 4px; }
+.audit-sum-line { font-size: 12px; color: #555; line-height: 1.5; }
+
+/* ------------------------------------------------------------ 第二层：布局 + 锚点 */
+
+.audit-layout {
+    display: grid;
+    grid-template-columns: 186px minmax(0, 1fr);
+    gap: 18px;
+    align-items: start;
+}
+
+.audit-anchors {
+    position: sticky;
+    top: calc(var(--nav-height, 50px) + 12px);
+    max-height: calc(100vh - 90px);
+    overflow-y: auto;
+    border: 1px solid var(--audit-border);
+    border-radius: 8px;
+    background: var(--audit-surface-solid);
+    padding: 8px;
+}
+
+.audit-anchors-title { font-size: 12px; color: var(--gray); padding: 2px 6px 6px; }
+
+.audit-anchors a {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 8px;
+    border-radius: 5px;
+    font-size: 13px;
+    color: var(--dark);
+    text-decoration: none;
+    line-height: 1.4;
+}
+
+.audit-anchors a:hover { background: #f0f0f0; }
+.audit-anchors a.active { background: #e8f6f5; font-weight: 600; }
+
+.audit-anchor-dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 8px; background: var(--audit-nodata); }
+.audit-anchor-dot[data-s="ok"]         { background: var(--audit-ok); }
+.audit-anchor-dot[data-s="warn"]       { background: var(--audit-warn); }
+.audit-anchor-dot[data-s="none"]       { background: var(--audit-none); }
+.audit-anchor-dot[data-s="nodata"]     { background: var(--audit-nodata); }
+.audit-anchor-dot[data-s="unmeasured"] { background: var(--audit-unmeasured); }
+.audit-anchor-dot[data-s="error"]      { background: var(--audit-error); }
+
+.audit-anchor-tools { display: flex; gap: 6px; padding: 6px 4px 2px; border-top: 1px solid var(--audit-border); margin-top: 6px; }
+.audit-anchor-tools button { flex: 1; font-size: 12px; padding: 4px 6px; border: 1px solid #ddd; background: #fff; border-radius: 4px; cursor: pointer; }
+.audit-anchor-tools button:hover { background: #f0f0f0; }
+
+/* ------------------------------------------------------------ 第三层：卡片 */
+
+.audit-cards { display: flex; flex-direction: column; gap: 12px; }
+
+.audit-card {
+    border: 1px solid var(--audit-border);
+    border-radius: 8px;
+    background: var(--audit-surface);
+    scroll-margin-top: 70px;      /* 抵消 50px 顶栏，供锚点滚动 */
+    overflow: hidden;
+}
+
+.audit-card[data-status="warn"]       { border-color: #e6cf9a; }
+.audit-card[data-status="error"]      { border-color: #e6b8b8; }
+.audit-card[data-status="unmeasured"] { border-color: #e0d59a; }
+
+.audit-card-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    padding: 12px 14px;
+    cursor: pointer;
+    user-select: none;
+}
+
+.audit-card-head:hover { background: #f0f4f8; }
+
+.audit-card-title { font-size: 15px; font-weight: 600; color: var(--dark); }
+
+.audit-card-oneline {
+    flex: 1 1 240px;
+    min-width: 180px;
+    font-size: 12px;
+    color: #555;
+    line-height: 1.5;
+}
+
+.audit-card-toggle {
+    border: none;
+    background: none;
+    font-size: 13px;
+    color: var(--gray);
+    cursor: pointer;
+    padding: 2px 6px;
+    transition: transform .15s ease;
+}
+
+.audit-card[data-expanded="1"] .audit-card-toggle { transform: rotate(180deg); }
+
+.audit-card-body { padding: 0 14px 14px; border-top: 1px solid var(--audit-border); }
+.audit-card[data-expanded="0"] .audit-card-body { display: none; }
+
+/* ------------------------------------------------------------ 徽章（取代未定义的 .badge） */
+
+.audit-badge {
+    display: inline-block;
+    padding: 1px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 1.7;
+    white-space: nowrap;
+    background: #eef0f2;
+    color: var(--audit-nodata);
+}
+
+.audit-badge--ok    { background: #e6f4e6; color: var(--audit-ok); }
+.audit-badge--warn  { background: #fdf3dd; color: var(--audit-warn); }
+.audit-badge--none  { background: #e8f0fe; color: var(--audit-none); }
+.audit-badge--muted { background: #eef0f2; color: var(--audit-nodata); }
+.audit-badge--unmeasured { background: #fbf3d4; color: var(--audit-unmeasured); }
+.audit-badge--error { background: #fdeaea; color: var(--audit-error); }
+
+/* ------------------------------------------------------------ 指标块 */
+
+.audit-metrics { display: flex; gap: 22px; flex-wrap: wrap; margin: 8px 0 12px; }
+.audit-metric { min-width: 96px; }
+.audit-metric-v { font-size: 20px; font-weight: 700; color: var(--dark); line-height: 1.3; }
+.audit-metric-v.is-lg { font-size: 26px; }
+.audit-metric-l { font-size: 12px; color: var(--gray); margin-top: 2px; }
+.audit-metric-sub { font-size: 12px; color: var(--gray); }
+
+.audit-cols { display: flex; gap: 22px; flex-wrap: wrap; }
+.audit-col { flex: 1 1 220px; min-width: 200px; }
+
+/* ------------------------------------------------------------ 文字件 */
+
+.audit-note { font-size: 12px; color: var(--gray); line-height: 1.6; margin-top: 6px; }
+.audit-note-item { margin-top: 6px; font-size: 13px; color: var(--gray); line-height: 1.6; }
+.audit-note-item::before { content: "\00B7\00A0"; }   /* 中点 + 不换行空格（纯排版符，不是文案） */
+
+.audit-callout {
+    border-left: 3px solid var(--primary);
+    background: var(--audit-surface-solid);
+    padding: 8px 12px;
+    font-size: 13px;
+    line-height: 1.7;
+    margin-top: 8px;
+}
+
+.audit-section-title { font-size: 13px; font-weight: 600; color: var(--dark); margin: 0 0 6px; }
+
+/* ------------------------------------------------------------ 表格（统一两种写法） */
+
+.audit-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 6px; }
+.audit-table th, .audit-table td { padding: 6px 8px; text-align: left; }
+.audit-table--bare th { color: var(--gray); font-weight: 600; }
+
+/* ------------------------------------------------------------ 图件 */
+
+.audit-bar { height: 8px; border-radius: 4px; background: #eceff1; overflow: hidden; margin-top: 6px; }
+.audit-bar-fill { height: 100%; background: #2563eb; border-radius: 4px; }
+
+.audit-bars { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.audit-bar-row { display: grid; grid-template-columns: 58px 1fr; align-items: center; gap: 8px; font-size: 12px; }
+.audit-bar-stack { display: flex; height: 12px; border-radius: 3px; overflow: hidden; background: #f2f4f6; }
+.audit-bar-obs { height: 100%; background: var(--audit-obs); }
+.audit-bar-base { height: 100%; background: var(--audit-base); opacity: .85; }
+
+.audit-legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--gray); margin-top: 8px; }
+.audit-legend-item { display: flex; align-items: center; gap: 5px; }
+.audit-legend-swatch { width: 11px; height: 11px; border-radius: 2px; display: inline-block; }
+
+/* ------------------------------------------------------------ 卡片内置三段说明（考试要不要？要） */
+
+.audit-card-details {
+    margin: 0 0 12px;
+    border: 1px solid var(--audit-border);
+    border-radius: 6px;
+    background: var(--audit-surface-solid);
+    font-size: 13px;
+}
+
+.audit-card-details > summary {
+    cursor: pointer;
+    padding: 8px 12px;
+    color: var(--dark);
+    font-weight: 600;
+    list-style: none;
+}
+
+.audit-card-details > summary::-webkit-details-marker { display: none; }
+.audit-card-details > summary::before { content: "\25B8\00A0"; color: var(--gray); }
+.audit-card-details[open] > summary::before { content: "\25BE\00A0"; }
+
+.audit-card-details > section { padding: 0 12px 10px; }
+.audit-card-details h4 { font-size: 12px; color: var(--gray); margin: 8px 0 4px; font-weight: 600; }
+.audit-card-details p { margin: 0; line-height: 1.75; color: #444; }
+.audit-card-details dl { margin: 0; }
+.audit-card-details dt { font-weight: 600; color: var(--dark); margin-top: 6px; font-size: 12px; }
+.audit-card-details dd { margin: 1px 0 0; color: #555; line-height: 1.7; font-size: 12px; }
+
+/* ------------------------------------------------------------ 解释层 */
+
+.audit-explain { font-size: 12px; color: var(--gray); line-height: 1.6; }
+
+/* 术语：虚线下划线。关闭解释时保留这条——用户仍可靠 hover 取解释。 */
+.term {
+    text-decoration: underline dotted currentColor;
+    text-underline-offset: 3px;
+    cursor: help;
+}
+
+.audit-pop {
+    position: fixed;
+    z-index: 1200;
+    max-width: 360px;
+    background: #fff;
+    border: 1px solid #d6dde3;
+    border-radius: 8px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, .14);
+    padding: 10px 12px;
+    font-size: 12.5px;
+    line-height: 1.7;
+    color: #333;
+}
+
+.audit-pop h5 { margin: 0 0 4px; font-size: 13px; color: var(--dark); }
+.audit-pop .p-kind { font-size: 11px; color: var(--gray); font-weight: 400; margin-left: 6px; }
+.audit-pop .p-cal { margin-top: 6px; color: #666; font-size: 12px; }
+.audit-pop .p-more { margin-top: 8px; text-align: right; }
+.audit-pop .p-more button { border: none; background: none; color: var(--primary); cursor: pointer; font-size: 12px; padding: 0; }
+
+/* 名词速查抽屉 */
+.audit-drawer-mask {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, .35);
+    z-index: 1300;
+}
+
+.audit-drawer {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: 420px;
+    max-width: 92vw;
+    background: #fff;
+    z-index: 1301;
+    box-shadow: -6px 0 24px rgba(0, 0, 0, .16);
+    display: flex;
+    flex-direction: column;
+    animation: audit-slide-in .18s ease-out;
+}
+
+@keyframes audit-slide-in { from { transform: translateX(24px); opacity: .4; } to { transform: none; opacity: 1; } }
+
+.audit-drawer-head { padding: 12px 14px; border-bottom: 1px solid var(--audit-border); }
+.audit-drawer-head input { width: 100%; padding: 7px 10px; border: 1px solid #ddd; border-radius: 5px; font-size: 13px; margin-top: 8px; }
+.audit-drawer-close { float: right; border: none; background: none; font-size: 20px; line-height: 1; cursor: pointer; color: var(--gray); }
+
+.audit-drawer-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.audit-drawer-chip {
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    border: 1px solid #ddd;
+    background: #fff;
+    cursor: pointer;
+    color: #555;
+}
+.audit-drawer-chip.on { background: #e8f6f5; border-color: var(--primary); color: var(--dark); font-weight: 600; }
+
+.audit-drawer-list { overflow-y: auto; padding: 10px 14px 20px; flex: 1; }
+.audit-drawer-item { border-bottom: 1px dashed #eceef0; padding: 8px 0; }
+.audit-drawer-item h4 { margin: 0; font-size: 13px; color: var(--dark); }
+.audit-drawer-item p { margin: 2px 0 0; font-size: 12px; color: #555; line-height: 1.7; }
+.audit-drawer-empty { color: var(--gray); font-size: 13px; padding: 14px 0; }
+
+/* 「解释」关闭态：隐掉常驻灰字与折叠说明，但保留 hover 气泡与全部数据 */
+body.explain-off .audit-explain,
+body.explain-off .audit-card-details,
+body.explain-off .audit-note { display: none; }
+
+/* ------------------------------------------------------------ 响应式 */
+
+@media (max-width: 900px) {
+    .audit-layout { grid-template-columns: minmax(0, 1fr); }
+    .audit-anchors { position: static; max-height: none; }
+    .audit-anchors-list { display: flex; flex-wrap: wrap; gap: 4px; }
+    .audit-sum-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 560px) {
+    .audit-sum-grid { grid-template-columns: minmax(0, 1fr); }
+}

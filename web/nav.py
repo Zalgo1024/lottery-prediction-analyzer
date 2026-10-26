@@ -13,7 +13,7 @@
   label  —— 顶栏用的短名（≤4 字，避免顶栏过挤）
   side   —— 侧栏用的全名；缺省时回退 label
   icon   —— 侧栏 SVG 的内层 path 内容（顶栏不显示图标）
-  danger —— 是否用警示红（数据体检看板）
+  danger —— 是否用警示红（当前无页面使用；保留字段以防回退）
   note   —— 悬停提示
 """
 
@@ -89,8 +89,8 @@ NAV_GROUPS = [
             _item("/records", "战绩", "策略战绩", "records"),
             _item("/ev", "期望", "期望时机", "ev"),
             _item("/feedback", "反馈", "反馈闭环", "feedback"),
-            _item("/audit", "数据体检", "数据体检看板", "audit", danger=True,
-                  note="数据完整性与口径一致性体检"),
+            _item("/audit", "证据看板", "测量与证据看板", "audit",
+                  note="开奖质量 · EV · P/L · 距离与实得画像 · A/B 对照 · 中奖归因 · 机制缝隙（只读，不触发测量）"),
         ],
     },
 ]

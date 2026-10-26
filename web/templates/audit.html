@@ -1,64 +1,69 @@
 {% extends "base.html" %}
-{% block content %}
-<h2><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg> 数据体检看板（质量监控 · EV · P/L）</h2>
-<p style="color:var(--gray);margin-bottom:15px">质量监控与 EV 指标一览（不承诺中奖率）。</p>
 
-<div style="margin:15px 0;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+{% block head %}
+<link rel="stylesheet" href="/static/css/audit.css?v={{ asset_ver('css/audit.css') }}">
+{% endblock %}
+
+{% block content %}
+<h2><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg> 测量与证据看板（质量 · EV · P/L · 机制缝隙）</h2>
+<p style="color:var(--gray);margin-bottom:15px">八块<b>只读</b>指标：① 开奖质量监控、② 名义 EV、③ 反馈盈亏、④ 距离画像、⑤ 实得画像、⑥ 前瞻 A/B 对照、⑦ 中奖归因、⑧ 机制缝隙测量。<br>本页只呈现<b>已测量的结果</b>，不输出任何中奖承诺，也不在这里触发测量。每张卡顶部有「这张卡在测什么 / 关键名词 / 口径与诚实边界」；结论的适用范围由后端单一真源给出（见下方「诚实边界」与每张卡的同名小节），本页面不另写一份。</p>
+<div class="alert alert-info" style="font-size:13px">ℹ️ 真正的「数据体检」（期号连续性、重复期号、号码合法性、数据滞后等 A~G 七项）是离线脚本 <code>scripts/health_check.py</code> 的产物，结论写在 <code>logs/项目体检_*.md</code> 与推送里，<b>不在本页</b>。本页只做指标测量。</div>
+
+<!-- 工具栏：彩种选择 + 刷新 + 解释开关 + 名词速查 -->
+<div class="audit-toolbar">
   <select id="hn-lottery" style="padding:8px 15px;border:1px solid #ddd;border-radius:5px;font-size:14px">
     {% for l in all_lotteries %}<option value="{{ l }}">{{ l }}</option>{% endfor %}
   </select>
   <button class="btn btn-primary" onclick="loadAll()">刷新</button>
-  <span style="color:var(--gray);font-size:13px" id="hn-meta"></span>
+  <span class="audit-toolbar-spacer"></span>
+  <button class="btn" id="btn-explain" onclick="EXPL.toggleExplain()"
+          title="关闭后只隐藏常驻说明灰字与卡片说明面板；术语的虚线下划线与 hover 解释仍然保留">解释：开</button>
+  <button class="btn" id="btn-glossary" onclick="EXPL.openDrawer()"
+          title="本页全部专业名词与数据口径的速查表（支持搜索与按卡片筛选）">名词速查</button>
+  <span class="audit-tool-meta" id="hn-meta"></span>
 </div>
 
-<!-- ① 开奖质量监控 -->
-<div style="margin:10px 0;padding:14px 16px;border:1px solid var(--color-border-secondary,#e5e7eb);border-radius:8px;background:var(--color-background-secondary,#f9fafb)">
-  <h3 style="margin:0 0 10px">① 开奖质量监控（第③支柱 data_quality）</h3>
-  <div id="hn-quality"><div class="alert alert-info">加载中…</div></div>
+<!-- 第一层：摘要（八格状态一览，点一下跳到对应卡片） -->
+<div class="audit-summary">
+  <div style="font-size:13px;color:var(--gray)">第一层 · 八张卡片的状态一览。点任意一格会展开并跳到那张卡；<b>解释：开</b>时每张卡顶部还有「这张卡在测什么 / 关键名词 / 口径与诚实边界」。</div>
+  <div class="audit-sum-grid" id="audit-sum-grid"></div>
+  <div class="audit-callout audit-explain" id="audit-page-caveat" style="display:none"></div>
 </div>
 
-<!-- ② EV 看板 -->
-<div style="margin:10px 0;padding:14px 16px;border:1px solid var(--color-border-secondary,#e5e7eb);border-radius:8px;background:var(--color-background-secondary,#f9fafb)">
-  <h3 style="margin:0 0 10px">② EV 看板（结构性边）</h3>
-  <div id="hn-ev"><div class="alert alert-info">加载中…</div></div>
+<!-- 第二层：左侧锚点导航；第三层：卡片列表（默认收起，异常自动展开） -->
+<div class="audit-layout">
+  <nav class="audit-anchors">
+    <div class="audit-anchors-title">卡片导航</div>
+    <div class="audit-anchors-list" id="audit-anchors-list"></div>
+    <div class="audit-anchor-tools">
+      <button onclick="EXPL.expandAll()">全部展开</button>
+      <button onclick="EXPL.collapseAll()">全部收起</button>
+    </div>
+  </nav>
+  <div class="audit-cards" id="audit-cards">
+    {% for c in audit_cards %}
+    <section class="audit-card" data-card="{{ c.key }}" id="card-{{ c.key }}" data-expanded="0" data-status="nodata">
+      <header class="audit-card-head" onclick="EXPL.toggleCard('{{ c.key }}')" title="点击展开/收起这张卡的明细">
+        <span class="audit-card-title">{{ c.序号 }} {{ c.标题 }}</span>
+        <span class="audit-badge audit-badge--muted" id="badge-{{ c.key }}">加载中</span>
+        <span class="audit-card-oneline" id="oneline-{{ c.key }}"></span>
+        <button class="audit-card-toggle" aria-expanded="false" aria-label="展开或收起">▾</button>
+      </header>
+      <div class="audit-card-body">
+        <details class="audit-card-details" id="details-{{ c.key }}">
+          <summary>这张卡在测什么 / 关键名词 / 口径与诚实边界</summary>
+          <div id="dbody-{{ c.key }}"></div>
+        </details>
+        <div id="{{ c.id }}"><div class="alert alert-info">等待加载…</div></div>
+      </div>
+    </section>
+    {% endfor %}
+  </div>
 </div>
+{% endblock %}
 
-<!-- ③ P/L 反馈 -->
-<div style="margin:10px 0;padding:14px 16px;border:1px solid var(--color-border-secondary,#e5e7eb);border-radius:8px;background:var(--color-background-secondary,#f9fafb)">
-  <h3 style="margin:0 0 10px">③ 反馈闭环 P/L（命中率 | 模拟盈亏 | 权重）</h3>
-  <div id="hn-pl"><div class="alert alert-info">加载中…</div></div>
-</div>
-
-<!-- ④ 距离画像 -->
-<div style="margin:10px 0;padding:14px 16px;border:1px solid var(--color-border-secondary,#e5e7eb);border-radius:8px;background:var(--color-background-secondary,#f9fafb)">
-  <h3 style="margin:0 0 10px">④ 距离画像（预测差多远 vs 随机基线）</h3>
-  <div id="hn-distance"><div class="alert alert-info">加载中…</div></div>
-</div>
-
-<!-- ⑤ 实得画像（NetPayout WP4） -->
-<div style="margin:10px 0;padding:14px 16px;border:1px solid var(--color-border-secondary,#e5e7eb);border-radius:8px;background:var(--color-background-secondary,#f9fafb)">
-  <h3 style="margin:0 0 10px">⑤ 实得画像（组合流行度检验 + 反事实回测）</h3>
-  <div id="hn-payout"><div class="alert alert-info">加载中…（首次拟合需数秒）</div></div>
-</div>
-
-<!-- ⑥ A/B 对照 + 漂移监控（NetPayout WP5） -->
-<div style="margin:10px 0;padding:14px 16px;border:1px solid var(--color-border-secondary,#e5e7eb);border-radius:8px;background:var(--color-background-secondary,#f9fafb)">
-  <h3 style="margin:0 0 10px">⑥ A/B 对照实验 + 人群漂移监控</h3>
-  <div id="hn-trials"><div class="alert alert-info">加载中…</div></div>
-</div>
-
-<!-- ⑦ 中奖归因（哪一批、哪个策略、哪个档位在出奖） -->
-<div style="margin:10px 0;padding:14px 16px;border:1px solid var(--color-border-secondary,#e5e7eb);border-radius:8px;background:var(--color-background-secondary,#f9fafb)">
-  <h3 style="margin:0 0 10px">⑦ 中奖归因（来源 × 策略 × 档位）</h3>
-  <div id="hn-attribution"><div class="alert alert-info">加载中…</div></div>
-</div>
-
-<!-- ⑧ 机制缝隙测量（四轨：A 注数比 / A′ 数字型注数比 / B 开奖号冷门度 / C 结构偏差 / D 派奖期） -->
-<div style="margin:10px 0;padding:14px 16px;border:1px solid var(--color-border-secondary,#e5e7eb);border-radius:8px;background:var(--color-background-secondary,#f9fafb)">
-  <h3 style="margin:0 0 10px">⑧ 机制缝隙测量（四轨）</h3>
-  <div id="hn-gap"><div class="alert alert-info">加载中…</div></div>
-</div>
-
+{% block scripts %}
+<script src="/static/js/audit_explain.js?v={{ asset_ver('js/audit_explain.js') }}"></script>
 <script>
 const HN_LOTTERY = document.getElementById("hn-lottery");
 
@@ -66,27 +71,34 @@ function esc(s) {
   return String(s == null ? "" : s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 }
 function num(x, d = 4) { return x == null ? "-" : (typeof x === "number" ? x.toFixed(d) : x); }
+function pct(x, d = 1) { return x == null ? "-" : (x * 100).toFixed(d) + "%"; }
+/** 状态徽章（取代曾经未被 CSS 定义的 .badge / .badge-success / .badge-warning） */
+function badge(txt, kind) {
+  return `<span class="audit-badge audit-badge--${esc(kind || "muted")}">${esc(txt)}</span>`;
+}
+function metric(label, value, sub) {
+  return `<div class="audit-metric"><div class="audit-metric-l">${esc(label)}</div>` +
+         `<div class="audit-metric-v">${value}</div>` +
+         (sub ? `<div class="audit-metric-sub">${sub}</div>` : "") + `</div>`;
+}
 
 async function loadAll() {
   const lot = HN_LOTTERY.value;
-  document.getElementById("hn-meta").textContent = "彩种：" + lot + "（数据抓取：数字型走体彩官方接口/500.com，双大走 500.com）";
-  loadQuality(lot);
-  loadEv(lot);
-  loadPl(lot);
-  loadDistance(lot);
-  loadPayoutProfile(lot);
-  loadTrials(lot);
-  loadAttribution(lot);
-  loadGap(lot);
+  const s = new Date();
+  document.getElementById("hn-meta").textContent = `彩种：${lot}（数据抓取：${s.toLocaleTimeString("zh-CN")}）`;
+  await Promise.all([
+    loadQuality(lot), loadEv(lot), loadPl(lot), loadDistance(lot),
+    loadPayoutProfile(lot), loadTrials(lot), loadAttribution(lot), loadGap(lot),
+  ]);
 }
 
 async function loadQuality(lot) {
   const el = document.getElementById("hn-quality");
-  el.innerHTML = '<div class="alert alert-info">加载质量监控…</div>';
+  el.innerHTML = '<div class="alert alert-info">加载开奖质量监控…</div>';
   try {
     const r = await fetch(`/api/audit/quality/${encodeURIComponent(lot)}`);
     const d = await r.json();
-    if (d.error) { el.innerHTML = `<div class="alert alert-warning">${esc(d.error)}</div>`; return; }
+    if (d.error) { el.innerHTML = `<div class="alert alert-warning">${esc(d.error)}</div>`; EXPL.onCardRendered("quality", el, d); return; }
     let rows = "";
     for (const t of (d.tests || [])) {
       rows += `<tr>
@@ -94,26 +106,33 @@ async function loadQuality(lot) {
         <td>${esc(t.检验 || "")}</td>
         <td>${num(t.统计量)}</td>
         <td>${num(t.p值 || t["p值(MC)"], 6)}</td>
-        <td>${t.实质显著 ? '<span style="color:#c0392b;font-weight:600">是</span>' : '<span style="color:#27ae60">否</span>'}</td>
+        <td>${t.实质显著 ? badge("是", "warn") : badge("否", "ok")}</td>
       </tr>`;
     }
+    const sc = (d.trust_score >= 80 ? "var(--audit-ok)" : d.trust_score >= 60 ? "var(--audit-warn)" : "var(--audit-error)");
     el.innerHTML = `
-      <div style="display:flex;gap:30px;flex-wrap:wrap;margin-bottom:10px">
-        <div><strong>数据质量评分</strong><br><span style="font-size:26px;font-weight:700;color:${d.trust_score >= 80 ? "#27ae60" : d.trust_score >= 60 ? "#f39c12" : "#c0392b"}">${esc(d.trust_score)}</span>/100</div>
-        <div><strong>评级</strong><br><span style="font-size:20px">${esc(d.grade)}</span></div>
-        <div><strong>期数</strong><br>${esc(d.n_records || d.records || "-")}</div>
-        <div><strong>重复</strong><br>${esc(d.duplicates)}${d.expected_duplicates == null ? "" : ` <span style="font-size:12px;color:var(--gray)">/ 生日悖论基线 ${esc(d.expected_duplicates)}</span>`}</div>
-        <div><strong>真缺期</strong><br>${esc(d.issue_gaps)} <span style="font-size:12px;color:var(--gray)">按年分组，跨年不计</span></div>
-        <div><strong>最大日期间隔</strong><br>${esc(d.max_date_gap_days)}天 <span style="font-size:12px;color:var(--gray)">多为休市</span></div>
+      <div class="audit-metrics">
+        <div class="audit-metric"><div class="audit-metric-l">数据质量评分</div>
+          <div class="audit-metric-v is-lg" style="color:${sc}">${esc(d.trust_score)}<span style="font-size:13px;color:var(--gray)"> /100</span></div></div>
+        <div class="audit-metric"><div class="audit-metric-l">评级</div><div class="audit-metric-v">${esc(d.grade)}</div></div>
+        <div class="audit-metric"><div class="audit-metric-l">期数</div><div class="audit-metric-v">${esc(d.n_records || d.records || "-")}</div></div>
+        <div class="audit-metric"><div class="audit-metric-l">重复</div><div class="audit-metric-v">${esc(d.duplicates)}</div>
+          ${d.expected_duplicates == null ? "" : `<div class="audit-metric-sub">生日悖论基线 ${esc(d.expected_duplicates)}</div>`}</div>
+        <div class="audit-metric"><div class="audit-metric-l">真缺期</div><div class="audit-metric-v">${esc(d.issue_gaps)}</div>
+          <div class="audit-metric-sub">按年分组，跨年不计</div></div>
+        <div class="audit-metric"><div class="audit-metric-l">最大日期间隔</div><div class="audit-metric-v">${esc(d.max_date_gap_days)} 天</div>
+          <div class="audit-metric-sub">多为休市</div></div>
       </div>
-      <table class="table" style="width:100%;border-collapse:collapse;font-size:13px">
+      <table class="audit-table">
         <thead><tr><th>分区</th><th>检验</th><th>统计量</th><th>p值</th><th>实质显著</th></tr></thead>
         <tbody>${rows || '<tr><td colspan="5">无检验项</td></tr>'}</tbody>
       </table>
-      ${(d.notes || []).map(n => `<div style="margin-top:6px;color:var(--gray);font-size:13px">· ${esc(n)}</div>`).join("")}
+      ${(d.notes || []).map(n => `<div class="audit-note-item">${esc(n)}</div>`).join("")}
     `;
+    EXPL.onCardRendered("quality", el, d);
   } catch (e) {
-    el.innerHTML = `<div class="alert alert-warning">质量监控加载失败：${esc(e.message)}</div>`;
+    el.innerHTML = `<div class="alert alert-warning">开奖质量监控加载失败：${esc(e.message)}</div>`;
+    EXPL.onCardRendered("quality", el, {__error: e.message});
   }
 }
 
@@ -129,57 +148,70 @@ async function loadEv(lot) {
       const d2 = await r2.json();
       if (!d2.error) {
         el.innerHTML = `
-          <div style="margin-bottom:8px"><strong>Rollover-EV（奖池滚动窗口）</strong>：期号 ${esc(d2.期号)}</div>
-          <div style="display:flex;gap:30px;flex-wrap:wrap;margin-bottom:8px">
-            <div><strong>奖池</strong><br>¥${num(d2.奖池, 0)}</div>
-            <div><strong>头奖单注估计</strong><br>¥${num(d2["头奖单注奖金估计"], 0)}</div>
-            <div><strong>头奖期望贡献</strong><br>${num(d2["头奖期望贡献"], 6)}</div>
-            <div><strong>总EV/注</strong><br>${num(d2["总EV(每注)"], 4)}</div>
-            <div><strong>参与信号</strong><br>${d2["参与信号"] ? '<span style="color:#c0392b;font-weight:700">★ EV天花板窗口</span>' : '<span style="color:#27ae60">不参与</span>'}</div>
+          <div class="audit-note-item">Rollover-EV（奖池滚动窗口）· 期号 ${esc(d2.期号)}</div>
+          <div class="audit-metrics">
+            <div class="audit-metric"><div class="audit-metric-l">奖池</div><div class="audit-metric-v">¥${num(d2.奖池, 0)}</div></div>
+            <div class="audit-metric"><div class="audit-metric-l">头奖单注估计</div><div class="audit-metric-v">¥${num(d2["头奖单注奖金估计"], 0)}</div></div>
+            <div class="audit-metric"><div class="audit-metric-l">头奖期望贡献</div><div class="audit-metric-v">${num(d2["头奖期望贡献"], 6)}</div></div>
+            <div class="audit-metric"><div class="audit-metric-l">总EV/注</div><div class="audit-metric-v">${num(d2["总EV(每注)"], 4)}</div></div>
+            <div class="audit-metric"><div class="audit-metric-l">参与信号</div>
+              <div class="audit-metric-v">${d2["参与信号"] ? badge("EV天花板窗口", "warn") : badge("不参与", "ok")}</div></div>
           </div>
-          <div style="color:var(--gray);font-size:13px">${esc(d2.备注)}</div>
-          <div style="margin-top:8px;font-size:12px;color:var(--gray)">近10期趋势：${(d2["趋势(近10期)"] || []).map(x => `${esc(x.期号)}:${num(x["头奖单注估计"],0)}${x["参与信号"] ? "★" : ""}`).join("  ")}</div>
+          <div class="audit-note-item">${esc(d2.备注)}</div>
+          <div class="audit-note">近10期趋势：${(d2["趋势(近10期)"] || []).map(x => `${esc(x.期号)}:${num(x["头奖单注估计"],0)}${x["参与信号"] ? "★" : ""}`).join("  ")}</div>
         `;
+        EXPL.onCardRendered("ev", el, {__rollover: true, 参与信号: d2["参与信号"], 总EV: d2["总EV(每注)"]});
       } else {
         el.innerHTML = `<div class="alert alert-warning">${esc(d.error)}</div>`;
+        EXPL.onCardRendered("ev", el, d);
       }
       return;
     }
     const evRows = (d.名义EV表 || []).map(x => `<tr><td>${esc(x.玩法)}</td><td>${num(x.名义EV)}</td></tr>`).join("");
-    // 拥挤度/分薄列：v2 模型行键="分薄乘数(≈1=独享)"（≈1=冷门独享），v1 行键="拥挤分位"
-    const crowdCol = (x, d = 4) => num((x["分薄乘数(≈1=独享)"] ?? x["拥挤分位"]), d);
+    // ★ 拥挤度/分薄列：v2 模型行键="分薄乘数(≈1=独享)"（≈1=冷门独享），v1 行键="拥挤分位"。
+    //   两者语义方向相反（乘数≈1=冷门；分位越高越热门），原先合并成一个表头会让读者按错方向读。
+    //   现在按本批数据实际存在的键动态给表头，并附一句方向说明。
+    const first = (d.冷门TOP || [])[0] || {};
+    const useMul = ("分薄乘数(≈1=独享)" in first);
+    const crowdHead = useMul ? "分薄乘数(≈1=独享)" : "拥挤分位";
+    const crowdHint = useMul
+      ? "≈1 = 几乎没人跟你抢（冷门独享）；数值越大 = 被越多注摊薄。"
+      : "0~1，数值越高越热门（买的人越多），与「分薄乘数」方向相反。";
+    const crowdCol = (x, dd = 4) => num((x["分薄乘数(≈1=独享)"] ?? x["拥挤分位"]), dd);
     const coldRows = (d.冷门TOP || []).map((x, i) => `<tr>
       <td>${i + 1}</td><td>${esc(x.号码)}</td><td>${num(x["限号EV"])}</td>
       <td>${crowdCol(x)}</td></tr>`).join("");
     const sampleRows = (d.约束采样 || []).map(x => `<tr><td>${esc(x.号码)}</td><td>${num(x["拥挤分位"], 4)}</td><td>${num(x["和值"], 0)}</td></tr>`).join("");
     el.innerHTML = `
-      <div style="color:var(--gray);font-size:13px;margin-bottom:10px">${esc(d.机制)}</div>
-      <div style="display:flex;gap:30px;flex-wrap:wrap">
-        <div style="flex:1;min-width:220px">
-          <strong>名义EV/注</strong>
-          <table class="table" style="width:100%;border-collapse:collapse;font-size:13px;margin-top:6px">
+      <div class="audit-note-item" style="list-style:none">${esc(d.机制)}</div>
+      <div class="audit-cols">
+        <div class="audit-col">
+          <div class="audit-section-title">名义EV/注</div>
+          <table class="audit-table">
             <thead><tr><th>玩法</th><th>名义EV(元)</th></tr></thead>
             <tbody>${evRows}</tbody>
           </table>
         </div>
-        <div style="flex:1;min-width:220px">
-          <strong>冷门号 TOP5（限号EV / 拥挤度·分薄乘数）</strong>
-          <table class="table" style="width:100%;border-collapse:collapse;font-size:13px;margin-top:6px">
-            <thead><tr><th>#</th><th>号码</th><th>限号EV</th><th>拥挤分位/乘数</th></tr></thead>
+        <div class="audit-col">
+          <div class="audit-section-title">冷门号 TOP5（限号EV / ${esc(crowdHead)}）</div>
+          <table class="audit-table">
+            <thead><tr><th>#</th><th>号码</th><th>限号EV</th><th>${esc(crowdHead)}</th></tr></thead>
             <tbody>${coldRows || '<tr><td colspan="4">无可计算</td></tr>'}</tbody>
           </table>
+          <div class="audit-note">${esc(crowdHint)}</div>
         </div>
-        <div style="flex:1;min-width:220px">
-          <strong>约束采样（反大众，3组）</strong>
-          <table class="table" style="width:100%;border-collapse:collapse;font-size:13px;margin-top:6px">
+        <div class="audit-col">
+          <div class="audit-section-title">约束采样（反大众，3组）</div>
+          <table class="audit-table">
             <thead><tr><th>号码</th><th>拥挤分位</th><th>和值</th></tr></thead>
             <tbody>${sampleRows || '<tr><td colspan="3">无可计算</td></tr>'}</tbody>
           </table>
         </div>
-      </div>
-    `;
+      </div>`;
+    EXPL.onCardRendered("ev", el, d);
   } catch (e) {
     el.innerHTML = `<div class="alert alert-warning">EV 加载失败：${esc(e.message)}</div>`;
+    EXPL.onCardRendered("ev", el, {__error: e.message});
   }
 }
 
@@ -189,7 +221,7 @@ async function loadPl(lot) {
   try {
     const r = await fetch(`/api/audit/pl/${encodeURIComponent(lot)}`);
     const d = await r.json();
-    if (d.error) { el.innerHTML = `<div class="alert alert-warning">${esc(d.error)}</div>`; return; }
+    if (d.error) { el.innerHTML = `<div class="alert alert-warning">${esc(d.error)}</div>`; EXPL.onCardRendered("pl", el, d); return; }
     const rows = Object.entries(d.strategies || {}).map(([name, st]) => `
       <tr>
         <td>${esc(name)}</td>
@@ -201,26 +233,27 @@ async function loadPl(lot) {
       </tr>`).join("");
     const wRows = Object.entries(d.weights || {}).map(([name, w]) => `<tr><td>${esc(name)}</td><td>${(w * 100).toFixed(2)}%</td></tr>`).join("");
     el.innerHTML = `
-      <div style="color:var(--gray);font-size:13px;margin-bottom:8px">共 ${esc(d.total_records ?? 0)} 条反馈（真预测 ${esc(d.valid_records ?? 0)}）· 待开奖 ${esc(d.pending_count ?? 0)}</div>
-      <div style="display:flex;gap:30px;flex-wrap:wrap">
-        <div style="flex:2;min-width:320px">
-          <strong>各策略（命中率 | 模拟盈亏并列）</strong>
-          <table class="table" style="width:100%;border-collapse:collapse;font-size:13px;margin-top:6px">
+      <div class="audit-note-item" style="list-style:none">共 ${esc(d.total_records ?? 0)} 条反馈（真预测 ${esc(d.valid_records ?? 0)}）· 待开奖 ${esc(d.pending_count ?? 0)}</div>
+      <div class="audit-cols">
+        <div class="audit-col" style="flex:2;min-width:320px">
+          <div class="audit-section-title">各策略（命中率 | 模拟盈亏并列）</div>
+          <table class="audit-table">
             <thead><tr><th>策略</th><th>样本</th><th>平均命中率</th><th>平均盈亏</th><th>累计盈亏</th><th>中奖率</th></tr></thead>
             <tbody>${rows || '<tr><td colspan="6">暂无反馈</td></tr>'}</tbody>
           </table>
         </div>
-        <div style="flex:1;min-width:180px">
-          <strong>策略权重（P/L 驱动）</strong>
-          <table class="table" style="width:100%;border-collapse:collapse;font-size:13px;margin-top:6px">
+        <div class="audit-col" style="flex:1;min-width:180px">
+          <div class="audit-section-title">策略权重（P/L 驱动）</div>
+          <table class="audit-table">
             <thead><tr><th>策略</th><th>权重</th></tr></thead>
-            <tbody>${wRows || '<tr><td colspan="2">暂无</td></tr>'}</tbody>
+            <tbody>${wRows || '<tr><td colspan="2">暂无权重</td></tr>'}</tbody>
           </table>
         </div>
-      </div>
-    `;
+      </div>`;
+    EXPL.onCardRendered("pl", el, d);
   } catch (e) {
     el.innerHTML = `<div class="alert alert-warning">P/L 加载失败：${esc(e.message)}</div>`;
+    EXPL.onCardRendered("pl", el, {__error: e.message});
   }
 }
 
@@ -230,7 +263,7 @@ async function loadDistance(lot) {
   try {
     const r = await fetch(`/api/audit/distance/${encodeURIComponent(lot)}`);
     const d = await r.json();
-    if (d.error) { el.innerHTML = `<div class="alert alert-warning">${esc(d.error)}</div>`; return; }
+    if (d.error) { el.innerHTML = `<div class="alert alert-warning">${esc(d.error)}</div>`; EXPL.onCardRendered("distance", el, d); return; }
 
     // 分布条形对比：同一横轴（距离 k），观测 vs 基线两条
     const keys = Array.from(new Set([...Object.keys(d.观测分布 || {}), ...Object.keys(d.基线比例 || {})]))
@@ -245,42 +278,44 @@ async function loadDistance(lot) {
       const hBase = 46 * p / maxP;
       bars += `<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;min-width:26px">
         <div style="display:flex;align-items:flex-end;gap:2px;height:48px">
-          <div title="观测 ${cnt} 条" style="width:9px;height:${Math.max(hObs, cnt ? 2 : 0)}px;background:#534AB7;border-radius:2px 2px 0 0"></div>
-          <div title="基线 ${(p * 100).toFixed(1)}%" style="width:9px;height:${Math.max(hBase, p ? 2 : 0)}px;background:#B4B2A9;border-radius:2px 2px 0 0"></div>
+          <div class="audit-bar-obs" title="观测 ${cnt} 条" style="width:9px;height:${Math.max(hObs, cnt ? 2 : 0)}px;border-radius:2px 2px 0 0"></div>
+          <div class="audit-bar-base" title="随机基线 ${(p * 100).toFixed(1)}%" style="width:9px;height:${Math.max(hBase, p ? 2 : 0)}px;border-radius:2px 2px 0 0"></div>
         </div>
         <span style="font-size:11px;color:var(--gray)">${k}</span>
       </div>`;
     }
 
-    const pct = x => x == null ? "-" : (x * 100).toFixed(1) + "%";
     el.innerHTML = `
-      <div style="color:var(--gray);font-size:13px;margin-bottom:8px">
+      <div class="audit-note-item" style="list-style:none">
         距离 D = 总可中位数(${esc(d.总可中位数)}) − 实际命中数（${esc(d.类型)}）。D 越小越接近；
-        灰条是「真实开奖随机配对」的基线分布——瞎猜能达到的水平。
+        灰条是「真实开奖随机配对」的基线分布——随机挑能达到的水平。
       </div>
-      <div style="display:flex;gap:26px;flex-wrap:wrap;align-items:flex-start">
-        <div style="flex:1;min-width:300px">
-          <div style="display:flex;gap:20px;flex-wrap:wrap;margin-bottom:8px;font-size:13px">
-            <div><strong>样本</strong><br>${esc(d.样本数)} 条</div>
-            <div><strong>观测中位距离</strong><br><span style="color:#534AB7;font-weight:600">${num(d.观测中位距离, 1)}</span></div>
-            <div><strong>基线中位距离</strong><br>${num(d.基线中位距离, 1)}</div>
-            <div><strong>近距离率 D≤1（观测 / 基线）</strong><br>${pct(d.近距离率)} / ${pct(d.基线近距离率)}</div>
+      <div class="audit-cols">
+        <div class="audit-col" style="flex:1;min-width:300px">
+          <div class="audit-metrics">
+            <div class="audit-metric"><div class="audit-metric-l">样本</div><div class="audit-metric-v">${esc(d.样本数)}</div></div>
+            <div class="audit-metric"><div class="audit-metric-l">观测中位距离</div>
+              <div class="audit-metric-v" style="color:var(--audit-obs)">${num(d.观测中位距离, 1)}</div></div>
+            <div class="audit-metric"><div class="audit-metric-l">基线中位距离</div><div class="audit-metric-v">${num(d.基线中位距离, 1)}</div></div>
+            <div class="audit-metric"><div class="audit-metric-l">近距离率 D≤1（观测 / 基线）</div>
+              <div class="audit-metric-v">${pct(d.近距离率)} / ${pct(d.基线近距离率)}</div></div>
           </div>
           <div style="display:flex;align-items:flex-end;gap:4px">${bars}</div>
-          <div style="font-size:12px;color:var(--gray);margin-top:4px">
-            横轴 = 距离 D ·
-            <span style="display:inline-block;width:9px;height:9px;background:#534AB7;border-radius:2px;vertical-align:middle"></span> 观测
-            <span style="display:inline-block;width:9px;height:9px;background:#B4B2A9;border-radius:2px;vertical-align:middle;margin-left:8px"></span> 随机基线
+          <div class="audit-legend">
+            <span class="audit-legend-item"><span class="audit-legend-swatch audit-bar-obs"></span>观测</span>
+            <span class="audit-legend-item"><span class="audit-legend-swatch audit-bar-base"></span>随机基线</span>
+            <span class="audit-legend-item">横轴 = 距离 D</span>
           </div>
         </div>
-        <div style="flex:1;min-width:260px;font-size:13px">
-          <div style="padding:8px 10px;border-left:3px solid #534AB7;background:#fff;border-radius:4px">${esc(d.结论)}</div>
-          ${(d.备注 || []).map(n => `<div style="margin-top:5px;color:var(--gray);font-size:12px">· ${esc(n)}</div>`).join("")}
+        <div class="audit-col" style="flex:1;min-width:260px;font-size:13px">
+          <div class="audit-callout">${esc(d.结论)}</div>
+          ${(d.备注 || []).map(n => `<div class="audit-note-item">${esc(n)}</div>`).join("")}
         </div>
-      </div>
-    `;
+      </div>`;
+    EXPL.onCardRendered("distance", el, d);
   } catch (e) {
     el.innerHTML = `<div class="alert alert-warning">距离画像加载失败：${esc(e.message)}</div>`;
+    EXPL.onCardRendered("distance", el, {__error: e.message});
   }
 }
 
@@ -290,7 +325,7 @@ async function loadPayoutProfile(lot) {
   try {
     const r = await fetch(`/api/audit/payout_profile/${encodeURIComponent(lot)}`);
     const d = await r.json();
-    if (d.error) { el.innerHTML = `<div class="alert alert-warning">${esc(d.error)}</div>`; return; }
+    if (d.error) { el.innerHTML = `<div class="alert alert-warning">${esc(d.error)}</div>`; EXPL.onCardRendered("payout", el, d); return; }
     const fit = d["流行度检验"] || {};
     const cf = d["反事实回测"] || {};
 
@@ -303,20 +338,20 @@ async function loadPayoutProfile(lot) {
         <td>${num(fit.beta_raw?.[i])}</td>
         <td>${num(fit.beta_p?.[i])}</td>
       </tr>`).join("");
-      const goBadge = fit.go
-        ? '<span style="color:#27ae60;font-weight:700">✓ GO</span>'
-        : '<span style="color:#c0392b;font-weight:700">✗ NO-GO</span>';
       fitHtml = `
-        <div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:8px;font-size:13px">
-          <div><strong>裁决</strong><br>${goBadge}</div>
-          <div><strong>样本期数</strong><br>${esc(fit.n)}</div>
-          <div><strong>LRT</strong><br>χ²=${num(fit.lrt_stat, 1)}, df=${esc(fit.lrt_df)}, p=${fit.lrt_p == null ? "-" : fit.lrt_p.toExponential(2)}</div>
-          <div><strong>CV 优于零模型</strong><br>${esc(fit.cv_better_folds)}/${esc((fit.cv_full || []).length)} 折</div>
+        <div class="audit-metrics">
+          <div class="audit-metric"><div class="audit-metric-l">裁决</div>
+            <div class="audit-metric-v">${fit.go ? badge("GO", "ok") : badge("NO-GO", "warn")}</div></div>
+          <div class="audit-metric"><div class="audit-metric-l">样本期数</div><div class="audit-metric-v">${esc(fit.n)}</div></div>
+          <div class="audit-metric"><div class="audit-metric-l">LRT</div>
+            <div class="audit-metric-v" style="font-size:13px">χ²=${num(fit.lrt_stat, 1)}, df=${esc(fit.lrt_df)}, p=${fit.lrt_p == null ? "-" : fit.lrt_p.toExponential(2)}</div></div>
+          <div class="audit-metric"><div class="audit-metric-l">CV 优于零模型</div>
+            <div class="audit-metric-v">${esc(fit.cv_better_folds)}/${esc((fit.cv_full || []).length)} 折</div></div>
         </div>
-        <div style="color:var(--gray);font-size:12px;margin-bottom:8px">${esc(fit.verdict)}</div>
+        <div class="audit-note-item">${esc(fit.verdict)}</div>
         <details style="font-size:13px">
           <summary style="cursor:pointer">特征系数（β &gt; 0 = 该形态更热门 → 中头奖被更多人分）</summary>
-          <table class="table" style="width:100%;max-width:480px;border-collapse:collapse;margin-top:6px">
+          <table class="audit-table" style="max-width:480px">
             <thead><tr><th>特征</th><th>β</th><th>p</th></tr></thead>
             <tbody>${betaRows}</tbody>
           </table>
@@ -326,41 +361,42 @@ async function loadPayoutProfile(lot) {
     let cfHtml;
     if (cf.go) {
       cfHtml = `
-        <div style="display:flex;gap:24px;flex-wrap:wrap;font-size:13px;align-items:flex-start">
-          <div><strong>实得提升倍数（冷门 vs 热门）</strong><br>
-            <span style="font-size:26px;font-weight:700;color:#534AB7">${num(cf["实得提升倍数_中位"], 2)}×</span><br>
-            <span style="color:var(--gray)">P25–P75：${num(cf["实得提升倍数_P25"], 2)} – ${num(cf["实得提升倍数_P75"], 2)}</span></div>
-          <div><strong>冷门组合（10%分位）</strong><br>${esc(cf["冷门组合"])}<br>
-            <span style="color:var(--gray)">μ 中位 ${num(cf["μ_冷门_中位"], 2)}</span></div>
-          <div><strong>热门组合（90%分位）</strong><br>${esc(cf["热门组合"])}<br>
-            <span style="color:var(--gray)">μ 中位 ${num(cf["μ_热门_中位"], 2)}</span></div>
-          <div><strong>预测μ vs 实际中奖率</strong><br>Spearman ${num(cf["spearman_预测μ_vs_实际中奖率"], 3)}
-            (p=${cf.spearman_p === 0 ? "≈0" : num(cf.spearman_p)})</div>
+        <div class="audit-metrics">
+          <div class="audit-metric"><div class="audit-metric-l">实得提升倍数（冷门 vs 热门）</div>
+            <div class="audit-metric-v is-lg" style="color:var(--audit-obs)">${num(cf["实得提升倍数_中位"], 2)}×</div>
+            <div class="audit-metric-sub">P25–P75：${num(cf["实得提升倍数_P25"], 2)} – ${num(cf["实得提升倍数_P75"], 2)}</div></div>
+          <div class="audit-metric"><div class="audit-metric-l">冷门组合（10%分位）</div>
+            <div class="audit-metric-v" style="font-size:13px">${esc(cf["冷门组合"])}</div>
+            <div class="audit-metric-sub">μ 中位 ${num(cf["μ_冷门_中位"], 2)}</div></div>
+          <div class="audit-metric"><div class="audit-metric-l">热门组合（90%分位）</div>
+            <div class="audit-metric-v" style="font-size:13px">${esc(cf["热门组合"])}</div>
+            <div class="audit-metric-sub">μ 中位 ${num(cf["μ_热门_中位"], 2)}</div></div>
+          <div class="audit-metric"><div class="audit-metric-l">预测μ vs 实际中奖率</div>
+            <div class="audit-metric-v" style="font-size:13px">Spearman ${num(cf["spearman_预测μ_vs_实际中奖率"], 3)}</div>
+            <div class="audit-metric-sub">p=${cf.spearman_p === 0 ? "≈0" : num(cf.spearman_p)}</div></div>
         </div>
-        <div style="padding:8px 10px;border-left:3px solid #534AB7;background:#fff;border-radius:4px;margin-top:10px;font-size:13px">${esc(cf.结论)}</div>`;
+        <div class="audit-callout">${esc(cf.结论)}</div>`;
     } else {
       cfHtml = `<div class="alert alert-warning">${esc(cf.note || "反事实回测不适用（诚实否决）")}</div>`;
     }
 
     el.innerHTML = `
-      <div style="color:var(--gray);font-size:13px;margin-bottom:8px">${esc(d.定位 || "")}
-        与第④卡片对称：距离画像证明「不会更常中」，本卡片回答「同样概率下，冷门组合中了能拿更多吗」。</div>
-      <div style="display:flex;gap:26px;flex-wrap:wrap;align-items:flex-start">
-        <div style="flex:1;min-width:320px">
-          <strong>组合流行度检验（Poisson 回归 + LRT + 时序CV）</strong>
+      <div class="audit-note-item" style="list-style:none">${esc(d.定位 || "")}
+        与第④卡片对称：距离画像看「有没有更常中」，本卡片回答「同样中奖的情况下，冷门组合能多分到多少」。</div>
+      <div class="audit-cols">
+        <div class="audit-col" style="flex:1;min-width:320px">
+          <div class="audit-section-title">组合流行度检验（Poisson 回归 + LRT + 时序CV）</div>
           <div style="margin-top:6px">${fitHtml}</div>
         </div>
-        <div style="flex:1;min-width:320px">
-          <strong>历史反事实回测（含 1000 万封顶）</strong>
+        <div class="audit-col" style="flex:1;min-width:320px">
+          <div class="audit-section-title">历史反事实回测（含 1000 万封顶）</div>
           <div style="margin-top:6px">${cfHtml}</div>
         </div>
-      </div>
-      <div style="margin-top:10px;font-size:12px;color:var(--gray)">
-        ⚠️ 本卡片不改变中奖概率；冷门组合提升的是「中头奖时的期望实得」（平分制下被更少人分摊）。
-        长期单注期望仍为负（约 −0.8 元）。已按方案公开否决的彩种如实标注 NO-GO。
       </div>`;
+    EXPL.onCardRendered("payout", el, d);
   } catch (e) {
     el.innerHTML = `<div class="alert alert-warning">实得画像加载失败：${esc(e.message)}</div>`;
+    EXPL.onCardRendered("payout", el, {__error: e.message});
   }
 }
 
@@ -378,41 +414,34 @@ async function loadTrials(lot) {
     const plan = (t.功效规划 && t.功效规划.规划 && t.功效规划.规划[0]) || null;
     const need = plan ? plan.需要期数 : 60;
     const done = t.已结算期数 || 0;
-    const pct = Math.min(100, Math.round(done / Math.max(need, 1) * 100));
-
-    const badge = (ok, txt) => `<span class="badge ${ok ? "badge-success" : "badge-warning"}">${esc(txt)}</span>`;
+    const pct_ = Math.min(100, Math.round(done / Math.max(need, 1) * 100));
 
     let segHtml = "";
     if (dr.分段提升 && dr.分段提升.length) {
       segHtml = dr.分段提升.map(s =>
         `<div>第${s.段}段（${s.期数}期）：<strong>${s.倍数_中位}×</strong></div>`).join("");
     }
-    const driftStable = dr.裁决 === "稳定";
-    const driftOk = driftStable || String(dr.裁决 || "").indexOf("结论仍稳定") >= 0;
+    const driftOk = dr.裁决 === "稳定" || String(dr.裁决 || "").indexOf("结论仍稳定") >= 0;
 
     const trialHtml = done >= 2 ? `
       <div>A 累计中奖 <strong>${t.A累计中奖注数}</strong> 注 / B <strong>${t.B累计中奖注数}</strong> 注（差 ${t.中奖注数差 >= 0 ? "+" : ""}${t.中奖注数差}）</div>
       <div>有差异期数 ${t.有差异期数}（A 占优 ${t.A占优期数}）· 符号检验 p=${t.符号检验p} · 序贯 e-value=${t.序贯e_value}</div>
-      <div style="margin-top:4px;color:var(--gray)">次终点（实得奖金）仅存档：Δ=¥${t.实得差Δ}（不可检验）</div>` : "";
+      <div class="audit-note">次终点（实得奖金）仅存档：Δ=¥${t.实得差Δ}（不可检验）</div>` : "";
 
     el.innerHTML = `
-      <div style="display:flex;gap:16px;flex-wrap:wrap">
-        <div style="flex:1;min-width:320px">
-          <strong>前瞻 A/B 对照 ${badge(t.等价性成立 === true, t.等价性成立 === true ? "等价性成立" : "积累中")}</strong>
-          <div style="margin:8px 0">
-            <div style="background:var(--color-border-secondary,#e5e7eb);border-radius:4px;height:10px;overflow:hidden">
-              <div style="background:#2563eb;height:100%;width:${pct}%"></div>
-            </div>
-            <div style="font-size:12px;color:var(--gray);margin-top:4px">
-              已结算 ${done} / ${need} 期（${pct}%）——满格=可检出 20% 中奖率差异
-              ${plan ? `≈ ${plan.折合年数} 年` : ""}
-            </div>
+      <div class="audit-cols">
+        <div class="audit-col" style="flex:1;min-width:320px">
+          <div class="audit-section-title">前瞻 A/B 对照 ${badge(t.等价性成立 === true ? "等价性成立" : "积累中", t.等价性成立 === true ? "ok" : "none")}</div>
+          <div class="audit-bar"><div class="audit-bar-fill" style="width:${pct_}%"></div></div>
+          <div class="audit-note">
+            已结算 ${done} / ${need} 期（${pct_}%）——满格 = 可检出 20% 中奖率差异
+            ${plan ? `≈ ${plan.折合年数} 年` : ""}
           </div>
           ${trialHtml}
           <div style="margin-top:6px;font-size:13px">${esc(t.裁决 || "")}</div>
         </div>
-        <div style="flex:1;min-width:320px">
-          <strong>人群行为漂移 ${badge(driftOk, dr.裁决 || "-")}</strong>
+        <div class="audit-col" style="flex:1;min-width:320px">
+          <div class="audit-section-title">人群行为漂移 ${badge(dr.裁决 || "-", driftOk ? "ok" : "muted")}</div>
           <div style="margin-top:6px">${segHtml || '<span style="color:var(--gray)">（本彩种不适用）</span>'}</div>
           ${dr.β漂移_p !== undefined && dr.β漂移_p !== null ? `
           <div style="margin-top:4px">β 前后半段 χ²=${dr.β漂移卡方}（df=${dr.β漂移_df}）p=${dr.β漂移_p}
@@ -420,14 +449,11 @@ async function loadTrials(lot) {
           ${dr.剔除最早段后倍数中位 ? `<div>剔除最早段后中位：<strong>${dr.剔除最早段后倍数中位}×</strong></div>` : ""}
           <div style="margin-top:6px;font-size:13px">${esc(dr.建议 || "")}</div>
         </div>
-      </div>
-      <div style="margin-top:10px;font-size:12px;color:var(--gray)">
-        ⚠️ A/B 对照的主终点是<strong>等价性检验</strong>（证明选号不改变中奖概率 / 检出 bug），
-        不是"证明更有效"；实得奖金差异需真实中一/二等奖（双色球期望等待 ≈1136 年，不可完成）。
-        漂移监控=维护，不会提高提升倍数本身。
       </div>`;
+    EXPL.onCardRendered("trials", el, d);
   } catch (e) {
     el.innerHTML = `<div class="alert alert-warning">A/B 对照加载失败：${esc(e.message)}</div>`;
+    EXPL.onCardRendered("trials", el, {__error: e.message});
   }
 }
 
@@ -437,7 +463,7 @@ function attrTable(rows) {
   const lotCell = r => hasLot
     ? `<td style="font-size:11px;color:var(--gray)">${esc(Object.entries(r.彩种注数 || {}).map(([k, v]) => k + "×" + v).join("  ")) || "—"}</td>`
     : "";
-  const lotHead = hasLot ? '<th style="text-align:left">彩种分布</th>' : "";
+  const lotHead = hasLot ? '<th>彩种分布</th>' : "";
   const body = rows.map(r => `<tr>
     <td>${esc(r.来源)}</td><td>${esc(r.策略)}</td><td>${esc(r.档位)}</td>${lotCell(r)}
     <td style="text-align:right">${r.注数}</td>
@@ -446,12 +472,12 @@ function attrTable(rows) {
     <td style="text-align:right">¥${num(r.名义奖金合计, 0)}</td>
     <td>${esc(Object.entries(r.奖级分布 || {}).map(([k, v]) => k + "×" + v).join("  ")) || "—"}</td>
   </tr>`).join("");
-  return `<table style="width:100%;border-collapse:collapse;font-size:12px">
+  return `<table class="audit-table" style="font-size:12px">
     <thead><tr>
-      <th style="text-align:left">来源</th><th style="text-align:left">策略</th><th style="text-align:left">档位</th>${lotHead}
+      <th>来源</th><th>策略</th><th>档位</th>${lotHead}
       <th style="text-align:right">注数</th><th style="text-align:right">中奖</th>
       <th style="text-align:right">命中率</th><th style="text-align:right">名义奖金</th>
-      <th style="text-align:left">奖级分布</th>
+      <th>奖级分布</th>
     </tr></thead><tbody>${body}</tbody></table>`;
 }
 
@@ -466,9 +492,9 @@ function lotTotalsTable(per) {
     <td style="text-align:right">¥${num(v.总名义奖金 || 0, 0)}</td>
     ${v.奖金未知注数 ? `<td style="text-align:right;color:var(--gray)">+${v.奖金未知注数} 注奖金未知</td>` : "<td></td>"}
   </tr>`).join("");
-  return `<table style="width:100%;border-collapse:collapse;font-size:12px">
+  return `<table class="audit-table" style="font-size:12px">
     <thead><tr>
-      <th style="text-align:left">彩种</th>
+      <th>彩种</th>
       <th style="text-align:right">注数</th><th style="text-align:right">中奖</th>
       <th style="text-align:right">命中率</th><th style="text-align:right">名义奖金</th><th></th>
     </tr></thead><tbody>${body}</tbody></table>`;
@@ -485,16 +511,16 @@ async function loadAttribution(lot) {
     if (!r1.ok) throw new Error(`HTTP ${r1.status}`);
     const d = await r1.json();
     const g = r2.ok ? await r2.json() : {};
-    if (d.error) { el.innerHTML = `<div class="alert alert-warning">${esc(d.error)}</div>`; return; }
+    if (d.error) { el.innerHTML = `<div class="alert alert-warning">${esc(d.error)}</div>`; EXPL.onCardRendered("attribution", el, d); return; }
 
     const cov = d.当前批次覆盖 || {};
     const covHtml = cov.名义注数 !== undefined ? `
-      <div style="margin-top:8px;font-size:12px;color:var(--gray)">
+      <div class="audit-note">
         最新批次（${esc(cov.目标期号 || "-")}）：名义 ${cov.名义注数} 注 →
         剪枝后 <strong>${cov.剪枝后注数}</strong> 注（减注等效 ${cov.减注等效}）；
         平均两两重叠 ${num(cov.平均两两重叠, 3)} vs 随机基线 ${num(cov.随机基线重叠, 3)}，
         超出重叠上限的对占比 ${(100 * (cov.撞号对占比 || 0)).toFixed(2)}%
-      </div>` : '<div style="margin-top:8px;font-size:12px;color:var(--gray)">（无 pending 批次可度量）</div>';
+      </div>` : '<div class="audit-note">（无 pending 批次可度量）</div>';
 
     el.innerHTML = `
       <div><strong>${esc(lot)}</strong>：共 ${d.总注数} 注 · 中奖 ${d.总中奖注数} 注 ·
@@ -505,34 +531,29 @@ async function loadAttribution(lot) {
       <div style="margin-top:14px"><strong>六彩种汇总</strong>
         （总 ${g.总注数 || 0} 注 · 中奖 ${g.总中奖注数 || 0} · 命中率 ${(100 * (g.总命中率 || 0)).toFixed(2)}%）</div>
       <div style="margin-top:6px;overflow-x:auto">${lotTotalsTable(g.各彩种)}</div>
-      <div style="margin-top:10px;font-size:12px;color:var(--gray)">全局合并（来源 × 策略 × 档位，跨彩种相加；「彩种分布」列标注每行内各彩种的注数构成）：</div>
+      <div class="audit-note">全局合并（来源 × 策略 × 档位，跨彩种相加；「彩种分布」列标注每行内各彩种的注数构成）：</div>
       <div style="margin-top:6px;overflow-x:auto">${attrTable(g.全局汇总 || [])}</div>
-      <div style="margin-top:10px;font-size:12px;color:var(--gray)">
-        中奖记录来自<strong>预先锁定</strong>的 pending 批次（开奖后只对比、不重新生成号码），
-        所以每条都能溯源到"哪一批 / 哪个策略 / 哪个档位"。
-        ⚠️ 分组命中率差异不构成"某策略更会选号"的证据（未做多重比较校正）。
-      </div>`;
+      ${d.诚实声明 ? `<div class="audit-note-item" style="list-style:none">${esc(d.诚实声明)}</div>` : ""}`;
+    EXPL.onCardRendered("attribution", el, d);
   } catch (e) {
     el.innerHTML = `<div class="alert alert-warning">中奖归因加载失败：${esc(e.message)}</div>`;
+    EXPL.onCardRendered("attribution", el, {__error: e.message});
   }
 }
 
 // ⑧ 机制缝隙测量：只读缓存的快照 + 六彩种汇总。
-// ⚠️ 文案纪律：裁决=none 时显示「未检出」，绝不能写成「已证明公平 / 无缝隙」；
-//    缓存缺失时显示「尚未测量」，绝不能显示成一张空表（那会被读成"啥都没有"）。
+// ⚠️ 文案纪律：裁决=none 时显示「未检出」，不能写成别的意思；
+//    缓存缺失时显示「尚未测量」，不能显示成一张空表（那会被读成"啥都没有"）。
 const GAP_STATUS_TEXT = {
   "strong": "检出缝隙（多轨一致）",
   "weak": "弱线索（单轨）",
   "none": "未检出",
   "no-track": "无判定轨",
 };
+const GAP_STATUS_KIND = { "strong": "warn", "weak": "warn", "none": "ok", "no-track": "muted" };
 
 function gapBadge(status) {
-  const t = GAP_STATUS_TEXT[status] || status || "-";
-  const color = (status === "strong") ? "#c0392b"
-              : (status === "weak") ? "#b9770e"
-              : (status === "none") ? "#27ae60" : "#7f8c8d";
-  return `<span style="color:${color};font-weight:600">${esc(t)}</span>`;
+  return badge(GAP_STATUS_TEXT[status] || status || "-", GAP_STATUS_KIND[status] || "muted");
 }
 
 function gapSnapshotHtml(snap) {
@@ -548,9 +569,9 @@ function gapSnapshotHtml(snap) {
     ["模型 Go", snap.模型Go == null ? "-" : (snap.模型Go ? "是" : "否")],
     ["测量时间", esc(snap.测量时间 || "-")],
   ];
-  let html = '<div style="margin-top:8px;overflow-x:auto"><table style="border-collapse:collapse;font-size:12px">';
+  let html = '<div style="margin-top:8px;overflow-x:auto"><table class="audit-table audit-table--bare" style="font-size:12px">';
   for (const [k, v] of rows) {
-    html += `<tr><td style="padding:2px 10px 2px 0;color:var(--gray)">${esc(k)}</td><td>${v}</td></tr>`;
+    html += `<tr><th style="color:var(--gray);font-weight:600;white-space:nowrap">${esc(k)}</th><td>${v}</td></tr>`;
   }
   html += "</table></div>";
   return html;
@@ -567,62 +588,59 @@ async function loadGap(lot) {
     if (!r1.ok) throw new Error(`HTTP ${r1.status}`);
     const d = await r1.json();
     const g = r2.ok ? await r2.json() : {};
-    if (d.error) { el.innerHTML = `<div class="alert alert-warning">${esc(d.error)}</div>`; return; }
+    if (d.error) { el.innerHTML = `<div class="alert alert-warning">${esc(d.error)}</div>`; EXPL.onCardRendered("gap", el, d); return; }
 
     if (d.未测量) {
       el.innerHTML = `
         <div class="alert alert-info">${esc(d.提示 || "尚无测量缓存")}</div>
-        <div style="font-size:12px;color:var(--gray)">${esc(d.诚实说明 || "")}</div>`;
+        <div class="audit-note-item">${esc(d.诚实说明 || "")}</div>
+        ${d.说明 ? `<div class="audit-note-item" style="list-style:none">${esc(d.说明)}</div>` : ""}`;
+      EXPL.onCardRendered("gap", el, d);
       return;
     }
 
     const tilt = d.机制倾斜 || {};
     const tiltHtml = tilt.倾斜
-      ? `<span style="color:#c0392b;font-weight:600">已激活</span>（γ=${num(tilt["γ"], 4)}，${esc(tilt.方向 || "")}）`
-      : `<span style="color:#27ae60">未激活</span>（γ=0 → 出号与不倾斜时逐位一致）`;
+      ? `${badge("已激活", "warn")}（γ=${num(tilt["γ"], 4)}，${esc(tilt.方向 || "")}）`
+      : `${badge("未激活", "ok")}（γ=0 → 出号与不倾斜时逐位一致）`;
 
     let sumHtml = "";
     const done = g.已测量 || {};
     const keys = Object.keys(done);
     if (keys.length) {
-      sumHtml = '<div style="margin-top:12px;overflow-x:auto"><table style="border-collapse:collapse;font-size:12px">'
-        + '<tr><th style="text-align:left;padding:3px 12px 3px 0">彩种</th>'
-        + '<th style="text-align:left;padding:3px 12px 3px 0">裁决</th>'
-        + '<th style="text-align:right;padding:3px 12px 3px 0">R</th>'
-        + '<th style="text-align:right;padding:3px 12px 3px 0">ū</th>'
-        + '<th style="text-align:right;padding:3px 12px 3px 0">γ</th></tr>';
+      sumHtml = '<div style="margin-top:12px;overflow-x:auto"><table class="audit-table" style="font-size:12px">'
+        + '<thead><tr><th>彩种</th><th>裁决</th>'
+        + '<th style="text-align:right">R</th><th style="text-align:right">ū</th><th style="text-align:right">γ</th></tr></thead><tbody>';
       for (const k of keys) {
         const s = done[k];
-        sumHtml += `<tr><td style="padding:2px 12px 2px 0">${esc(k)}</td>`
-          + `<td style="padding:2px 12px 2px 0">${gapBadge(s.裁决)}</td>`
-          + `<td style="text-align:right;padding:2px 12px 2px 0">${num(s.R, 5)}</td>`
-          + `<td style="text-align:right;padding:2px 12px 2px 0">${num(s["ū"], 5)}</td>`
-          + `<td style="text-align:right;padding:2px 12px 2px 0">${s["γ"] == null ? "-" : num(s["γ"], 4)}</td></tr>`;
+        sumHtml += `<tr><td>${esc(k)}</td>`
+          + `<td>${gapBadge(s.裁决)}</td>`
+          + `<td style="text-align:right">${num(s.R, 5)}</td>`
+          + `<td style="text-align:right">${num(s["ū"], 5)}</td>`
+          + `<td style="text-align:right">${s["γ"] == null ? "-" : num(s["γ"], 4)}</td></tr>`;
       }
-      sumHtml += "</table></div>";
+      sumHtml += "</tbody></table></div>";
     }
     const missHtml = (g.未测量彩种 || []).length
-      ? `<div style="margin-top:6px;font-size:12px;color:var(--gray)">尚未测量：${esc((g.未测量彩种 || []).join("、"))}</div>`
+      ? `<div class="audit-note">尚未测量：${esc((g.未测量彩种 || []).join("、"))}</div>`
       : "";
 
     el.innerHTML = `
-      <div><strong>${esc(lot)}</strong>：${gapBadge((d.快照 || {}).裁决)} ·
-        机制倾斜 ${tiltHtml}</div>
+      <div><strong>${esc(lot)}</strong>：${gapBadge((d.快照 || {}).裁决)} · 机制倾斜 ${tiltHtml}</div>
       ${gapSnapshotHtml(d.快照)}
       <div style="margin-top:12px"><strong>六彩种汇总</strong></div>
       ${sumHtml}
       ${missHtml}
-      <div style="margin-top:10px;font-size:12px;color:var(--gray)">
-        判定轨只有 A（乐透注数比）/ A′（数字型注数比）/ B（开奖号冷门度分位）；
-        C（结构偏差）与 D（派奖期）只作诊断、不参与判定。
-        ⚠️ <strong>「未检出」≠「已证明开奖公平」</strong>——它是关于本数据、本功效与已测维度的陈述。
-        本卡片读的是<strong>缓存</strong>（不触发测量）；要最新数据请运行 <code>python cli.py gap</code>。
-      </div>`;
+      ${d.说明 ? `<div class="audit-note-item" style="list-style:none">${esc(d.说明)}</div>` : ""}`;
+    EXPL.onCardRendered("gap", el, d);
   } catch (e) {
     el.innerHTML = `<div class="alert alert-warning">机制缝隙测量加载失败：${esc(e.message)}</div>`;
+    EXPL.onCardRendered("gap", el, {__error: e.message});
   }
 }
 
 HN_LOTTERY.addEventListener("change", loadAll);
-loadAll();</script>
+EXPL.init();
+loadAll();
+</script>
 {% endblock %}
