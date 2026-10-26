@@ -34,6 +34,10 @@ window.EXPL = (function () {
     open: {},             // cardKey -> 1 表示展开；缺省 = 收起
     drawerFilter: { card: "*", kind: "*", q: "" },
     popEl: null,
+    ringEl: null,         // 悬停倒计时圆环
+    hoverTerm: null,      // 当前正在读秒的词条（同一词条内移动不重置）
+    hoverTimer: null,
+    hoverHint: "",        // 后端给的「怎么触发释义」说明
     drawerEl: null,
     maskEl: null,
   };
@@ -259,7 +263,12 @@ window.EXPL = (function () {
       var d;
       try { d = JSON.parse(x.responseText); } catch (e) { return; }
       S.terms = d["术语"] || {};
+      S.hoverHint = d["悬停提示"] || "";
       (d["卡片"] || []).forEach(function (c) { S.cardMeta[c.key] = c; });
+      var dh = document.getElementById("audit-drawer-hint");
+      if (dh && S.hoverHint) dh.textContent = S.hoverHint;
+      var hh = document.getElementById("audit-hover-hint");
+      if (hh && S.hoverHint) { hh.textContent = S.hoverHint; hh.style.display = ""; }
       // 页面级诚实边界（与 //api 同源，不手抄）
       var cv = document.getElementById("audit-page-caveat");
       if (cv && d["诚实边界"]) { cv.innerHTML = md(d["诚实边界"]); cv.style.display = ""; }
@@ -401,6 +410,14 @@ window.EXPL = (function () {
 
   // ---------------------------------------------------------------- 气泡
 
+  // ★ 悬停不是一碰就弹：等 POP_DELAY 毫秒才出释义，等待期间在词条右上角画一个
+  //   圆环进度条（圆环走满 = 释义弹出）。这样鼠标扫过整屏时不会满屏闪 tooltip，
+  //   同时用户能看见「再等一下」的进度，而不是以为功能坏了。
+  //   圆环的动画时长由 JS 单一真源写入 CSS 变量 --ring-dur，CSS 只负责画。
+  var POP_DELAY = 2000;
+  var RING_R = 11;                                   // 圆环半径（viewBox 28×28）
+  var RING_C = 2 * Math.PI * RING_R;                 // 周长，stroke-dasharray 用
+
   function ensurePop() {
     if (S.popEl) return S.popEl;
     var d = document.createElement("div");
@@ -412,15 +429,72 @@ window.EXPL = (function () {
     return d;
   }
 
+  // ---- 圆环进度条（悬停倒计时）
+
+  function ensureRing() {
+    if (S.ringEl) return S.ringEl;
+    var d = document.createElement("div");
+    d.id = "audit-ring";
+    d.className = "audit-ring";
+    d.style.display = "none";
+    d.setAttribute("aria-hidden", "true");
+    document.body.appendChild(d);
+    S.ringEl = d;
+    return d;
+  }
+
+  function startRing(el) {
+    var ring = ensureRing();
+    var r = el.getBoundingClientRect();
+    // 挂在词条右上角外侧：既不遮住词条本身，也不压住下一行
+    var left = Math.min(Math.max(4, r.right - 8), Math.max(4, window.innerWidth - 30));
+    var top = r.top - 20;
+    if (top < 4) top = Math.min(r.bottom + 3, Math.max(4, window.innerHeight - 30));
+    ring.style.left = left + "px";
+    ring.style.top = top + "px";
+    // 整块重建：让 CSS 动画从头播放（改 class 不会重启动画）
+    ring.innerHTML =
+      '<svg viewBox="0 0 28 28" width="28" height="28">' +
+      '<circle class="ring-bg" cx="14" cy="14" r="' + RING_R + '"></circle>' +
+      '<circle class="ring-fill" cx="14" cy="14" r="' + RING_R + '"></circle></svg>' +
+      '<span class="ring-txt">?</span>';
+    // ★ 必须显式写 block：写 "" 会清掉内联样式、回落到 CSS 规则，
+    //   而 .audit-ring 一旦 display:none，动画就不会播放。
+    ring.style.display = "block";
+    el.classList.add("term--loading");
+    S.hoverTerm = el;
+  }
+
+  function stopRing() {
+    if (S.ringEl) { S.ringEl.style.display = "none"; S.ringEl.innerHTML = ""; }
+    if (S.hoverTerm) S.hoverTerm.classList.remove("term--loading");
+    S.hoverTerm = null;
+  }
+
+  function clearHoverTimer() {
+    if (S.hoverTimer) { clearTimeout(S.hoverTimer); S.hoverTimer = null; }
+  }
+
+  // ---- 词条框（CK3 那种：标题栏 + 分隔线 + 四角装饰，淡入）
+
   function showPop(el, key) {
     var t = S.terms[key];
     if (!t) return;
     var pop = ensurePop();
+    var alias = t["别名"] || [];
     pop.innerHTML =
-      '<h5>' + esc(t["名"]) + '<span class="p-kind">' + esc(t["类"]) + '类</span></h5>' +
-      '<div>' + esc(t["一句话"]) + '</div>' +
-      (t["口径"] ? '<div class="p-cal">口径：' + esc(t["口径"]) + '</div>' : '') +
-      '<div class="p-more"><button data-more="1">查看全部名词 →</button></div>';
+      '<div class="p-head">' +
+      '<span class="p-name">' + esc(t["名"]) + '</span>' +
+      '<span class="p-kind" data-k="' + esc(t["类"]) + '">' + esc(t["类"]) + '</span>' +
+      '</div>' +
+      '<div class="p-body">' +
+      '<div class="p-one">' + esc(t["一句话"]) + '</div>' +
+      (t["口径"] ? '<div class="p-cal"><span class="p-cal-lab">口径</span>' + esc(t["口径"]) + '</div>' : '') +
+      (alias.length ? '<div class="p-alias">又称：' + esc(alias.join(" / ")) + '</div>' : '') +
+      '<div class="p-more"><button data-more="1">查看全部名词 →</button></div>' +
+      '</div>' +
+      '<i class="p-corner tl"></i><i class="p-corner tr"></i>' +
+      '<i class="p-corner bl"></i><i class="p-corner br"></i>';
     pop.style.display = "";
     var r = el.getBoundingClientRect();
     var left = Math.min(Math.max(8, r.left), window.innerWidth - pop.offsetWidth - 8);
@@ -430,7 +504,22 @@ window.EXPL = (function () {
     pop.style.top = top + "px";
   }
 
-  function hidePop() { if (S.popEl) S.popEl.style.display = "none"; }
+  /** 触发一次「悬停读秒」：圆环走满后才弹释义。点击/键盘聚焦走即时通道，不读秒。 */
+  function armPop(el) {
+    if (S.hoverTerm === el) return;                  // 同一词条内抖动不重置计时
+    clearHoverTimer(); stopRing();
+    startRing(el);
+    var key = el.getAttribute("data-term");
+    S.hoverTimer = setTimeout(function () {
+      clearHoverTimer(); stopRing();
+      showPop(el, key);
+    }, POP_DELAY);
+  }
+
+  function hidePop() {
+    clearHoverTimer(); stopRing();
+    if (S.popEl) S.popEl.style.display = "none";
+  }
 
   // ---------------------------------------------------------------- 抽屉
 
@@ -445,7 +534,8 @@ window.EXPL = (function () {
       '<div class="audit-drawer-head">' +
       '<button class="audit-drawer-close" onclick="EXPL.closeDrawer()" aria-label="关闭">&times;</button>' +
       '<strong>名词速查</strong>' +
-      '<div style="font-size:12px;color:var(--gray);margin-top:2px">本页全部专业名词与数据口径。点词条可在卡片间跳转说明。</div>' +
+      '<div id="audit-drawer-hint" style="font-size:12px;color:var(--gray);margin-top:2px">' +
+      '本页全部专业名词与数据口径。点词条可在卡片间跳转说明。</div>' +
       '<input id="audit-drawer-q" type="search" placeholder="搜索名词或释义…" oninput="EXPL.setQuery(this.value)">' +
       '<div class="audit-drawer-chips" id="audit-drawer-kinds"></div>' +
       '<div class="audit-drawer-chips" id="audit-drawer-cards"></div>' +
@@ -520,8 +610,9 @@ window.EXPL = (function () {
       if (!el || !el.closest) return null;
       return el.closest(".term");
     };
+    // 悬停：先起圆环读秒，POP_DELAY 后才弹（鼠标扫过不会满屏闪）
     document.addEventListener("mouseover", function (e) {
-      var t = termOf(e); if (t) showPop(t, t.getAttribute("data-term"));
+      var t = termOf(e); if (t) armPop(t);
     });
     document.addEventListener("mouseout", function (e) {
       var t = termOf(e);
@@ -530,6 +621,15 @@ window.EXPL = (function () {
       if (to && to.closest && to.closest(".term") === t) return;
       if (to === S.popEl || (to && to.closest && to.closest("#audit-pop"))) return;
       hidePop();
+    });
+    // 鼠标在词条里移动时圆环要跟着（词条换行/重排后位置会变）
+    document.addEventListener("mousemove", function (e) {
+      if (!S.ringEl || S.ringEl.style.display === "none" || !S.hoverTerm) return;
+      var r = S.hoverTerm.getBoundingClientRect();
+      S.ringEl.style.left = Math.min(Math.max(4, r.right - 8), Math.max(4, window.innerWidth - 30)) + "px";
+      var top = r.top - 20;
+      if (top < 4) top = Math.min(r.bottom + 3, Math.max(4, window.innerHeight - 30));
+      S.ringEl.style.top = top + "px";
     });
     document.addEventListener("focusin", function (e) { var t = termOf(e); if (t) showPop(t, t.getAttribute("data-term")); });
     document.addEventListener("focusout", function (e) { if (termOf(e)) hidePop(); });
@@ -571,7 +671,10 @@ window.EXPL = (function () {
     saved.forEach(function (k) { S.open[k] = 1; });
     S.cards.forEach(function (c) { applyCollapse(c.key); });
 
-    ensurePop(); ensureDrawer();
+    // 圆环/底色的动画时长以 JS 的 POP_DELAY 为唯一真源，CSS 只读变量
+    document.documentElement.style.setProperty("--ring-dur", POP_DELAY + "ms");
+
+    ensurePop(); ensureRing(); ensureDrawer();
     buildSummary(); buildAnchors(); bindEvents(); observe();
     loadTerms();
 
@@ -585,7 +688,7 @@ window.EXPL = (function () {
     onCardRendered: onCardRendered, setCardStatus: setCardStatus,
     deriveStatus: deriveStatus, deriveOneLine: deriveOneLine,
     annotate: annotate, renderDetails: renderDetails,
-    showPop: showPop, hidePop: hidePop,
+    showPop: showPop, hidePop: hidePop, armPop: armPop, POP_DELAY: POP_DELAY,
     openDrawer: openDrawer, closeDrawer: closeDrawer, setQuery: setQuery,
     setFilterCard: setFilterCard, setFilterKind: setFilterKind, renderDrawer: renderDrawer,
     expandCard: expandCard, collapseCard: collapseCard, toggleCard: toggleCard,

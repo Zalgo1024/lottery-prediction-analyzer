@@ -301,6 +301,8 @@
 
 .audit-explain { font-size: 12px; color: var(--gray); line-height: 1.6; }
 
+.audit-hover-hint { margin: -4px 0 12px; }
+
 /* 术语：虚线下划线。关闭解释时保留这条——用户仍可靠 hover 取解释。 */
 .term {
     text-decoration: underline dotted currentColor;
@@ -308,25 +310,157 @@
     cursor: help;
 }
 
+/* 悬停读秒中：底色从左向右扫满，与右上角圆环同步。
+   时长由 JS 写入的 --ring-dur 决定（唯一真源是 audit_explain.js 的 POP_DELAY）。 */
+.term--loading {
+    text-decoration-color: var(--primary);
+    background-image: linear-gradient(rgba(78, 205, 196, .30), rgba(78, 205, 196, .30));
+    background-repeat: no-repeat;
+    background-position: 0 100%;
+    background-size: 0% 100%;
+    animation: audit-term-scan var(--ring-dur, 2s) linear forwards;
+}
+
+@keyframes audit-term-scan {
+    from { background-size: 0% 100%; }
+    to { background-size: 100% 100%; }
+}
+
+/* 圆环进度条：悬停等待期间挂在词条右上角外侧 */
+/* ★ 这里**不能**写 `display:none`：JS 靠内联 style 控制显隐，
+   而 display:none 会让元素不参与渲染 ⇒ CSS 动画直接不播放（实测 stroke-dashoffset 卡在起点）。 */
+.audit-ring {
+    position: fixed;
+    z-index: 1199;
+    width: 28px;
+    height: 28px;
+    pointer-events: none;
+    filter: drop-shadow(0 1px 2px rgba(0, 0, 0, .18));
+}
+
+.audit-ring svg { display: block; transform: rotate(-90deg); }
+.audit-ring .ring-bg { fill: #fff; stroke: #e5e7eb; stroke-width: 3; }
+.audit-ring .ring-fill {
+    fill: none;
+    stroke: var(--primary);
+    stroke-width: 3;
+    stroke-linecap: round;
+    stroke-dasharray: 69.115;          /* 2πr，r=11；与 JS 的 RING_R 对应 */
+    stroke-dashoffset: 69.115;
+    animation: audit-ring-fill var(--ring-dur, 2s) linear forwards;
+}
+
+@keyframes audit-ring-fill {
+    from { stroke-dashoffset: 69.115; }
+    to { stroke-dashoffset: 0; }
+}
+
+.audit-ring .ring-txt {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--primary);
+}
+
+/* 词条框：标题栏 + 分隔线 + 四角装饰，淡入（悬停 2 秒圆环走满后才出现） */
 .audit-pop {
     position: fixed;
     z-index: 1200;
-    max-width: 360px;
-    background: #fff;
-    border: 1px solid #d6dde3;
-    border-radius: 8px;
-    box-shadow: 0 6px 20px rgba(0, 0, 0, .14);
-    padding: 10px 12px;
+    max-width: 380px;
+    padding: 0;
     font-size: 12.5px;
     line-height: 1.7;
     color: #333;
+    background: linear-gradient(#ffffff, #fdfbf6);
+    border: 2px solid #cdbb95;
+    border-radius: 5px;
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, .9) inset, 0 10px 26px rgba(40, 30, 10, .18);
+    animation: audit-pop-in .16s ease-out;
 }
 
-.audit-pop h5 { margin: 0 0 4px; font-size: 13px; color: var(--dark); }
-.audit-pop .p-kind { font-size: 11px; color: var(--gray); font-weight: 400; margin-left: 6px; }
-.audit-pop .p-cal { margin-top: 6px; color: #666; font-size: 12px; }
-.audit-pop .p-more { margin-top: 8px; text-align: right; }
+@keyframes audit-pop-in {
+    from { opacity: 0; transform: translateY(5px) scale(.985); }
+    to { opacity: 1; transform: none; }
+}
+
+.audit-pop .p-head {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    padding: 7px 12px 6px;
+    background: linear-gradient(#f7f2e7, #efe7d4);
+    border-bottom: 1px solid #d9cbac;
+}
+
+.audit-pop .p-name {
+    font-size: 13.5px;
+    font-weight: 700;
+    color: #3c3222;
+    letter-spacing: .3px;
+}
+
+.audit-pop .p-kind {
+    margin-left: auto;
+    padding: 0 6px;
+    border: 1px solid;
+    border-radius: 9px;
+    font-size: 10.5px;
+    line-height: 1.7;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.audit-pop .p-kind[data-k="数据"] { color: #3f6fd8; border-color: #bcd0f5; background: #eef3fd; }
+.audit-pop .p-kind[data-k="统计"] { color: #12a89c; border-color: #b6e6e0; background: #e9faf8; }
+
+.audit-pop .p-body { padding: 9px 12px 10px; }
+.audit-pop .p-one { color: #333; }
+
+.audit-pop .p-cal {
+    margin-top: 8px;
+    padding-top: 7px;
+    border-top: 1px dashed #e3d9c4;
+    font-size: 12px;
+    color: #666;
+}
+
+.audit-pop .p-cal-lab {
+    display: inline-block;
+    margin-right: 6px;
+    padding: 0 5px;
+    border-radius: 3px;
+    background: #f2ede1;
+    color: #8a7a54;
+    font-size: 11px;
+}
+
+.audit-pop .p-alias { margin-top: 6px; font-size: 11.5px; color: #888; }
+.audit-pop .p-more { margin-top: 9px; text-align: right; }
 .audit-pop .p-more button { border: none; background: none; color: var(--primary); cursor: pointer; font-size: 12px; padding: 0; }
+
+/* 四角装饰线 */
+.audit-pop .p-corner {
+    position: absolute;
+    width: 7px;
+    height: 7px;
+    border: 0 solid #b9a479;
+}
+
+.audit-pop .p-corner.tl { left: 2px; top: 2px; border-left-width: 2px; border-top-width: 2px; }
+.audit-pop .p-corner.tr { right: 2px; top: 2px; border-right-width: 2px; border-top-width: 2px; }
+.audit-pop .p-corner.bl { left: 2px; bottom: 2px; border-left-width: 2px; border-bottom-width: 2px; }
+.audit-pop .p-corner.br { right: 2px; bottom: 2px; border-right-width: 2px; border-bottom-width: 2px; }
+
+/* 尊重系统「减少动效」设置：不做扫描/淡入，圆环直接显示为满 */
+@media (prefers-reduced-motion: reduce) {
+    .audit-pop { animation: none; }
+    .term--loading { animation: none; background-size: 100% 100%; }
+    .audit-ring .ring-fill { animation: none; stroke-dashoffset: 0; }
+}
 
 /* 名词速查抽屉 */
 .audit-drawer-mask {

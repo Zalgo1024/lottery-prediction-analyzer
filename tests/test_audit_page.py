@@ -82,8 +82,9 @@ def test_static_audit_assets_are_served(client):
 # ---------------------------------------------------------------- 术语接口
 def test_glossary_api_contract(glossary):
     """沿用项目三键惯例：`口径说明` / `诚实边界` / `诚实声明`。"""
-    for key in ("术语", "卡片", "状态口径", "口径说明", "诚实边界", "诚实声明"):
+    for key in ("术语", "卡片", "状态口径", "悬停提示", "口径说明", "诚实边界", "诚实声明"):
         assert key in glossary, "glossary 缺键 %s" % key
+    assert glossary["悬停提示"], "「悬停提示」不能是空的（否则用户不知道要悬停 2 秒）"
     assert len(glossary["卡片"]) == 8
     assert [c["id"] for c in glossary["卡片"]] == list(CARD_IDS)
 
@@ -217,6 +218,47 @@ def test_disclaimer_text_has_no_second_copy():
         assert core not in text, "%s 里又抄了一份免责文案" % rel
     src = (WEB / "static" / "js" / "audit_explain.js").read_text(encoding="utf-8")
     assert re.search(r"fetch|XMLHttpRequest", src), "解释层必须去后端取文案"
+
+
+# ---------------------------------------------------------------- 悬停解释
+def test_hover_uses_delayed_ring_not_instant_pop(client):
+    """术语释义必须是「悬停读秒 → 圆环走满 → 才弹」，不是一碰就弹。
+
+    ★ 为什么锁这条：一碰就弹的 tooltip 在鼠标扫过整屏时会疯狂闪烁，
+      而**加了延迟却没有任何进度反馈**会被当成「功能坏了」。
+      圆环进度条 + 词条底色扫描就是那个反馈，三者必须同时存在。
+    """
+    js = (WEB / "static" / "js" / "audit_explain.js").read_text(encoding="utf-8")
+    css = (WEB / "static" / "css" / "audit.css").read_text(encoding="utf-8")
+    html = client.get("/audit").get_data(as_text=True)
+
+    # 1. 延迟时长：JS 里是唯一真源，且要写进 CSS 变量（CSS 不另写一个数）
+    assert re.search(r"POP_DELAY\s*=\s*2000\b", js), "悬停延迟应为 2000ms"
+    assert "--ring-dur" in js and "setProperty" in js, "延迟必须写进 CSS 变量 --ring-dur"
+    assert re.search(r"var\(--ring-dur", css), "CSS 必须用 --ring-dur，不许另写一份时长"
+
+    # 2. 圆环：元素 + 进度动画 + 走满关键帧
+    assert 'id = "audit-ring"' in js and "startRing" in js and "stopRing" in js
+    assert ".audit-ring" in css and ".ring-fill" in css
+    assert "@keyframes audit-ring-fill" in css
+
+    # 3. 词条在等待期间要有可见反馈（底色扫描），不能只是「没反应」
+    assert "term--loading" in js and ".term--loading" in css
+    assert "@keyframes audit-term-scan" in css
+
+    # 4. mouseover 必须走读秒通道，不能绕过直接弹
+    assert re.search(r"mouseover[\s\S]{0,200}armPop", js), "mouseover 没有走 armPop 读秒"
+    assert re.search(r"S\.hoverTimer\s*=\s*setTimeout", js)
+    # 移开要能取消，否则延迟到了会在错误的位置弹出
+    assert "clearHoverTimer" in js
+
+    # 5. 页面上要有个位置告诉用户「要悬停 2 秒」
+    assert 'id="audit-hover-hint"' in html
+    assert 'id="audit-drawer-hint"' in js
+
+    # 6. 无障碍：读秒期间不能只靠鼠标（点击/键盘仍可立即弹出）
+    assert re.search(r"focusin[\s\S]{0,160}showPop", js), "键盘聚焦应直接弹出，不走 2 秒延迟"
+    assert "prefers-reduced-motion" in css
 
 
 # ---------------------------------------------------------------- 文档同步
