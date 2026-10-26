@@ -18,7 +18,7 @@ from ev import preregistration as PR
 def test_load_ok():
     doc = PR.load()
     # ★ 版本号是硬编码的「锁」：改预注册必须同时改这里，避免静默换版本。
-    assert doc["版本"] == "1.6"
+    assert doc["版本"] == "1.7"
     assert doc["锁定日"] == "2026-10-26"
     # 集中度守门必须有**两级**：单臂大奖占比 + 配对级单期支配
     rules = "".join(doc["停止规则"])
@@ -28,6 +28,8 @@ def test_load_ok():
     assert "前瞻终点_四等奖" in doc
     # v1.6：一二三等奖 前瞻终点块必须在
     assert "前瞻终点_一二三等奖" in doc
+    # v1.7：双轨组合优化块必须在
+    assert "双轨_组合优化" in doc
 
 
 def test_hash_mismatch_raises(tmp_path):
@@ -164,6 +166,75 @@ def test_v16_forward_top3_registration():
     assert "尚未产生" in entry and "已经看过" in entry and "不覆盖" in entry
     # 预期依据必须写进块内（不许只活在 changelog 里）
     assert "期望命中" in blk["_预期依据"]
+
+
+def test_v17_dual_track_registration():
+    """v1.7：双轨组合优化 —— 轨道 A 四格、轨道 B 情景网格、倍投末层。"""
+    doc = PR.load()
+    blk = doc["双轨_组合优化"]
+    a, b, c = blk["轨道A"], blk["轨道B"], blk["倍投层"]
+
+    # ---- 轨道 A：4 格 = 2 彩种 × (≥四等, ≥三等)
+    cells = {(g["彩种"], g["目标"]["grade"]): g for g in a["格"]}
+    assert set(cells) == {("双色球", "四等"), ("双色球", "三等"),
+                          ("大乐透", "四等"), ("大乐透", "三等")}
+    assert {g["彩种"]: (g["K"], g["预算元每期"]) for g in a["格"]} == {
+        "双色球": (200, 400), "大乐透": (38, 76)}
+    # ★ 大乐透 38 注是新预算（76 元），与 Stage 1 的 K=200/400 元描述性格不可比
+    assert any(g["彩种"] == "大乐透" and g["K"] == 38 for g in a["格"])
+
+    # ---- 臂：新臂必须进主检验；prod_mix 因 cap≠3 必须**不**进
+    assert "tier_packing" in a["臂"] and "tier_packing" in a["进主检验"]
+    assert "union_greedy" in a["进主检验"] and "tier_coverage" in a["进主检验"]
+    assert "prod_mix" not in a["进主检验"]
+    assert a["对比臂"] == "random"
+    # 四项指标：命中期比例 / 达标注数期望 / 每百元达标期数 / 精确 P
+    ind = "".join(a["指标四项"])
+    for kw in ("命中期比例", "达标注数期望", "每百元达标期数", "精确 P"):
+        assert kw in ind
+
+    # ---- 评估期纪律：判决只能用未参与调参的那一段
+    assert "开发窗" in a["评估期"] and "评估窗" in a["评估期"]
+    assert "60" in a["评估期"]["开发窗"] and "40" in a["评估期"]["评估窗"]
+    assert "唯一判决窗口" in a["评估期"]["评估窗"]
+    assert "BH" in a["验收判据"] and "n*_保守" in a["验收判据"]
+    assert "评估窗" in a["验收判据"]
+    # ★ 层 1 不得替代层 2：验收判据必须显式否掉这种替代
+    assert "不能" in a["验收判据"] or "不得" in a["验收判据"]
+
+    # ---- 分层披露：两层确认力必须在块内自证
+    assert "已经看过" in blk["_登记性质"] and "尚未产生" in blk["_登记性质"]
+    assert "已看过" in a["_层1披露"]
+
+    # ---- 层 1 的核心事实：K·p 必须 <1（这正是可争取空间塌缩的根源）
+    for k, v in a["层1_构造性上界"].items():
+        if k.startswith("_"):
+            continue
+        assert v["K·p"] < 1.0, f"{k} 的 K·p={v['K·p']} ≥ 1，覆盖空间不再是 O((K·p)²) 量级"
+        # 上限不得低于随机基线（否则恒等式被改坏）
+        assert v["理论上限"] >= v["随机独立基线"] - 1e-9
+
+    # ---- 轨道 B：情景网格 + 三条判据 + 预期不参与
+    assert 0.0 in b["情景网格"]["κ档"]
+    assert max(b["情景网格"]["κ档"]) > b["分摊模型"]["κ_实测上界"]   # 必须探到不可测区间
+    assert len(b["情景网格"]["奖池预测误差"]) >= 3
+    assert set(b["情景网格"]["规则版本"]) == {"current", "periodic"}
+    assert len(b["判据"]) == 3
+    assert "不参与" in b["_判决"] and "不参与" in b["_预期"]
+    # κ* ≫ κ_upper 是「不参与」的量化依据，不许只写结论
+    assert b["分摊模型"]["κ*需求"] > b["分摊模型"]["κ_实测上界"]
+
+    # ---- 倍投层：只在轨道 B 通过后启动，且必须固定票集同预算
+    assert "可参与" in c["定位"]
+    entry = "".join(c["准入判据"])
+    assert "同一票集" in entry or "同一副票集" in entry
+    assert "总预算" in entry and "相等" in entry
+
+    # ---- 变更日志双披露
+    cl = next(e for e in doc["变更日志"] if "v1.7" in e)
+    assert "尚未产生" in cl and "已经实测过" in cl
+    assert "不具确认力" in cl
+    assert "层 1" in cl and "层 2" in cl
 
 
 # ---------------------------------------------------------------- 实跑对齐

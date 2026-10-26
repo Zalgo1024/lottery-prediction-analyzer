@@ -70,6 +70,41 @@ def test_external_effect_takes_conservative_n_star():
     assert r["n*_保守"] == r["n*_外部效应"]
 
 
+def test_noise_inflated_delta_is_not_actionable_once_effect_is_passed():
+    """★★★ 2026-10-26 双轨事故的算术复现 —— 「BH 通过」不等于结论成立。
+
+    真实踩中过的一格（大乐透 K=38 ≥四等、`union_greedy` 对 random，评估窗 1176 期）：
+        · 实测 11/1176 vs 1/1176 ⇒ Δ=+8.5e-3、z=+2.90、BH 校正后 p=0.0454（通过）
+        · 而两臂的**精确枚举** P(并集) 差只有 −5.97e-6（该臂反而更低）
+    根因是基线臂运气极差（期望 6.7 命中、实际 1）+ 该臂偏高（11），两次抽样偏差叠加。
+
+    `pair()` 从 Stage 1 v1.4 起就有 `effect=` 参数，契约是「与实测不一致时取 n* 更大者」，
+    但调用方漏传 ⇒ `n*_保守` 退化成 `n*_实测` ⇒ 噪声越大反而越「可判」。
+    本用例同时钉住「漏传会误判」与「传了就纠正」两侧，防止回归。
+    """
+    n = 1176
+    b = np.zeros(n)
+    a = np.zeros(n)
+    b[:1] = 1.0            # 基线：1 命中（期望 6.7）
+    a[:11] = 1.0           # 该臂：11 命中
+    issues = list(range(n))
+
+    # 漏传 effect：噪声放大的 Δ 被当成「可判」
+    naive = ST.achievable(
+        ST.pair(a, b, issues_a=issues, issues_b=issues, name_a="ug", name_b="random"), n)
+    assert naive["判决"] == "可判", naive["判决"]
+
+    # 传入精确枚举 ΔP：真效应比噪声小三个数量级 ⇒ 必须判「不可判」
+    exact = ST.achievable(
+        ST.pair(a, b, issues_a=issues, issues_b=issues, name_a="ug", name_b="random",
+                effect=-5.97e-06, effect_source="精确枚举ΔP"), n)
+    assert exact["n*_保守"] == exact["n*_外部效应"]
+    assert exact["判决"] == "不可判", exact["判决"]
+    assert exact["n*_可用期数比"] > 1e5      # 差五个数量级以上的期数缺口
+    # 外部效应量与原方向相反的符号必须如实保留（不许取绝对值糊过去）
+    assert exact["外部效应量"] < 0
+
+
 def test_achievable_three_valued():
     n = 500
     a, b = _seq(n, 0.6, 11), _seq(n, 0.5, 12)

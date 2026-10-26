@@ -1,16 +1,17 @@
 # -*- coding: utf-8 -*-
 """ev/arena/arms.py —— 臂注册表与随机数隔离。
 
-六个臂
+七个臂
 ------
 | 名 | 选择器 | 说明 |
 |---|---|---|
 | `random` | `ev.selection.control_tickets` | **基线**：同预算、同池、同 cap 的随机票 |
 | `tier_coverage` | `ev.tier_coverage.select_tier_coverage` | 现有**通道权重代理**贪心 |
-| `union_greedy` | `ev.arena.design.select_union_greedy` | **直接在 P(并集) 上贪心**（本轮新增） |
+| `union_greedy` | `ev.arena.design.select_union_greedy` | **直接在 P(并集) 上贪心**（Stage 1） |
 | `lowcrowd` | `ev.lowcrowd_select.select_lowcrowd` | 低拥挤（需拥挤度代理 GO，否则**降级**） |
 | `prod_mix` | `ev.selection.select_tickets` | 生产选号（★ 内部 cap=4，其余臂 cap=3） |
 | `hybrid` | `ev.lowcrowd_select.select_joint` | **联合目标**：P(并集) 采样边际 × 冷门同打分加权（λ=0.5 锁定，v1.4 进主检验；拥挤度代理不可用 ⇒ 暂不评估） |
+| `tier_packing` | `ev.arena.packing.select_tier_packing` | **v1.7**：解析目标 swap（`K·p − Σ P(Aᵢ∩Aⱼ)`），唯一在 `K·p ≪ 1` 下真能提高 P(并集) 的臂；增益 0.05~2.0% 相对量级、远低于可判门槛 ⇒ **只作研究臂，不进生产** |
 
 ★ 两个必须显式标出的口径污染（方案 §1.2 G3）：
   · `prod_mix` 走 `ev.selection._OVERLAP_CAP["双色球"] = 4`，其余臂 `PROD_OVERLAP_CAP = 3`。
@@ -106,6 +107,35 @@ def _arm_union_greedy(lottery: str, pool: Sequence[Dict[str, Any]], K: int,
                  "样本外覆盖率": meta.get("样本外覆盖率"),
                  "优化乐观量": meta.get("优化乐观量"),
                  "cap拒绝次数": meta.get("cap拒绝次数")}
+
+
+def _arm_tier_packing(lottery: str, pool: Sequence[Dict[str, Any]], K: int,
+                      target: Any, issue: Any, seed: int, cap: int,
+                      params: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """奖级专用构造（v1.7 新增）：多起点贪心 + swap 精修 + 三段独立采样。"""
+    from ev.arena.packing import select_tier_packing
+
+    tks, meta = select_tier_packing(
+        lottery, pool, K, target, issue, cap=cap, seed=seed,
+        m_fit=int(params.get("m_fit", 100_000)),
+        m_swap=int(params.get("m_swap", 100_000)),
+        m_eval=int(params.get("m_eval", 100_000)),
+        n_starts=int(params.get("n_starts", 2)),
+        swap_rounds=int(params.get("swap_rounds", 2)),
+        swap_candidates=int(params.get("swap_candidates", 16)))
+    return tks, {"选择器": "select_tier_packing",
+                 "重叠上限": meta.get("重叠上限"),
+                 "放宽次数": 0,
+                 "拟合覆盖率": meta.get("拟合覆盖率"),
+                 "样本外覆盖率": meta.get("样本外覆盖率"),
+                 "优化乐观量": meta.get("优化乐观量"),
+                 "swap增益_swap批": meta.get("swap增益_swap批"),
+                 "swap增益_样本外": meta.get("swap增益_样本外"),
+                 "覆盖率上界_S1": meta.get("覆盖率上界_S1"),
+                 "覆盖率上界_SE": meta.get("覆盖率上界_SE"),
+                 "二阶下界_松": meta.get("二阶下界_松"),
+                 "覆盖率占Kp比": meta.get("覆盖率占Kp比"),
+                 "swap接受数": meta.get("swap接受数")}
 
 
 def _arm_lowcrowd(lottery: str, pool: Sequence[Dict[str, Any]], K: int,
@@ -224,6 +254,7 @@ ARMS: Dict[str, Callable[..., Tuple[List[Dict[str, Any]], Dict[str, Any]]]] = {
     "random": _arm_random,
     "tier_coverage": _arm_tier_coverage,
     "union_greedy": _arm_union_greedy,
+    "tier_packing": _arm_tier_packing,
     "lowcrowd": _arm_lowcrowd,
     "prod_mix": _arm_prod_mix,
     "hybrid": _arm_hybrid,
@@ -232,7 +263,9 @@ ARMS: Dict[str, Callable[..., Tuple[List[Dict[str, Any]], Dict[str, Any]]]] = {
 ARM_NOTES: Dict[str, str] = {
     "random": "同预算同池同 cap 的随机票；所有比较的基线",
     "tier_coverage": "现有通道权重代理贪心（优化的是上界，不是 P(并集)）",
-    "union_greedy": "直接在 P(并集) 上 CELF 贪心 + 样本外评估（本轮新增）",
+    "union_greedy": "直接在 P(并集) 上 CELF 贪心 + 样本外评估",
+    "tier_packing": ("奖级专用构造（v1.7）：多起点贪心 + swap 精修 + 三段独立采样"
+                     "（fit / swap / eval），并给出二阶 Bonferroni 可证明上界"),
     "lowcrowd": "低拥挤选号；拥挤度代理不可用时降级为「暂不评估」",
     "prod_mix": "生产选号；内部 cap 不同 ⇒ 只作外部保真度对照，不进主检验",
     "hybrid": ("联合目标：P(并集) 采样边际 + 冷门通道同一打分加权"

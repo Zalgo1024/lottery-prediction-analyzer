@@ -16,9 +16,15 @@ def _pool():
     return build_pool("双色球", SMALL, seed=POOL_SEED)
 
 
-def test_registry_has_six_arms():
+def test_registry_has_seven_arms():
+    """★ 臂清单是**契约**，新增/删除必须显式到这里改 —— 不许悄悄进 registry。
+
+    v1.7 双轨研究新增 `tier_packing`（解析目标 swap，见 `ev/arena/packing.py`）：
+    它是唯一在 `K·p ≪ 1` 下真正提高 P(并集) 的臂，但在四等奖门上增益只有
+    0.05~2.0% 相对量级、远低于可判门槛，因此**不进生产路径**，只作研究臂。
+    """
     assert set(A.ARMS) == {"random", "tier_coverage", "union_greedy",
-                           "lowcrowd", "prod_mix", "hybrid"}
+                          "lowcrowd", "prod_mix", "hybrid", "tier_packing"}
 
 
 def test_unknown_arm_raises():
