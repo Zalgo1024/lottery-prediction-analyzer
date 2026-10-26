@@ -30,6 +30,9 @@ _TARGETS = (
     # 导致当晚真实日报被静默跳过。
     ("web.health_digest", "STATE_PATH", "digest_state.json"),
     ("web.health_digest", "DIGEST_DIR", "automation"),
+    # 娱乐预算账本（v1.8 新增，「本月已投」跨期状态）。不加这一条，用例会把真实
+    # config/budget_ledger.json 写成「本月已投 400 元」，让当晚真实包络闸门误判额度耗尽。
+    ("ev.budget_envelope", "LEDGER_PATH", "budget_ledger.json"),
 )
 
 

@@ -133,9 +133,9 @@ def solve_monte_carlo(lottery: str, tickets: Sequence[dict], ctx: P.Ctx,
 
 # ---------------------------------------------------------------- 判定树
 
-def decide(lottery: str, issue: Any, tickets: Optional[Sequence[dict]] = None,
-           K: int = 20, min_history: int = 1200, allow_mc: bool = False,
-           seed: int = 0) -> Dict[str, Any]:
+def _decide_core(lottery: str, issue: Any, tickets: Optional[Sequence[dict]] = None,
+                 K: int = 20, min_history: int = 1200, allow_mc: bool = False,
+                 seed: int = 0) -> Dict[str, Any]:
     """完整判定：数据门 → κ=0 基线 → 拥挤度门 → κ* → 判决。
 
     tickets=None 时先用 `select.select_profit_tickets` 按净EV 代理选 K 注
@@ -248,4 +248,35 @@ def decide(lottery: str, issue: Any, tickets: Optional[Sequence[dict]] = None,
 
     if allow_mc:
         out["MC校验"] = solve_monte_carlo(lottery, tickets, ctx, kappa=0.0, n=5000)
+    return out
+
+
+def decide(lottery: str, issue: Any, tickets: Optional[Sequence[dict]] = None,
+           K: int = 20, min_history: int = 1200, allow_mc: bool = False,
+           seed: int = 0, *, envelope: Any = None,
+           spent_this_month: float = 0.0) -> Dict[str, Any]:
+    """`_decide_core` + 可选的**娱乐预算包络闸门**（v1.8，用户指令一）。
+
+    ★ 默认 `envelope=None` ⇒ 与 v1.7 返回**逐位相同**（不新增任何键），
+      这样既有调用点与快照测试不受影响。
+    ★ 传入 `envelope` 时只做一件事：把上游判决与包络**取更保守者**
+      （见 `ev/budget_envelope.gate_verdict`，只降级不升级）。
+      它不重判 EV —— EV 归本判定树，闸门只管「本月还剩多少钱」。
+    """
+    out = _decide_core(lottery, issue, tickets=tickets, K=K,
+                       min_history=min_history, allow_mc=allow_mc, seed=seed)
+    if envelope is None:
+        return out
+
+    from ev import budget_envelope as BE
+    gate = BE.gate_verdict(out.get("判决"), envelope, spent_this_month,
+                           want_tickets=out.get("注数"))
+    out["包络"] = gate
+    if gate["是否降级"]:
+        out["上游判决"] = out.get("判决")
+        out["判决"] = gate["最终判决"]
+        out["原因"] = gate["原因"]
+        out["注数"] = 0
+    else:
+        out["注数"] = int(gate["注数"])
     return out

@@ -18,7 +18,7 @@ from ev import preregistration as PR
 def test_load_ok():
     doc = PR.load()
     # ★ 版本号是硬编码的「锁」：改预注册必须同时改这里，避免静默换版本。
-    assert doc["版本"] == "1.7"
+    assert doc["版本"] == "1.8"
     assert doc["锁定日"] == "2026-10-26"
     # 集中度守门必须有**两级**：单臂大奖占比 + 配对级单期支配
     rules = "".join(doc["停止规则"])
@@ -30,6 +30,10 @@ def test_load_ok():
     assert "前瞻终点_一二三等奖" in doc
     # v1.7：双轨组合优化块必须在
     assert "双轨_组合优化" in doc
+    # v1.8：三条用户指令各自的契约件都必须在（不是可选装饰）
+    assert "预算约束_奖级目标" in doc
+    assert "δ情景" in doc
+    assert "预算包络" in doc
 
 
 def test_hash_mismatch_raises(tmp_path):
@@ -235,6 +239,106 @@ def test_v17_dual_track_registration():
     assert "尚未产生" in cl and "已经实测过" in cl
     assert "不具确认力" in cl
     assert "层 1" in cl and "层 2" in cl
+
+
+def test_v18_budget_targets_registration():
+    """v1.8 指令三：奖级目标**按实际预算**重做 —— 6 格、BH m=18、层 1 否决力。"""
+    doc = PR.load()
+    blk = doc["预算约束_奖级目标"]
+
+    # ---- 6 格 = 2 彩种 × 3 目标（≥10元 是**金额门**，不是奖级门）
+    want = {("双色球", "四等"), ("双色球", "三等"), ("大乐透", "四等"),
+            ("大乐透", "三等"), ("双色球", "payout"), ("大乐透", "payout")}
+    got = {(g["彩种"], g["目标"].get("grade", g["目标"]["kind"])) for g in blk["格"]}
+    assert got == want
+    # 预算必须钉在生产实际值上：200 注 = 400 元/期、38 注 = 76 元/期
+    assert {(g["彩种"], g["K"], g["预算元每期"]) for g in blk["格"]} == {
+        ("双色球", 200, 400), ("大乐透", 38, 76)}
+    # ★ 大乐透 K=38 是本条的核心：200 注的成绩不得套过来
+    assert any("38" in g["名"] for g in blk["格"])
+
+    # ---- 臂与判据
+    assert blk["进主检验"] == ["tier_packing", "union_greedy", "tier_coverage"]
+    assert "prod_mix" in blk["臂"] and "prod_mix" not in blk["进主检验"]
+    assert blk["对比臂"] == "random"
+    # BH 族规模 = 3 臂 × 6 格 = 18，必须写进判据而不是靠代码记住
+    assert "18" in blk["验收判据"] and "BH" in blk["验收判据"]
+    # 净收益必须**独立于**命中率单独报（用户明确要求）
+    assert any("净收益" in x for x in blk["指标四项"])
+    assert "开发窗" in blk["评估期"] and "唯一判决窗口" in blk["评估期"]["评估窗"]
+
+    # ---- 层 1 否决力：前置登记，不是事后决定
+    assert "否决" in blk["_层1否决力"] and "确认" in blk["_层1否决力"]
+    # 「不具确认力」必须显式写出来，否则层 1 会被当成证据
+    assert "已实测" in blk["_层1披露"] and "跑数之前" in blk["_层1披露"]
+    assert "只能作上界" in blk["层1_构造性上界"]["_性质"]
+
+    # ---- 层 1 数值自洽（这六个格子是「跑数前就能定判决」的算术依据）
+    l1 = blk["层1_构造性上界"]["格"]
+    assert set(l1) == {g["名"] for g in blk["格"]}
+    kof = {g["名"]: g["K"] for g in blk["格"]}
+    for name, v in l1.items():
+        K = kof[name]
+        # 理论上限 = min(1, K·p)
+        assert v["理论上限"] == pytest.approx(min(1.0, K * v["单注p"]), abs=1e-9), name
+        # 无放回抽样 ⇒ 独立基线 ≤ 随机臂精确 P ≤ 理论上限
+        assert v["随机独立基线"] <= v["随机臂精确P"] + 1e-12, name
+        assert v["随机臂精确P"] <= v["理论上限"] + 1e-12, name
+        # 可争取空间 = 上限 − 随机臂精确 P（这是「优化器能用武之地」的全部）
+        assert v["可争取空间"] == pytest.approx(
+            v["理论上限"] - v["随机臂精确P"], abs=1e-9), name
+        assert v["可争取空间_相对"] == pytest.approx(
+            v["可争取空间"] / v["理论上限"], abs=1e-6), name
+
+    # ---- 判决在跑数前就被算术决定了：三格空间为 0 / 1e-6 量级
+    for name, v in l1.items():
+        if "≥三等" in name:
+            assert v["可争取空间"] == 0.0, f"{name} 空间应为 0（随机已达上限）"
+        if name == "大乐透-K38-≥四等":
+            assert v["可争取空间"] < 1e-5, "38 注 ≥四等 的空间必须是 1e-6 量级"
+    exp = blk["_按目标的预期"]
+    for name in ("双色球-K200-≥三等", "大乐透-K38-≥三等", "大乐透-K38-≥四等"):
+        assert ("未能识别" in exp[name]) or ("不可能" in exp[name]), name
+    for name in ("双色球-K200-≥10元", "大乐透-K38-≥10元"):
+        assert "未能识别" not in exp[name], f"{name} 是真有空间的目标，不许预先放弃"
+
+
+def test_v18_delta_scenario_registration():
+    """v1.8 指令二：δ 情景区间 + v1.7 口径错误的正式修订。"""
+    doc = PR.load()
+    blk = doc["δ情景"]
+    # ★ 主口径必须写明 δ 只作用于一等；这是 v1.7 那个 +6.31 的来源被否掉的根因
+    assert "只作用于一等" in "".join(blk.keys())
+    assert "二等奖" in blk["_v1.7 的口径错误（本次修订的原因）"]
+    assert "143" in blk["_v1.7 的口径错误（本次修订的原因）"]
+    # 旧口径必须同时报，但标成模型外推（不得当实投依据）
+    assert "模型外推" in blk["旧口径_δ作用于全部浮动奖"]
+    # 网格必须是**区间**：δ 至少 5 档、奖池误差至少 3 档
+    assert len(blk["δ情景网格"]["δ档"]) >= 5
+    assert 0.0 in blk["δ情景网格"]["δ档"] and 1.0 in blk["δ情景网格"]["δ档"]
+    assert len(blk["δ情景网格"]["奖池误差"]) >= 3
+    # δ 是假设，不是已测规律 —— 这句话必须留在契约里
+    assert "假设" in blk["δ情景网格"]["_说明"]
+    # 保守情景 = δ=0 + 负的奖池误差 + 税后，三者叠加
+    cons = blk["保守情景判据"]
+    assert "δ=0" in cons and "30%" in cons and "税后" in cons
+    # 结构性上限必须声明「与奖池规模无关」
+    assert "与奖池规模无关" in "".join(blk.keys())
+
+
+def test_v18_budget_envelope_registration():
+    """v1.8 指令一：把「少亏」做成纪律 —— 定额/上限/亏完即停/默认不参与。"""
+    doc = PR.load()
+    blk = doc["预算包络"]
+    rules = "".join(blk["三条硬纪律"])
+    assert "倍投" in rules                 # ① 不追损
+    assert "加预算" in rules               # ① 不因更「看好」而加
+    assert "每月" in rules and "单期上限" in rules and "亏完即停" in rules
+    assert "不参与" in rules               # ③ 可以输出不参与
+    # 单向闸门：只降级不升级，这条是安全属性，必须显式
+    rel = blk["_与既有模块的关系"]
+    assert "只允许" in rel and "永远不允许" in rel
+    assert "ev/budget_envelope.py" in blk["_定位"]
 
 
 # ---------------------------------------------------------------- 实跑对齐
