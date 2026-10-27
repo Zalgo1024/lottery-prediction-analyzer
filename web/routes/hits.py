@@ -10,6 +10,15 @@
 - `total`     命中本次筛选条件的**总注数**（分页前，即用户真正筛出了多少注）
 - `universe`  全部命中注数（**不加任何筛选**，全彩种）——分母「总数」
 - `returned`  本次实际返回的条数（受 limit 限制）
+
+另带**累计中奖金额**，成对给出两个口径（页面必须点名口径，不许只报一个数）：
+
+- `amount_sum` / `amount_sum_unknown`   当前筛选口径：可确定金额的注求和 + 金额未知的注数
+- `amount_all` / `amount_all_unknown`   全部命中口径（不筛选）：同上
+
+★ 口径 = 各注「单注奖金」之和（税前，不是实得；浮动奖取当期实际单注奖金）。
+★ 浮动奖级当期金额读不到时**不按 0 计入**（会让合计系统性偏低且看不出来），
+  而是单独计数由前端披露。
 """
 
 from flask import Blueprint, jsonify, render_template, request
@@ -135,6 +144,15 @@ def api_hits():
     universe = 0         # 全部命中注数（不加任何筛选，全彩种）——「总数」分母
     matched = 0          # 通过全部筛选条件的注数（分页前）
     amount_unknown = 0   # 浮动奖级当期金额未知 → 未参与金额筛选的注数（诚实计数）
+    # 「累计中奖金额」两个口径同时给：
+    #   amount_all*  全部命中注（= universe 口径，不随筛选变）
+    #   amount_sum*  通过全部筛选的注（= total 口径，跟着筛选走）
+    # ★ 金额未知（浮动奖级读不到当期实际单注奖金）的注**不得按 0 计入**，
+    #   否则合计会系统性偏低且看不出来 ⇒ 单独计数，由前端显式披露。
+    amount_all = 0.0
+    amount_all_unknown = 0
+    amount_sum = 0.0
+    amount_sum_unknown = 0
     records = []
     # 总是遍历全部彩种：即使只看某一彩种，也要能给出「全部命中总数」这个稳定分母
     for name in LOTTERY_CONFIG:
@@ -155,6 +173,19 @@ def api_hits():
             if prize == "未中":
                 continue
             universe += 1                      # 先记总数，再判是否在筛选范围内
+
+            # 单注奖金在这里算一次，「全部」与「当前筛选」两个合计共用同一份。
+            # prize_payout 内部有按彩种的 TTL 缓存，重复调用不读盘。
+            payout = prize_payout(name, prize, h.get("期号"))
+            _amt = payout.get("金额") if isinstance(payout, dict) else None
+            if _amt is None:
+                amount_all_unknown += 1        # 浮动奖级无当期数据：单独计数，不当 0
+            else:
+                try:
+                    amount_all += float(_amt)
+                except (TypeError, ValueError):
+                    amount_all_unknown += 1
+
             if not in_scope:
                 continue
             # 时间筛选：按结算（评估）时间的日期部分，ISO 字符串可直接比较
@@ -195,20 +226,23 @@ def api_hits():
             if total_min is not None and effective_total < total_min:
                 continue
 
-            # 「这一注能中多少钱」：固定奖级直接给金额；浮动奖级（双/大/七星彩一、二等）
-            # 优先读当期实际单注奖金，读不到则标注浮动+名义上限。
-            payout = prize_payout(name, prize, h.get("期号"))
             # 奖金筛选：金额未知（浮动且无当期数据）不参与筛选，只单独计数，
             # 否则会被静默当成「不满足」而低估筛选结果。
             if amount_min is not None:
-                amt = payout.get("金额") if isinstance(payout, dict) else None
-                if amt is None:
+                if _amt is None:
                     amount_unknown += 1
                     continue
-                if float(amt) + 1e-9 < amount_min:
+                if float(_amt) + 1e-9 < amount_min:
                     continue
 
             matched += 1
+            if _amt is None:
+                amount_sum_unknown += 1        # 入选但金额未知：不能让合计悄悄少一笔
+            else:
+                try:
+                    amount_sum += float(_amt)
+                except (TypeError, ValueError):
+                    amount_sum_unknown += 1
             records.append({
                 "lottery": name,
                 "期号": h.get("期号"),
@@ -270,6 +304,12 @@ def api_hits():
         "returned": returned,      # 实际返回条数（已在 limit 截断之后）
         "limit": limit,
         "amount_unknown": amount_unknown,
+        # 累计中奖金额 = 各注「单注奖金」之和（税前、非实得；浮动奖取当期实际单注奖金）。
+        # 两套口径成对给出，前端必须点名口径后再显示，不能只报一个数让人以为通用。
+        "amount_sum": round(amount_sum, 2),              # 当前筛选：可确定金额的注合计
+        "amount_sum_unknown": amount_sum_unknown,        # 当前筛选：金额未知的注数（未计入）
+        "amount_all": round(amount_all, 2),              # 全部命中（不筛选）合计
+        "amount_all_unknown": amount_all_unknown,        # 全部命中：金额未知的注数（未计入）
         "lottery": lottery,
         "strategy": strategy,
         "sort_by": sort_by,

@@ -2716,12 +2716,38 @@ function closeModal() {
 
 // ===== 命中历史（/hits 页面） =====
 
+// 金额格式化：千分位 + 两位小数（累计值是求和，保留分位便于日后核对）
+function _fmtMoney(n) {
+    const v = Number(n);
+    if (!isFinite(v)) return "—";
+    return "¥" + v.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
 // 「目前已有多少中奖」常驻数字：分母 = 全部命中注数（不加任何筛选，全彩种）
-function _renderHitsStat(universe) {
+// ★ 金额跟随筛选：没筛就报全部合计；一旦筛了，改报「筛出 N 注累计多少钱」，
+//   并把未筛选的总额保留在同一行（点名「未筛选时累计」），避免两个口径混成一个数。
+// ★ 金额未知的注（浮动奖级无当期单注奖金）必须显式说出来，不许悄悄当 0。
+function _renderHitsStat(universe, money) {
     const el = $('hits-stat');
     if (!el) return;
-    el.innerHTML = `目前已中奖 <strong style="color:#c62828;font-size:15px">${universe}</strong> 注` +
-        ` <span style="opacity:.72">（全部彩种 · 全部奖级，含「开奖后回测·训练」）</span>`;
+    money = money || {};
+    const u = Number(universe) || 0;
+    const matched = money.matched != null ? Number(money.matched) : u;
+    const filtered = matched !== u;
+    const sum = Number((filtered ? money.sum : money.all) || 0);
+    const unknown = Number((filtered ? money.unknown : money.allUnknown) || 0);
+    const big = v => `<strong style="color:#c62828;font-size:15px">${v}</strong>`;
+    const unkTxt = unknown > 0
+        ? ` · <span style="color:#b9770e" title="浮动奖级（双色球/大乐透/七星彩一、二等）读不到当期实际单注奖金，这类注无法计入金额合计">另有 ${unknown} 注金额未知未计入</span>`
+        : '';
+    const scope = "全部彩种 · 全部奖级，含「开奖后回测·训练」";
+    // 范围括注紧跟在「注数」后面（它解释的是那个不随筛选变的分母），
+    // 金额一律放在最后 —— 否则「筛出 130 注…（全部彩种）」会被读成 130 注覆盖全部彩种。
+    const head = `目前已中奖 ${big(u)} 注 <span style="opacity:.72">（${scope}）</span>`;
+    el.innerHTML = filtered
+        ? `${head} · 筛出 ${matched} 注累计中奖金额 ${big(_fmtMoney(sum))}${unkTxt}` +
+          ` <span style="opacity:.72">（未筛选时累计 ${_fmtMoney(money.all)}）</span>`
+        : `${head} · 累计中奖金额 ${big(_fmtMoney(sum))}${unkTxt}`;
 }
 
 // 工具条内的常驻数字：筛出 xx 注 / 共 xxxx 注（总数）
@@ -3098,7 +3124,13 @@ async function loadHits() {
         const shown = Number(data.returned != null ? data.returned : (data.records || []).length);
         const trunc = !!(data.limit && data.limit > 0 && matched > shown);
         const unknownAmt = Number(data.amount_unknown || 0);
-        _renderHitsStat(universe);
+        _renderHitsStat(universe, {
+            matched: matched,
+            sum: data.amount_sum,
+            unknown: data.amount_sum_unknown,
+            all: data.amount_all,
+            allUnknown: data.amount_all_unknown,
+        });
         _renderHitsCount(matched, universe);
         if (!data.records || !data.records.length) {
             const scopeTxt = [lottery !== '全部' ? lottery : '', strategy !== '全部' ? strategy : ''].filter(Boolean).join(' · ');

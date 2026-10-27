@@ -150,6 +150,79 @@ def test_max_amount_keeps_everything_known(client):
 
 
 # ------------------------------------------------------------
+# 2.5 累计中奖金额（跟着筛选走，且两个口径都要点名）
+# ------------------------------------------------------------
+
+def test_amount_all_sums_known_payouts_only(client):
+    """全部命中口径：5+5+30=40，一等奖「金额未知」单独计数，不按 0 也不按名义上限计入。"""
+    d = _get(client, "?limit=0")
+    assert d["amount_all"] == 40.0
+    assert d["amount_all_unknown"] == 1      # 七星彩一等奖：浮动且无当期数据
+    # 未筛选时「当前筛选」口径与全部口径必须相等
+    assert d["amount_sum"] == 40.0
+    assert d["amount_sum_unknown"] == 1
+
+
+def test_amount_sum_follows_filters(client):
+    """累计金额必须跟着筛选走 —— 三个不同筛选给出三个不同的合计。"""
+    assert _get(client, "?lottery=双色球&limit=0")["amount_sum"] == 10.0     # 六等 5×2
+    assert _get(client, "?min_amount=10&limit=0")["amount_sum"] == 30.0      # 只剩五等奖 30
+    august = _get(client, "?date_to=2026-08&limit=0")                        # 七星彩 2 注
+    assert august["amount_sum"] == 30.0
+    assert august["amount_sum_unknown"] == 1
+
+
+def test_amount_all_never_changes_with_filters(client):
+    """分母口径的金额是稳定值：任何筛选都不能动它（否则「累计」会随点击跳动）。"""
+    baseline = _get(client, "?limit=0")["amount_all"]
+    assert baseline == 40.0
+    for q in ("?lottery=双色球&limit=0", "?min_amount=10&limit=0",
+              "?date_to=2026-08&limit=0", "?strategy=低拥挤策略&limit=0",
+              "?min_amount=1000000&limit=0"):
+        d = _get(client, q)
+        assert d["amount_all"] == baseline, q
+        assert d["amount_all_unknown"] == 1, q
+
+
+def test_unknown_amount_never_silently_zero(client):
+    """★ 金额未知的注不得消失：合计里不含它，但必须有一处计数说出来。
+
+    这条锁的是「宁可少报也不虚报，但少了多少要说」——
+    如果哪天有人图省事把 None 当 0，合计数看着更"完整"了，但那是错的。
+    """
+    d = _get(client, "?limit=0")
+    known = [r for r in d["records"] if r["奖金"]["金额"] is not None]
+    unknown = [r for r in d["records"] if r["奖金"]["金额"] is None]
+    assert sum(r["奖金"]["金额"] for r in known) == d["amount_all"]   # 合计 == 已知之和
+    assert len(unknown) == d["amount_all_unknown"]                    # 未知的都在计数里
+
+
+def test_amount_rounding_is_cent_precise(client, monkeypatch):
+    """合计保留到分：浮点求和不能把 5.55×3 算成 16.649999。"""
+    hist = {"双色球": [_win("双色球", "六等") for _ in range(3)]}
+    monkeypatch.setattr(fb, "load_feedback_history",
+                        lambda name, lookback=None: hist.get(name, []))
+    monkeypatch.setattr(pt, "prize_payout",
+                        lambda lottery, grade, issue=None: {"金额": 5.55, "浮动": False})
+    d = _get(client, "?limit=0")
+    assert d["amount_all"] == 16.65
+    assert d["amount_sum"] == 16.65
+
+
+def test_frontend_renders_amount_following_filters(client):
+    """前端必须把金额渲染出来，并把「未筛选时累计」作为另一个口径点名。"""
+    js = client.get("/static/js/main.js").get_data(as_text=True)
+    assert "_fmtMoney" in js
+    assert "累计中奖金额" in js
+    assert js.count("_renderHitsStat") >= 2          # 定义 + loadHits 真调用
+    # loadHits 必须把后端四个金额字段都传进去（少一个就会静默显示 ¥0.00）
+    for key in ("amount_sum", "amount_sum_unknown", "amount_all", "amount_all_unknown"):
+        assert key in js, key
+    # 未知金额要有一句人话解释（不是只给个裸数字）
+    assert "金额未知未计入" in js
+
+
+# ------------------------------------------------------------
 # 3. 排序
 # ------------------------------------------------------------
 
