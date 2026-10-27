@@ -222,6 +222,30 @@ def test_frontend_renders_amount_following_filters(client):
     assert "金额未知未计入" in js
 
 
+def test_frontend_never_shows_zero_for_missing_amount_field(client):
+    """★ 哨兵：后端没给金额字段时，前端必须显示「—」，不许显示 ¥0.00。
+
+    2026-10-27 实踩：`web/routes/hits.py` 加了 amount_sum/amount_all，但生产实例没重启
+    （改 Python 必须重启；改 static/*.js 不用重启）⇒ 浏览器拿到**新 JS + 旧后端**，
+    `data.amount_all` 是 undefined，`Number(undefined || 0)` = 0 ⇒ 页面理直气壮地报
+    「333 注全部命中 · 累计中奖金额 ¥0.00」。这种「静默显示 0」比报错难查得多：
+    数字看起来是个合法读数，只是错得离谱。
+
+    所以前端必须区分「后端说 0」与「后端没说」：前者显示 ¥0.00，后者显示「—」。
+    """
+    js = client.get("/static/js/main.js").get_data(as_text=True)
+
+    # 1) _fmtMoney 自身先挡 null/undefined/""，不能直接 Number()（Number(null)===0）
+    fm = js.split("function _fmtMoney")[1].split("\n}")[0]
+    assert "n === null" in fm and "n === undefined" in fm, "_fmtMoney 必须先判 null/undefined"
+    assert fm.index("n === null") < fm.index("Number(n)"), "判空要在 Number() 之前"
+
+    # 2) 渲染侧要显式识别「字段缺失」，不能 `Number(money.all) || 0`
+    rs = js.split("function _renderHitsStat")[1].split("\n}")[0]
+    assert "sumMissing" in rs, "_renderHitsStat 必须区分「缺失」与「值为 0」"
+    assert "money.all) || 0" not in rs, "不许把缺失字段用 || 0 抹成 0"
+
+
 # ------------------------------------------------------------
 # 3. 排序
 # ------------------------------------------------------------

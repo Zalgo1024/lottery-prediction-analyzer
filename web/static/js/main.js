@@ -2717,7 +2717,9 @@ function closeModal() {
 // ===== 命中历史（/hits 页面） =====
 
 // 金额格式化：千分位 + 两位小数（累计值是求和，保留分位便于日后核对）
+// ★ null / undefined（后端没给这个字段）一律显示「—」，绝不当成 0 —— 见 _renderHitsStat 注。
 function _fmtMoney(n) {
+    if (n === null || n === undefined || n === "") return "—";
     const v = Number(n);
     if (!isFinite(v)) return "—";
     return "¥" + v.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -2734,7 +2736,12 @@ function _renderHitsStat(universe, money) {
     const u = Number(universe) || 0;
     const matched = money.matched != null ? Number(money.matched) : u;
     const filtered = matched !== u;
-    const sum = Number((filtered ? money.sum : money.all) || 0);
+    // ★ 字段缺失时显示「—」而不是 ¥0.00：旧后端没有 amount_* 字段时会返回 undefined，
+    //   若当 0 处理，页面会理直气壮地报「累计 ¥0.00」——比报错更难查（2026-10-27 实踩：
+    //   新 JS 跑在未重启的旧后端上，333 注全有奖金却显示 ¥0.00）。
+    const rawSum = filtered ? money.sum : money.all;
+    const sumMissing = rawSum === undefined || rawSum === null || rawSum === "";
+    const sum = sumMissing ? null : Number(rawSum);
     const unknown = Number((filtered ? money.unknown : money.allUnknown) || 0);
     const big = v => `<strong style="color:#c62828;font-size:15px">${v}</strong>`;
     const unkTxt = unknown > 0
