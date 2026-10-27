@@ -22,7 +22,7 @@ import pandas as pd
 from config import (LOTTERY_CONFIG, TRAINING_DIR, PREDICT_DEFAULTS,
                     resolve_groups, TRIAL_ARMS)
 from data.loader import load_lottery, FILE_PATHS, _file_path
-from data.schema import LotteryData, parse_draw_date, get_schema, is_redblue, record_zone_numbers
+from data.schema import LotteryData, parse_draw_date, get_schema, is_redblue, record_zone_numbers, normalize_zone_names
 
 logger = logging.getLogger(__name__)
 
@@ -129,9 +129,12 @@ def feedback_record_view(lottery_name: str, rec: dict) -> dict:
         hit_map = {"红球": rec.get("红球命中", 0), "蓝球": rec.get("蓝球命中", 0)}
         total_choose = schema.red_zone.choose + schema.blue_zone.choose
     else:
-        pred = rec.get("预测号码") or {}
-        actual = rec.get("实际号码") or {}
-        hit_map = rec.get("分区命中") or {}
+        # ⚠️ 3D/排3/排5 有 83 条历史记录仍用「百位/十位/个位/千位/万位」作分区键
+        # （2026 年前后统一为「第N位」）。不归一化会让这些记录的号码整行丢失、
+        # 命中被静默算成 0（与「总命中」字段自相矛盾），因此这里统一走 schema 归一化。
+        pred = normalize_zone_names(rec.get("预测号码") or {}, schema=schema)
+        actual = normalize_zone_names(rec.get("实际号码") or {}, schema=schema)
+        hit_map = normalize_zone_names(rec.get("分区命中") or {}, schema=schema)
         total_choose = rec.get("总选择") or sum(z.choose for z in schema.zones)
     zones = []
     for z in schema.zones:

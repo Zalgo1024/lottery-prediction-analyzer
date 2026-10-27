@@ -34,6 +34,27 @@ def page():
     return render_template("hits.html")
 
 
+@bp.route("/api/hits/filters")
+@api_error_handler
+def api_hits_filters():
+    """命中条件下拉的全部内容（术语与规则单一真源在 `web/hit_filters.py`）。
+
+    参数：lottery = 全部 | 双色球 | 大乐透 | 排列5 | 福彩3D | 排列3 | 七星彩
+    返回：
+      通用      总命中 ≥ N（上界按该彩种的理论最大命中数，3D 只有 1~3）
+      专属      该彩种规则下的分区命中结构；「全部」时为 null（跨彩种不可比）
+      分区      该彩种的分区名与每区应选个数
+      位置对照  数字型的「第N位 = 百位/十位/个位」对照串（仅数字型非空）
+      口径说明  两个组各自的含义
+    """
+    from web.hit_filters import options_payload
+
+    lottery = request.args.get("lottery", "全部", type=str)
+    if lottery not in ("全部",) and lottery not in LOTTERY_CONFIG:
+        return jsonify({"error": "未知彩种：%s" % lottery}), 400
+    return jsonify(options_payload(lottery))
+
+
 @bp.route("/api/hits")
 @api_error_handler
 def api_hits():
@@ -50,6 +71,13 @@ def api_hits():
       red_hits:   最小红球命中数（仅对双色球/大乐透生效；数字型恒为真）
       blue_hits:  最小蓝球命中数（仅对双色球/大乐透生效；数字型恒为真）
       total_hits: 最小总命中数（对所有彩种生效，红蓝型=红+蓝）
+      zones:      命中条件（新口径，推荐；**与上面三个字段并存，可叠加**）。
+                  格式 `名称:最小命中`，多项用逗号连接，名称可取：
+                    · 单分区名：红球 / 蓝球 / 第1位 … 第7位
+                    · 逻辑组名：总（全部分区合计）/ 前区（七星彩第1~6位）/ 后区（七星彩第7位）
+                  例：`红球:4,蓝球:1`、`第7位:1`、`前区:3`、`总:5`
+                  ★ 分区名不认识或格式不合法 ⇒ 返回 400，绝不静默忽略
+                    （「全部」彩种只允许 `总`，否则数字型记录会被按红球条件静默筛掉）。
       min_amount: 单注奖金下限（元，默认不限）。按「这一注能中多少钱」筛选；
                   浮动奖级若读不到当期实际奖金（金额未知）则不参与金额筛选，
                   其条数在响应 `amount_unknown` 里单独给出，避免静默漏计。
@@ -108,6 +136,24 @@ def api_hits():
     red_min = _int_param(red_hits_min)
     blue_min = _int_param(blue_hits_min)
     total_min = _int_param(total_hits_min)
+
+    # 命中条件（新口径，替代 red_hits/blue_hits/total_hits 三件套）：
+    #   zones=红球:4,蓝球:1  ⇒ 红球命中 ≥4 且 蓝球命中 ≥1
+    #   zones=第7位:1 / 前区:3 / 总:4
+    # 解析或分区名不认识时**直接 400**，不许静默忽略——否则筛选悄悄失效、页面显示
+    # 「筛出 0 注」而用户以为真的没有，是本项目最忌讳的 fail-silent。
+    from web.hit_filters import match_condition, group_hits, parse_condition, validate_condition
+
+    try:
+        zone_cond = parse_condition(request.args.get("zones", "", type=str))
+        # 「全部」彩种只允许「总」：同一个「红球 ≥4」在数字型上根本不存在，
+        # 跨彩种套用会让数字型记录被静默筛掉。
+        validate_condition(zone_cond, "" if lottery == "全部" else lottery)
+    except ValueError as exc:
+        return jsonify({
+            "error": str(exc), "records": [], "total": 0, "universe": 0,
+            "returned": 0, "amount_sum": 0, "amount_all": 0,
+        }), 400
 
     def _float_param(value, default=None):
         if value is None or value == "":
@@ -224,6 +270,10 @@ def api_hits():
             # 总命中筛选对所有彩种生效；红蓝型若没有总命中字段则自行计算
             effective_total = total_hit if total_hit else (red_hit + blue_hit)
             if total_min is not None and effective_total < total_min:
+                continue
+            # 命中条件（分区/逻辑组）：用归一化后的逐分区命中比较，
+            # 3D/排3/排5 的「百位/十位/个位」老键名由 group_hits 内部归一化，不会被筛漏。
+            if zone_cond and not match_condition(zone_cond, group_hits(h, name)):
                 continue
 
             # 奖金筛选：金额未知（浮动且无当期数据）不参与筛选，只单独计数，

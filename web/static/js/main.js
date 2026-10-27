@@ -2774,19 +2774,100 @@ function _renderHitsCount(matched, universe) {
         : `未筛选：当前共 ${universe} 注中奖记录`;
 }
 
+// 命中条件下拉的接口缓存：切彩种时不必重复拉（内容只与彩种有关）
+const _hitsCondCache = {};
+// URL 里带进来的条件，等下拉填好后应用一次
+let _hitsPendingCond = '';
+
+// 切换彩种：重填「命中条件」下拉（内容随彩种变），再刷新列表
 function _onHitsLotteryChange() {
     const lottery = $('hits-lottery') ? $('hits-lottery').value : '全部';
-    const isRedBlue = lottery === '双色球' || lottery === '大乐透';
-    const redBox = $('hits-red');
-    const blueBox = $('hits-blue');
-    const totalBox = $('hits-total');
-    const sortBox = $('hits-sort');
-    if (redBox) redBox.style.display = isRedBlue ? '' : 'none';
-    if (blueBox) blueBox.style.display = isRedBlue ? '' : 'none';
-    if (totalBox) totalBox.style.display = isRedBlue ? 'none' : '';
-    // 当切换彩种时，排序选项中红/蓝命中对数字型无意义，但保留也无害；
-    // 为更友好，当选择数字型时把排序切换到 total_hits 的默认逻辑不强制，
-    // 仅调整可选项文字已足够，这里只保证筛选框可见性。
+    return _fillHitsCond(lottery).then((droppedBySwitch) => {
+        const sel = $('hits-cond');
+        let dropped = '';
+        if (_hitsPendingCond && sel) {
+            const has = Array.from(sel.options).some(o => o.value === _hitsPendingCond);
+            if (has) sel.value = _hitsPendingCond;
+            else dropped = _hitsPendingCond;     // 链接带进来的条件在本彩种不适用
+            _hitsPendingCond = '';
+            _onHitsCondChange();
+        }
+        dropped = dropped || droppedBySwitch;
+        const noteEl = $('hits-cond-note');
+        if (noteEl) {
+            // ★ 不适用的条件**必须说出来**，不许静默清空——否则页面显示的是
+            //   「全部命中注」而用户以为筛选还生效，正是本项目最怕的 fail-silent。
+            if (dropped) {
+                noteEl.textContent = `原条件「${dropped}」在「${lottery}」下不适用，已清除`
+                    + (lottery === '全部' ? '；要看分区命中请先在上方选定单个彩种' : '');
+                noteEl.style.color = '#b9770e';
+                noteEl.style.display = 'block';
+            } else {
+                noteEl.style.color = '';
+            }
+        }
+        loadHits();
+    });
+}
+
+// 拉取并渲染命中条件下拉。
+// ★ 选项内容全部来自后端 /api/hits/filters（规则单一真源在 web/hit_filters.py），
+//   前端不手抄任何奖级规则——否则彩种规则一改，页面就悄悄过期。
+async function _fillHitsCond(lottery) {
+    const sel = $('hits-cond');
+    if (!sel) return;
+    const key = lottery || '全部';
+    const prev = sel.value;
+    let data = _hitsCondCache[key];
+    if (!data) {
+        try {
+            data = await api(`/api/hits/filters?lottery=${encodeURIComponent(key)}`);
+        } catch (e) {
+            return;                       // 拉不到就保持现状，别把下拉清空
+        }
+        if (!data || data.error) return;
+        _hitsCondCache[key] = data;
+    }
+    const escA = _escAttr;
+    let h = '<option value="">命中条件：不限</option>';
+    h += '<optgroup label="通用 · 所有彩种同一口径">';
+    (data.通用 || []).forEach(o => {
+        h += `<option value="${escA(o.key)}" title="${escA(o.note || '')}">${escA(o.label)}</option>`;
+    });
+    h += '</optgroup>';
+    const sp = data.专属;
+    if (sp && (sp.档位 || []).length) {
+        h += `<optgroup label="${escA(sp.标题 || '该彩种专属')}">`;
+        sp.档位.forEach(o => {
+            h += `<option value="${escA(o.key)}" title="${escA(o.note || '')}">${escA(o.label)}</option>`;
+        });
+        h += '</optgroup>';
+    }
+    sel.innerHTML = h;
+    // 切彩种后原选中项若已不适用，回落「不限」——不许留一个永远筛不出来的幽灵条件。
+    // 返回被丢掉的那个值，由调用方明确告知用户（不静默）。
+    const hasPrev = !!(prev && Array.from(sel.options).some(o => o.value === prev));
+    sel.value = hasPrev ? prev : '';
+    _onHitsCondChange();
+    return (prev && !hasPrev) ? prev : '';
+}
+
+// 选中条件变化：把该档「意味着什么」显示在下拉下方（这是「更详细」的那一半）
+function _onHitsCondChange() {
+    const sel = $('hits-cond');
+    const noteEl = $('hits-cond-note');
+    if (!sel || !noteEl) return;
+    const opt = sel.selectedOptions && sel.selectedOptions[0];
+    const t = opt ? (opt.getAttribute('title') || '') : '';
+    if (t) {
+        noteEl.textContent = '含义：' + t;
+        noteEl.style.color = '';
+        noteEl.style.display = 'block';
+    } else {
+        noteEl.textContent = '';
+        noteEl.style.color = '';
+        noteEl.style.display = 'none';
+    }
 }
 
 // ===== 命中历史的时间筛选：日历选择器（点起点→点终点）+ 快捷预设 =====
@@ -3098,9 +3179,9 @@ async function loadHits() {
     const strategy = $('hits-strategy') ? $('hits-strategy').value : '全部';
     const limitSel = $('hits-limit');
     const limit = limitSel ? limitSel.value : '100';
-    const redHits = (lottery === '双色球' || lottery === '大乐透') && $('hits-red') ? $('hits-red').value : '';
-    const blueHits = (lottery === '双色球' || lottery === '大乐透') && $('hits-blue') ? $('hits-blue').value : '';
-    const totalHits = (lottery !== '双色球' && lottery !== '大乐透') && $('hits-total') ? $('hits-total').value : '';
+    // 命中条件：key 形如 `红球:4,蓝球:1` / `总:4` / `第7位:1`
+    // （选项由 /api/hits/filters 按彩种生成，这里只负责原样发回去）
+    const cond = $('hits-cond') ? $('hits-cond').value : '';
     const amount = $('hits-amount') ? $('hits-amount').value : '';
     const sortSel = $('hits-sort');
     let sortBy = 'time', sortOrder = 'desc';
@@ -3115,9 +3196,7 @@ async function loadHits() {
     try {
         let url = `/api/hits?lottery=${encodeURIComponent(lottery)}&min_prize=${encodeURIComponent(prize)}&type=${encodeURIComponent(type)}&limit=${encodeURIComponent(limit)}&sort_by=${encodeURIComponent(sortBy)}&sort_order=${encodeURIComponent(sortOrder)}`;
         if (strategy && strategy !== '全部') url += `&strategy=${encodeURIComponent(strategy)}`;
-        if (redHits !== '') url += `&red_hits=${encodeURIComponent(redHits)}`;
-        if (blueHits !== '') url += `&blue_hits=${encodeURIComponent(blueHits)}`;
-        if (totalHits !== '') url += `&total_hits=${encodeURIComponent(totalHits)}`;
+        if (cond !== '') url += `&zones=${encodeURIComponent(cond)}`;
         if (amount !== '') url += `&min_amount=${encodeURIComponent(amount)}`;
         const tb = _hitsTimeBounds();
         if (tb.from) url += `&date_from=${encodeURIComponent(tb.from)}`;

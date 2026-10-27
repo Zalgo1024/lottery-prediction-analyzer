@@ -91,29 +91,10 @@
     <option value="500">500 条</option>
     <option value="0">全部</option>
   </select>
-  <select id="hits-red" style="padding:8px 15px;border:1px solid #ddd;border-radius:5px;font-size:14px" title="仅对双色球/大乐透生效">
-    <option value="" selected>红球命中 ≥ 0</option>
-    <option value="1">红球命中 ≥ 1</option>
-    <option value="2">红球命中 ≥ 2</option>
-    <option value="3">红球命中 ≥ 3</option>
-    <option value="4">红球命中 ≥ 4</option>
-    <option value="5">红球命中 ≥ 5</option>
-    <option value="6">红球命中 ≥ 6</option>
-  </select>
-  <select id="hits-blue" style="padding:8px 15px;border:1px solid #ddd;border-radius:5px;font-size:14px" title="仅对双色球/大乐透生效">
-    <option value="" selected>蓝球命中 ≥ 0</option>
-    <option value="1">蓝球命中 ≥ 1</option>
-    <option value="2">蓝球命中 ≥ 2</option>
-  </select>
-  <select id="hits-total" style="padding:8px 15px;border:1px solid #ddd;border-radius:5px;font-size:14px;display:none" title="对所有彩种生效">
-    <option value="" selected>总命中 ≥ 0</option>
-    <option value="1">总命中 ≥ 1</option>
-    <option value="2">总命中 ≥ 2</option>
-    <option value="3">总命中 ≥ 3</option>
-    <option value="4">总命中 ≥ 4</option>
-    <option value="5">总命中 ≥ 5</option>
-    <option value="6">总命中 ≥ 6</option>
-    <option value="7">总命中 ≥ 7</option>
+  <!-- 命中条件：内容由 /api/hits/filters 按彩种生成，分「通用」与「当前彩种专属」两组。
+       ★ 选项不在这里手抄——规则单一真源在 web/hit_filters.py，改规则只改那一处。 -->
+  <select id="hits-cond" onchange="_onHitsCondChange()" style="padding:8px 15px;border:1px solid #ddd;border-radius:5px;font-size:14px;min-width:178px" title="分「通用」与「当前彩种专属」两组；选中项的含义显示在下方灰字">
+    <option value="" selected>命中条件：不限</option>
   </select>
   <select id="hits-sort" style="padding:8px 15px;border:1px solid #ddd;border-radius:5px;font-size:14px">
     <option value="time" data-order="desc" selected>时间（新→旧）</option>
@@ -128,6 +109,7 @@
   <button class="btn btn-primary" onclick="loadHits()"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg> 刷新</button>
 </div>
 
+<div id="hits-cond-note" style="display:none;margin:-4px 0 12px;font-size:12px;color:var(--gray);line-height:1.55"></div>
 <div id="hits-stat" style="margin:-5px 0 15px;font-size:13px;color:var(--gray)">统计中…</div>
 
 <div id="hits-result"><div class="alert alert-info">加载中...</div></div>
@@ -141,6 +123,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const type = params.get('type');
     const strategy = params.get('strategy');
     const limit = params.get('limit');
+    const condParam = params.get('zones');
     const red = params.get('red_hits');
     const blue = params.get('blue_hits');
     const total = params.get('total_hits');
@@ -155,23 +138,33 @@ document.addEventListener('DOMContentLoaded', () => {
         $('hits-date-to').value = dateTo || '';
         _calSyncLabel();
     }
-    if (lottery) $('hits-lottery').value = lottery;
-    if (prize) $('hits-prize').value = prize;
-    if (amount) $('hits-amount').value = amount;
-    if (type) $('hits-type').value = type;
-    if (strategy) $('hits-strategy').value = strategy;
-    if (limit) $('hits-limit').value = limit;
-    if (red) $('hits-red').value = red;
-    if (blue) $('hits-blue').value = blue;
-    if (total) $('hits-total').value = total;
+    // 回填下拉：只在值真的存在于选项里时才设。
+    // ★ 裸赋值 `el.value = '不存在的值'` 会把 value 设成空串 ⇒ 后端收到空参数
+    //   （如 lottery=''）⇒ 一条都筛不到，页面显示「0 注」而用户以为真的没有。
+    const setSel = (id, val) => {
+        const el = $(id);
+        if (!el || !val) return;
+        if (Array.from(el.options).some(o => o.value === val)) el.value = val;
+    };
+    setSel('hits-lottery', lottery);
+    setSel('hits-prize', prize);
+    setSel('hits-amount', amount);
+    setSel('hits-type', type);
+    setSel('hits-strategy', strategy);
+    setSel('hits-limit', limit);
     if (sortBy && sortOrder) {
         const opts = Array.from($('hits-sort').options);
         const match = opts.find(o => o.value === sortBy && o.getAttribute('data-order') === sortOrder);
         if (match) $('hits-sort').selectedIndex = match.index;
     }
-    // 切换彩种时同步红/蓝/总命中筛选框的显隐
+    // 命中条件：新链接读 zones；老的 red_hits/blue_hits/total_hits 链接映射成同一套 key
+    _hitsPendingCond = condParam || [
+        red ? `红球:${red}` : '',
+        blue ? `蓝球:${blue}` : '',
+        total ? `总:${total}` : '',
+    ].filter(Boolean).join(',');
+    // 填命中条件下拉（内容随彩种变）后自动加载，不再单独调 loadHits
     _onHitsLotteryChange();
-    loadHits();
 });
 </script>
 {% endblock %}
