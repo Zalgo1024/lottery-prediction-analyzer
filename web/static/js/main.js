@@ -2143,7 +2143,7 @@ function pollPredictStatus() {
             const r = data.result;
             html('pred-info', `
               <div class="alert alert-info">
-                预测日期: <strong>${r.date}</strong> | 模式: <strong>${r.mode}</strong> |
+                目标开奖日: <strong>${r.date}</strong> | 模式: <strong>${r.mode}</strong> |
                 组数: <strong>${r.groups}</strong> | 近50期命中率: <strong>${(r.hit_rate*100).toFixed(1)}%</strong>
               </div>
             `);
@@ -3287,6 +3287,19 @@ async function loadHits() {
                 : 'background:linear-gradient(90deg,#ffd700,#ffed4a);color:#7a5c00';
             const payBadge = `<span title="${payTitle}" style="display:inline-block;margin-left:6px;padding:2px 10px;border-radius:12px;font-size:12px;font-weight:bold;${payStyle}">${payIcon}${payText}</span>`;
             const payDetail = `<span title="${payTitle}">单注奖金：<strong style="color:${pz.浮动 ? '#e65100' : '#2e7d32'}">${payText}</strong>${pz.来源 ? `（${pz.来源}）` : ''}</span>`;
+            // 「出号时刻」才是能证明提前出号的事实字段。`预测日期` 是**目标开奖日**
+            // （由开奖日历推算的派生字段），恒等于开奖日期 —— 只并列这两个必然相同的
+            // 日期，会让人误以为预测是在开奖之后补录的。故：
+            //   ① 有 批次时间 → 显示它，与开奖日期并列即可一眼看出先后；
+            //   ② 无 批次时间 → 明说「未记录」，不拿预测日期兜底冒充时刻。
+            const genTime = String(r.批次时间 || '').replace('T', ' ').slice(0, 16);
+            const genSpan = genTime
+                ? `<span title="出号时刻＝系统生成这注号码的真实时刻，取自锁定 pending 的生成时间，开奖后原样结转、不重算">出号时刻：<strong style="color:#2e7d32">${genTime}</strong></span>`
+                : `<span title="该记录未落盘生成时刻，无法从记录本身自证早于开奖；按日期口径保守计入" style="color:#e65100">出号时刻：<strong>未记录</strong></span>`;
+            const predDiffers = r.预测日期 && r.开奖日期 && String(r.预测日期) !== String(r.开奖日期);
+            const predSpan = predDiffers
+                ? `<span title="目标开奖日由开奖日历推算；它与开奖日期不同，说明当时的日历口径有偏差">目标开奖日：<strong>${r.预测日期}</strong></span>`
+                : '';
             htmlStr += `<div class="hit-item ${isTrain ? 'train' : ''}">
                 <div class="hit-header" onclick="_toggleHitItem(${i})">
                     <div class="hit-title">
@@ -3318,8 +3331,9 @@ async function loadHits() {
                         ${_lowcrowdHitSpan(r)}
                         ${_mechanismHitSpan(r)}
                         <span>来源：<strong>${r.来源 || '-'}</strong></span>
-                        <span>预测日期：<strong>${r.预测日期}</strong></span>
+                        ${genSpan}
                         <span>开奖日期：<strong>${r.开奖日期}</strong></span>
+                        ${predSpan}
                     </div>
                 </div>
             </div>`;
@@ -3778,7 +3792,7 @@ async function loadFeedbackHistory(lottery) {
           <td>${actBalls}</td>
           ${hitCells}
           <td style="${gradeClass}">${f.中奖等级}</td>
-          <td style="font-size:11px;color:var(--gray);white-space:nowrap">预测:${f.预测日期 || ''}<br>开奖:${f.开奖日期 || ''}<br>评估:${evalTime}</td>
+          <td style="font-size:11px;color:var(--gray);white-space:nowrap" title="出号=系统生成这注号码的真实时刻；开奖=该期开奖日期。出号时刻缺失时显示「未记录」，不拿目标开奖日顶替">出号:${f.批次时间 ? String(f.批次时间).replace('T', ' ').slice(0, 16) : '<span style="color:#e65100">未记录</span>'}<br>开奖:${f.开奖日期 || ''}<br>评估:${evalTime}</td>
         </tr>`;
     }
     htmlStr += `</table>`;
@@ -3851,7 +3865,13 @@ async function loadFeedbackCompare() {
 
 // 单条「预测 vs 实际」对比卡片
 function _renderFbCompareCard(c) {
-    const predDate = c.预测日期 ? `预测于 ${c.预测日期}` : '预测时间未知';
+    // ★ 不能把「预测日期」当成预测时刻来展示：它是**目标开奖日**（派生字段，恒等于
+    //   开奖日期），写成「预测于 <预测日期>」等于宣称「我在开奖那天做的预测」，
+    //   是自证马后炮的说法。真正能自证的是 `批次时间`（生成时刻）；缺失时如实说「未记录」。
+    const _genTime = c.批次时间 ? String(c.批次时间).replace('T', ' ').slice(0, 16) : '';
+    const predDate = _genTime
+        ? `出号 ${_genTime}`
+        : '<span style="color:#e65100" title="该记录未落盘生成时刻，无法从记录本身自证早于开奖">出号时刻未记录</span>';
     const drawDate = c.开奖日期 ? `开奖 ${c.开奖日期}` : '开奖时间未知';
     const isTrain = c.valid_prediction === false;
     const srcTag = isTrain

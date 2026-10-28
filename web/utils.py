@@ -1196,7 +1196,12 @@ def run_auto_pipeline_core(lottery_name: str, params: dict, task_id: Optional[st
             path = save_prediction_record(pred)
             record_dir = str(path)
             predictions = pred.get("预测号码") or []
+            # `预测日期` 是**目标开奖日**（由开奖日历推算的派生字段），不是出号时刻。
+            # 两个一起报：只报目标开奖日，事后看步骤日志会读成「开奖日才出号」。
             pred_info = f"预测: {pred['预测日期']} {pred['号码组数']}组"
+            _pred_gen = str(pred.get("生成时间") or "")[:16].replace("T", " ")
+            if _pred_gen:
+                pred_info += f"（出号 {_pred_gen}）"
             if not _record_pending(params):
                 pred_info += "（仅试算，未写 pending）"
             steps.append(f"{pred_info} ({pred['预测模式']})")
