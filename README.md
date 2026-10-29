@@ -2,7 +2,7 @@
 
 > **一套把「看起来有效」和「真的有效」分开的检验框架 · 彩票是最严苛的压力测试场**
 
-![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB) ![Tests](https://img.shields.io/badge/pytest-1918%20passed-3B6D11) ![Lotteries](https://img.shields.io/badge/%E5%BD%A9%E7%A7%8D-6-854F0B) ![License](https://img.shields.io/badge/License-AGPL--3.0-blue)
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB) ![Tests](https://img.shields.io/badge/pytest-1915%20passed-3B6D11) ![Lotteries](https://img.shields.io/badge/%E5%BD%A9%E7%A7%8D-6-854F0B) ![License](https://img.shields.io/badge/License-AGPL--3.0-blue)
 
 ## 这个项目真正解决的问题
 
@@ -59,7 +59,7 @@ python run.py                # 看门狗模式，访问 http://127.0.0.1:5000
 # 3. 或者只用 CLI
 python cli.py --help
 
-# 4. 跑测试套件（全量 1918 例）
+# 4. 跑测试套件（全量 1915 例）
 pytest -q                    # 约 15 分钟（慢点集中在真实 predict 全流程的契约测试）
 ```
 
@@ -215,7 +215,7 @@ python scripts/repair_records.py         # 记录修复（默认 dry-run，--app
 | 机制缝隙·排列5 / 七星彩 | R=1.0305 / 0.9912 | 未检出 |
 | 选号对中奖率的影响 | E[达标注数] = K·p | 与「选哪些号」无关，只与注数 K 和覆盖结构有关 |
 
-> 正确读法见 `docs/结题报告.md`：**未检出**只表示「在现有样本与检验功效下看不到稳定偏差」，
+> 正确读法：**未检出**只表示「在现有样本与检验功效下看不到稳定偏差」，
 > 既不是「已证明不存在」，也不是「多买就能中」。真正能动的只有三处：覆盖设计、实得优化、Rollover 时机。
 
 ---
@@ -392,8 +392,8 @@ POST /api/settings/push-notify/test     # 发一条测试消息（未配置返�
 ## 测试
 
 ```bash
-pytest -q              # 1918 passed（全量；含奖金表 33 例、写保护/分区归一化回归、撞号度量与中奖归因、批次契约、出号数量固定/动态、消息推送：图片渲染/发送节流/降级/全入口接线、随机锚点走前验证与持续训练循环、休市日历与真实开奖数据一致性、三口径 EV 对照/冷门口径 rollover/奖池门槛/Kelly 纪律仓位/限号前置与组合方差指标、策略历史实测命中统计（归一/过滤/基线/样本不足）、休市期全链路感知（看板滞后/下一期 + 调度器排班 + 启动自愈 + cli lag + 体检脚本 + 销量模型前瞻 + 休市提示条）、机制缝隙四轨测量（A/A′注数比、开出号分位、结构偏差、派奖期）+ 缝隙内选号与反馈闭环、机制缝隙策略层可见性与前瞻对照、叙事解绑文案扫描、生产 pending 防覆盖（record_pending 开关）、出号数量硬性拉平与注数一致性体检/启动自愈）
-pytest tests/          # 1909 passed（仅 tests/ 目录；另有 9 例在 scripts/ 下，故用 pytest -q 跑全量）
+pytest -q              # 1915 passed（全量；含奖金表 33 例、写保护/分区归一化回归、撞号度量与中奖归因、批次契约、出号数量固定/动态、消息推送：图片渲染/发送节流/降级/全入口接线、随机锚点走前验证与持续训练循环、休市日历与真实开奖数据一致性、三口径 EV 对照/冷门口径 rollover/奖池门槛/Kelly 纪律仓位/限号前置与组合方差指标、策略历史实测命中统计（归一/过滤/基线/样本不足）、休市期全链路感知（看板滞后/下一期 + 调度器排班 + 启动自愈 + cli lag + 体检脚本 + 销量模型前瞻 + 休市提示条）、机制缝隙四轨测量（A/A′注数比、开出号分位、结构偏差、派奖期）+ 缝隙内选号与反馈闭环、机制缝隙策略层可见性与前瞻对照、叙事解绑文案扫描、生产 pending 防覆盖（record_pending 开关）、出号数量硬性拉平与注数一致性体检/启动自愈）
+pytest tests/          # 1906 passed（仅 tests/ 目录；另有 9 例在 scripts/ 下，故用 pytest -q 跑全量）
 ```
 
 ## 维护（放着不管时会发生什么）
@@ -413,8 +413,7 @@ pytest tests/          # 1909 passed（仅 tests/ 目录；另有 9 例在 scrip
 日常只需看一处：**看板标题旁的一致性徽章**。绿色 = 滑轨与实际出号对得上；
 变红 = 有旁路改了注数。
 
-维护动作的完整清单与"为什么这么改"见
-[维护清单](docs/维护清单_20261008.md)；常用脚本：
+常用脚本：
 
 ```bash
 python scripts/sync_counts.py --check   # 文档里的测试数是否与真实一致
@@ -428,14 +427,6 @@ python scripts/prune_logs.py            # 预览可清理的旧日志（加 --ap
 git bundle create E:/backups/707_<日期>.bundle --all   # git 全量备份
 # 数据备份：lottery_data/ + training/feedback/ 打包（repair_records --apply 也会自动备份）
 ```
-
-## 文档
-
-- [结题报告](docs/结题报告.md)（[Word](docs/结题报告.docx) / [PDF](docs/结题报告.pdf)）—— 完整的假设检验流水线方法论、实得优化轨道与工程体系说明
-- [四等门二次评估与三项落地（v1.9）](docs/四等门二次评估与三项落地_结论.md) —— 覆盖选择接生产（含「空间在 K·p≈1 处最大」的形状）、动态定额三机制、≥四等 门两条轨道结案
-- [预算约束下的奖级目标（v1.8）](docs/预算约束下的奖级目标_结论.md) —— 三条指令的落地：娱乐预算包络、δ 情景区间、六格按实际预算重做
-- [双轨组合优化（v1.7）](docs/双轨组合优化_结论.md) —— 覆盖设计（轨道 A）与稳健净 EV（轨道 B）的判决与「层 1 否决力」的由来
-- 配图与画图脚本：`docs/assets/`、`scripts/report_figures.py`
 
 ## 许可证
 

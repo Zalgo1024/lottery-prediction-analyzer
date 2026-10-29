@@ -280,18 +280,20 @@ def test_startup_recovery_runs_cold_digest():
 
 
 def test_sync_counts_rules_are_not_dead():
-    """计数同步脚本的每条规则必须在对应文档里还能命中。
+    """计数同步脚本的每条规则必须在 README 里还能命中。
 
     零命中 = 文档措辞变了或脚本已失效。那种情况下脚本会"跑成功但什么都没改"，
     比直接报错危险得多。
+
+    2026-10-29：`docs/结题报告.md` 已移除，同步载体只剩 README。
     """
     import importlib.util
     spec = importlib.util.spec_from_file_location("sync_counts", ROOT / "scripts" / "sync_counts.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    for path in (ROOT / "README.md", ROOT / "docs" / "结题报告.md"):
-        zeros = mod._zero_hit_rules(path.read_text(encoding="utf-8"), path.name)
-        assert zeros == [], f"{path.name} 里规则零命中: {zeros}"
+    path = ROOT / "README.md"
+    zeros = mod._zero_hit_rules(path.read_text(encoding="utf-8"), path.name)
+    assert zeros == [], f"{path.name} 里规则零命中: {zeros}"
 
 
 def test_prune_logs_only_touches_dated_files(tmp_path, monkeypatch):
@@ -335,33 +337,6 @@ def test_sync_counts_rules_have_exactly_three_groups():
     mod = _load_script("sync_counts")
     bad = [p for p, _k, _w in mod.RULES if re.compile(p).groups != 3]
     assert bad == [], f"规则组数不是 3: {bad}"
-
-
-def test_sync_counts_handles_text_split_across_runs():
-    """Word 把一句话拆成多个 run 时，替换仍必须生效。
-
-    这是第一版真正翻车的地方：逐 `<w:t>` 节点匹配时，后缀根本不在同一节点内，
-    正则全部落空，脚本报告"成功"而 docx 里 5 处 915 只改掉 1 处。
-    """
-    mod = _load_script("sync_counts")
-    vals = {"total": 944, "tests_only": 935, "scripts_only": 9}
-    # 真实 docx 里的拆分形态
-    nodes = ["）", "915 ", " ", "pytest ", "测试全量通过"]
-    new, changed = mod._apply_cross(nodes, vals, "结题报告.docx")
-    joined = "".join(new)
-    assert "915" not in joined, f"仍残留旧值: {joined!r}"
-    assert "944" in joined and "pytest" in joined and "测试全量通过" in joined
-    assert changed >= 1
-
-
-def test_sync_counts_keeps_node_count_and_content_when_already_synced():
-    """已是目标值时不得产生任何变更（--check 依赖这条保持幂等）。"""
-    mod = _load_script("sync_counts")
-    vals = {"total": 944, "tests_only": 935, "scripts_only": 9}
-    nodes = ["pytest 944 ", "例通过"]
-    new, changed = mod._apply_cross(nodes, vals, "结题报告.docx")
-    assert changed == 0
-    assert "".join(new) == "".join(nodes)
 
 
 def test_dashboard_consumes_digest_api():
