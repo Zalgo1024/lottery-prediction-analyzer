@@ -47,7 +47,51 @@ _TARGETS = (
     #   · SPEND_PATH 是「本月已投」台账 —— 写脏会让当晚真实出号误以为额度耗尽而停发。
     ("ev.budget_gate", "LIMIT_PATH", "budget_aggregate.json"),
     ("ev.budget_gate", "SPEND_PATH", "budget_spend.json"),
+    # 逐期账本（2026-10-31 新增任务 1）。不隔离的话，用例 rebuild 会把真实
+    # training/ledger/*.jsonl 覆盖成「只有测试彩种、只有若干期」的残本，
+    # 而那正是复盘时唯一的成本/净盈亏证据。
+    ("data.ledger", "LEDGER_DIR", "ledger"),
+    # 留证台账（2026-10-31）。这是**事故取证**的唯一第一手材料，被测试覆盖掉
+    # 就等于把「当时到底是什么状态」的证据抹了。
+    ("data.attest", "ATTEST_DIR", "attest"),
+    # 影子对照台账（2026-10-31）。写脏了会让三臂汇总混入测试期的假读数，
+    # 而「同预算对照」正是用来判「要不要加注」的依据 —— 污染它的代价最大。
+    ("data.shadow", "SHADOW_DIR", "shadow"),
 )
+
+
+# ★ 2026-10-31：`STORE_PATH` 被指到 tmp 后文件**并不存在**，而新增的 `health()`
+#   哨兵会把「文件缺失」判成不安全 ⇒ 所有 `predict(record_pending=True)` 一律停发。
+#   这是**生产语义**（配置缺失就该停发），但测试里它只会变成噪声。所以给测试环境
+#   种一份健康配置；值刻意取 `default_count()`（数字型 5 / 乐透型 100），
+#   与「文件缺失时 sanitize 兜底」的生效值完全一致，避免改变任何既有断言的期望值。
+#   要验「缺失即不安全」的用例请显式传 `path=`（见 tests/test_ticket_size_sentinel.py）。
+_TEST_TICKET_DYNAMIC = {
+    "双色球": 100, "大乐透": 100, "七星彩": 100,
+    "排列5": 5, "福彩3D": 5, "排列3": 5,
+}
+
+
+def _seed_ticket_size_store():
+    import json
+    try:
+        from data import ticket_size as ts
+    except Exception:
+        return
+    p = ts.STORE_PATH
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({
+            "mode": "dynamic",
+            "fixed": dict(_TEST_TICKET_DYNAMIC),
+            "dynamic": dict(_TEST_TICKET_DYNAMIC),
+            "current": dict(_TEST_TICKET_DYNAMIC),
+            "limits": {"双色球": 500, "大乐透": 400, "排列5": 100,
+                       "福彩3D": 200, "排列3": 200, "七星彩": 300},
+            "锁定": True,
+        }, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
 
 
 @pytest.fixture(autouse=True)
@@ -62,6 +106,8 @@ def _isolate_config_stores(tmp_path):
             continue
         saved.append((mod, attr, getattr(mod, attr)))
         setattr(mod, attr, tmp_path / filename)
+
+    _seed_ticket_size_store()
 
     yield
 

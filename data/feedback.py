@@ -612,6 +612,17 @@ def record_pending_prediction(lottery_name: str, prediction: dict):
 
     # 批次规模：本批出号注数（压缩后的最终登记口径）
     prediction["批次规模"] = len(prediction.get("预测号码") or [])
+
+    # ★ 2026-10-31：对账三件套 —— 请求注数 / 实际注数 / 补齐。
+    #   为什么必须显式记：`目标注数` 是**请求**，`批次规模` 是**落盘**，两者不等时
+    #   差额来自 `_pad_to_groups`（回填剪枝票 / 随机补齐 / 截断）或覆盖压缩。
+    #   随机补齐会**稀释策略归因**——被回填的票不是策略选的，却和后者的命中记在
+    #   同一批里。差异只活在日志里的话，复盘时「这批为什么多出 12 注」无从查起，
+    #   所以对账脚本与账本都要能直接读到它。
+    prediction["请求注数"] = prediction.get("目标注数")
+    prediction["实际注数"] = prediction["批次规模"]
+    prediction["补齐"] = (prediction.get("补齐")
+                          or (prediction.get("剪枝统计") or {}).get("补齐"))
     # ★ 号码组数同步（2026-09-20 修）：引擎在压缩前写入 len(预测号码)（如 88），
     #   压缩后票面只剩 36 注但字段没跟着更新 → 审计「号码组数不符」每晚误报。
     #   契约：号码组数 == len(预测号码)（见 ev/coverage.py 模块注释）。
@@ -707,6 +718,30 @@ def record_pending_prediction(lottery_name: str, prediction: dict):
         )
     except Exception as e:                                    # noqa: BLE001
         logger.error(f"预算台账记账失败（不阻断出号，但本月额度会偏松）：{e}")
+
+    # —— 留证快照（2026-10-31）——
+    # 位置：入账之后。记的是**出号时刻的状态**（含配置文件哈希），不是结果。
+    # 为什么值得每期写：2026-10-31 配置被删后，生效注数静默从 50 变成默认值、
+    # 锁定失效，而日志与看板全绿 —— 若当时有这一行，「配置哈希从 abc 变成 None」
+    # 就是一个能直接检索到的事件，不必靠人发现注数不对。
+    # 失败不阻断出号（留证是取证，不是出号的前置条件），但必须留痕。
+    try:
+        from data import attest as AT
+        AT.append(lottery_name, AT.snapshot_event(
+            lottery_name,
+            issue=prediction.get("目标期号"),
+            batch=prediction.get("批次号"),
+            extra={
+                "出号时刻": prediction.get("批次时间") or prediction.get("生成时间"),
+                "请求注数": prediction.get("请求注数"),
+                "实际注数": prediction.get("批次规模"),
+                "补齐": prediction.get("补齐"),
+                "台账域": _domain_of(prediction),
+                "来源": prediction.get("来源"),
+            },
+        ))
+    except Exception as e:                                    # noqa: BLE001
+        logger.error(f"留证快照写入失败（不阻断出号，但取证链断了）：{e}")
     return None
 
 

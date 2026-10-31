@@ -1,0 +1,329 @@
+{% extends "base.html" %}
+{% block head %}
+<style>
+.lg-wrap { display:flex; flex-direction:column; gap:16px; }
+.lg-bar { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+.lg-bar select { padding:7px 12px; border:1px solid #ddd; border-radius:5px; font-size:13px; }
+.lg-btn { padding:7px 14px; border:1px solid #ddd; background:white; border-radius:5px; font-size:13px; cursor:pointer; }
+.lg-btn:hover { background:#fafafa; }
+.lg-row { display:grid; gap:12px; }
+.lg-row.c3 { grid-template-columns:repeat(auto-fit, minmax(210px, 1fr)); }
+.lg-card { background:white; border-radius:8px; box-shadow:0 1px 3px rgba(0,0,0,.08); padding:16px 18px; border-top:3px solid var(--primary); }
+.lg-card.decide { border-top-color:#c0392b; }
+.lg-card.secondary { border-top-color:#bdc3c7; background:#fcfcfc; }
+.lg-card.warn { border-top-color:#e67e22; }
+.lg-cap { font-size:12px; color:var(--gray); display:flex; align-items:center; gap:6px; }
+.lg-tag { font-size:10px; padding:1px 6px; border-radius:8px; background:#eef2f3; color:#7f8c8d; border:1px solid #dfe6e9; }
+.lg-val { font-size:26px; font-weight:700; margin:6px 0 4px; color:var(--dark); line-height:1.1; }
+.lg-sub { font-size:12px; color:var(--gray); line-height:1.5; }
+.up { color:#c0392b; }      /* 中国习惯：涨/正 = 红 */
+.down { color:#27ae60; }    /* 跌/负 = 绿 */
+.lg-denom { display:flex; gap:18px; flex-wrap:wrap; align-items:baseline; background:white; border-radius:8px; padding:12px 18px; box-shadow:0 1px 3px rgba(0,0,0,.08); font-size:13px; color:var(--gray); }
+.lg-denom b { color:var(--dark); font-size:16px; }
+.lg-sec { background:white; border-radius:8px; box-shadow:0 1px 3px rgba(0,0,0,.08); padding:14px 18px; }
+.lg-sec h3 { font-size:14px; margin-bottom:10px; color:var(--dark); display:flex; align-items:center; gap:8px; }
+table.lg-tb { width:100%; border-collapse:collapse; font-size:12.5px; }
+table.lg-tb th, table.lg-tb td { padding:7px 8px; border-bottom:1px solid #f0f0f0; text-align:right; white-space:nowrap; }
+table.lg-tb th { color:var(--gray); font-weight:600; background:#fafafa; position:sticky; top:0; }
+table.lg-tb td:first-child, table.lg-tb th:first-child { text-align:left; }
+table.lg-tb tr.total td { font-weight:700; background:#fafafa; }
+.lg-scroll { max-height:430px; overflow:auto; }
+.lg-note { font-size:12px; color:var(--gray); line-height:1.7; background:#fffdf5; border-left:3px solid var(--warning); padding:10px 14px; border-radius:0 5px 5px 0; }
+.lg-honest { font-size:12px; color:#7f8c8d; line-height:1.7; background:#f7f9fa; border-left:3px solid var(--gray); padding:10px 14px; border-radius:0 5px 5px 0; white-space:pre-wrap; }
+.lg-badge-nodata { font-size:12px; color:#b9770e; background:#fef5e7; border:1px solid #f8c471; padding:3px 8px; border-radius:4px; }
+</style>
+{% endblock %}
+{% block content %}
+<div class="lg-wrap">
+  <h2>
+    <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20h16"/><rect x="6" y="10" width="3" height="7"/><rect x="11" y="6" width="3" height="11"/><rect x="16" y="13" width="3" height="4"/></svg>
+    盈利账本
+  </h2>
+  <p style="color:var(--gray);font-size:13px;line-height:1.7;margin-top:-6px">
+    每期「花了多少 / 回来多少 / 净亏多少」的流水账。判断只看<b>净收益率</b>与<b>最大回撤</b>；
+    中奖注数、中奖期数、「至少一注 ≥10 元」的期数是<b>次级指标</b>——它们随注数机械上升，不构成策略有效的证据。
+  </p>
+
+  <div class="lg-bar">
+    <select id="lg-lottery" onchange="lgLoad()">
+      <option value="全部" selected>全部彩种</option>
+      {% for lot in all_lotteries %}<option value="{{ lot }}">{{ lot }}</option>{% endfor %}
+    </select>
+    <select id="lg-periods" onchange="lgLoad()">
+      <option value="" selected>全部期数</option>
+      <option value="50">近 50 期</option>
+      <option value="100">近 100 期</option>
+      <option value="200">近 200 期</option>
+    </select>
+    <button class="lg-btn" onclick="lgShowGlossary()">术语与口径</button>
+    <span id="lg-state" style="font-size:12px;color:var(--gray)"></span>
+  </div>
+
+  <!-- ① 决策指标 -->
+  <div class="lg-row c3" id="lg-decide"></div>
+
+  <!-- ② 次级指标 -->
+  <div class="lg-row c3" id="lg-secondary"></div>
+
+  <!-- ③ 分母三数并列 -->
+  <div class="lg-denom" id="lg-denom"></div>
+
+  <!-- ④ 记账分解 -->
+  <div class="lg-sec">
+    <h3>记账分解 <span class="lg-tag">成本按实际注数×单价</span></h3>
+    <div id="lg-book"></div>
+  </div>
+
+  <!-- ⑤ 分彩种 -->
+  <div class="lg-sec">
+    <h3>分彩种</h3>
+    <div class="lg-scroll"><div id="lg-table"></div></div>
+  </div>
+
+  <!-- ⑥ 逐期明细 -->
+  <div class="lg-sec">
+    <h3>逐期明细 <span class="lg-tag" id="lg-periods-tag"></span></h3>
+    <div class="lg-scroll"><div id="lg-detail"></div></div>
+  </div>
+
+  <!-- ⑦ 同预算影子对照 -->
+  <div class="lg-sec">
+    <h3>同预算对照（影子模式）
+      <span class="lg-tag">记账=False · 不占预算 · 不触发加注</span>
+    </h3>
+    <div id="lg-shadow"></div>
+  </div>
+
+  <div class="lg-note" id="lg-note"></div>
+  <div class="lg-honest" id="lg-honest"></div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+// 金额：null/缺失一律「—」，绝不当 0（¥0.00 是合法数字，会骗人）
+function _lgMoney(n) {
+  if (n === null || n === undefined || n === "") return "—";
+  const v = Number(n);
+  if (!isFinite(v)) return "—";
+  // 负号放在币种前（"-¥1,000" 而不是 "¥-1,000"），避免和「—」看混
+  const s = Math.abs(v).toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return (v < 0 ? "-¥" : "¥") + s;
+}
+function _lgNum(n) {
+  if (n === null || n === undefined || n === "") return "—";
+  return Number(n).toLocaleString("zh-CN");
+}
+function _lgPct(n) {
+  if (n === null || n === undefined || n === "") return "—";
+  return (Number(n) * 100).toFixed(1) + "%";
+}
+function _lgCls(n) {
+  if (n === null || n === undefined) return "";
+  return Number(n) >= 0 ? "up" : "down";
+}
+function _lgCard(cap, val, sub, cls, tag) {
+  return `<div class="lg-card ${cls || ''}">
+    <div class="lg-cap">${cap}${tag ? `<span class="lg-tag">${tag}</span>` : ''}</div>
+    <div class="lg-val">${val}</div>
+    <div class="lg-sub">${sub || ''}</div>
+  </div>`;
+}
+
+let LG_CACHE = null;
+
+async function lgLoad() {
+  const lot = $('lg-lottery').value;
+  const per = $('lg-periods').value;
+  $('lg-state').textContent = '读取中…';
+  let d;
+  try {
+    d = await api(`/api/ledger/summary?lottery=${encodeURIComponent(lot)}&periods=${encodeURIComponent(per)}`);
+  } catch (e) {
+    $('lg-state').textContent = '读取失败：' + e.message;
+    return;
+  }
+  LG_CACHE = d;
+  const t = d.合计 || d.分彩种[0] || {};
+  const nodata = (t.状态 !== 'ok');
+  $('lg-state').innerHTML = nodata
+    ? '<span class="lg-badge-nodata">账本尚未生成</span>'
+    : `窗口：${d.窗口 ? '近 ' + d.窗口 + ' 期' : '全部期数'}`;
+
+  // ① 决策指标
+  $('lg-decide').innerHTML =
+    _lgCard('净收益率 <span class="lg-tag">决策指标</span>',
+            `<span class="${_lgCls(t.净盈亏)}">${_lgPct(t.净收益率)}</span>`,
+            '净盈亏 ÷ 成本。负数=亏损，不管中了多少次。', 'decide') +
+    _lgCard('净盈亏 <span class="lg-tag">决策指标</span>',
+            `<span class="${_lgCls(t.净盈亏)}">${_lgMoney(t.净盈亏)}</span>`,
+            '税前奖金 − 税 − 成本', 'decide') +
+    _lgCard('最大回撤 <span class="lg-tag">决策指标</span>',
+            _lgMoney(t.最大回撤),
+            '累计净盈亏从峰值的最大落差', 'decide');
+
+  // ② 次级指标
+  $('lg-secondary').innerHTML =
+    _lgCard('中奖注数', _lgNum(t.中奖注数), '达到任一奖级的注数', 'secondary', '次级') +
+    _lgCard('中奖期数', _lgNum(t.中奖期数), `分母=参与期数 ${_lgNum(t.参与期数)}，占比 ${_lgPct(t.中奖期占比)}`, 'secondary', '次级') +
+    _lgCard('中奖额 ≥10 元的期数', _lgNum(t.中奖期数_ge10),
+            `逐票口径；占比 ${_lgPct(t.中奖期占比_ge10)}。随注数机械上升，<b>不可跨注数档比较</b>`,
+            'secondary', '次级');
+
+  // ③ 分母
+  $('lg-denom').innerHTML =
+    `<span>开奖期数 <b>${_lgNum(t.开奖期数)}</b></span>` +
+    `<span>参与期数 <b>${_lgNum(t.参与期数)}</b></span>` +
+    `<span>未参与期数 <b>${_lgNum(t.未参与期数)}</b></span>` +
+    `<span>金额未知注数 <b>${_lgNum(t.金额未知注数)}</b>（不参与求和）</span>`;
+
+  // ④ 记账分解
+  $('lg-book').innerHTML = `<table class="lg-tb"><tbody>
+    <tr><td>成本</td><td>${_lgMoney(t.成本)}</td></tr>
+    <tr><td>税前奖金</td><td>${_lgMoney(t.税前奖金)}</td></tr>
+    <tr><td>税（全额 20%，超一万起征）</td><td>${_lgMoney(t.税)}</td></tr>
+    <tr><td>实得（税前 − 税）</td><td>${_lgMoney(t.实得)}</td></tr>
+    <tr class="total"><td>净盈亏（实得 − 成本）</td><td class="${_lgCls(t.净盈亏)}">${_lgMoney(t.净盈亏)}</td></tr>
+  </tbody></table>`;
+
+  // ⑤ 分彩种
+  const items = d.分彩种 || [];
+  let rows = items.map(s => `<tr>
+    <td>${s.彩种}${s.状态 !== 'ok' ? ' <span class="lg-tag">无账本</span>' : ''}</td>
+    <td>${_lgNum(s.开奖期数)}</td>
+    <td>${_lgNum(s.参与期数)}</td>
+    <td>${_lgMoney(s.成本)}</td>
+    <td>${_lgMoney(s.税前奖金)}</td>
+    <td class="${_lgCls(s.净盈亏)}">${_lgMoney(s.净盈亏)}</td>
+    <td class="${_lgCls(s.净盈亏)}">${_lgPct(s.净收益率)}</td>
+    <td>${_lgMoney(s.最大回撤)}</td>
+    <td>${_lgNum(s.中奖注数)}</td>
+    <td>${_lgNum(s.中奖期数)}</td>
+    <td>${_lgNum(s.中奖期数_ge10)}</td>
+  </tr>`).join('');
+  if (d.合计) {
+    const g = d.合计;
+    rows += `<tr class="total">
+      <td>${g.彩种}${g.缺数据彩种 && g.缺数据彩种.length ? `（缺：${g.缺数据彩种.join('、')}）` : ''}</td>
+      <td>${_lgNum(g.开奖期数)}</td><td>${_lgNum(g.参与期数)}</td>
+      <td>${_lgMoney(g.成本)}</td><td>${_lgMoney(g.税前奖金)}</td>
+      <td class="${_lgCls(g.净盈亏)}">${_lgMoney(g.净盈亏)}</td>
+      <td class="${_lgCls(g.净盈亏)}">${_lgPct(g.净收益率)}</td>
+      <td>${_lgMoney(g.最大回撤)}</td>
+      <td>${_lgNum(g.中奖注数)}</td><td>${_lgNum(g.中奖期数)}</td><td>${_lgNum(g.中奖期数_ge10)}</td>
+    </tr>`;
+  }
+  $('lg-table').innerHTML = `<table class="lg-tb"><thead><tr>
+    <th>彩种</th><th>开奖期数</th><th>参与期数</th><th>成本</th><th>税前奖金</th>
+    <th>净盈亏</th><th>净收益率</th><th>最大回撤</th>
+    <th>中奖注数 <span class="lg-tag">次级</span></th>
+    <th>中奖期数 <span class="lg-tag">次级</span></th>
+    <th>≥10元期数 <span class="lg-tag">次级</span></th>
+  </tr></thead><tbody>${rows}</tbody></table>`;
+
+  // ⑥ 逐期明细（多彩种时只展开展示的第一个彩种）
+  const detailLot = (lot === '全部') ? (items[0] && items[0].彩种) : lot;
+  await lgLoadPeriods(detailLot);
+
+  // ⑦ 影子对照
+  lgLoadShadow();
+
+  $('lg-note').innerHTML = String(d.口径 || '') +
+    '<br>★ 保留中奖注数 / 中奖期数 / ≥10元期数是为了核对「有没有摸到固定奖通道」，' +
+    '它们不能替代净收益率：花 800 元中 20 元仍是亏损。';
+  $('lg-honest').textContent = d.诚实边界 || '';
+}
+
+async function lgLoadPeriods(lottery) {
+  if (!lottery) { $('lg-detail').innerHTML = ''; return; }
+  $('lg-periods-tag').textContent = lottery;
+  let d;
+  try { d = await api(`/api/ledger/periods/${encodeURIComponent(lottery)}?limit=80`); }
+  catch (e) { $('lg-detail').innerHTML = `<p class="lg-sub">读取失败：${e.message}</p>`; return; }
+  if (d.状态 !== 'ok') {
+    $('lg-detail').innerHTML = `<p class="lg-sub">${d.说明 || '无账本'}</p>`;
+    return;
+  }
+  const rows = (d.期数 || []).slice().reverse().map(r => `<tr>
+    <td>${r.期号}${r.参与 ? '' : ' <span class="lg-tag">未参与</span>'}</td>
+    <td>${r.开奖日期 || '—'}</td>
+    <td>${r.出号时刻 || '<span title="早期记录没有出号时间戳">未记录</span>'}</td>
+    <td>${_lgNum(r.实际注数)}</td>
+    <td>${_lgMoney(r.成本)}</td>
+    <td>${_lgMoney(r.税前奖金)}</td>
+    <td class="${_lgCls(r.净盈亏)}">${_lgMoney(r.净盈亏)}</td>
+    <td class="${_lgCls(r.累计净盈亏)}">${_lgMoney(r.累计净盈亏)}</td>
+    <td>${_lgMoney(r.最大回撤)}</td>
+    <td>${_lgNum(r.中奖注数)}</td>
+    <td>${_lgNum(r.金额未知注数)}</td>
+  </tr>`).join('');
+  $('lg-detail').innerHTML = `<table class="lg-tb"><thead><tr>
+    <th>期号</th><th>开奖日期</th><th>出号时刻</th><th>实际注数</th><th>成本</th>
+    <th>税前奖金</th><th>净盈亏</th><th>累计</th><th>最大回撤</th><th>中奖注数</th><th>金额未知</th>
+  </tr></thead><tbody>${rows}</tbody></table>
+  <p class="lg-sub" style="margin-top:8px">共 ${_lgNum(d.总数)} 行，显示最近 ${_lgNum(d.返回)} 期（倒序）。
+  「出号时刻」是唯一能自证提前出号的字段；显示「未记录」表示该批次没有时间戳，不用预测日期顶替。</p>`;
+}
+
+async function lgLoadShadow() {
+  let d;
+  try { d = await api('/api/ledger/shadow'); }
+  catch (e) { $('lg-shadow').innerHTML = `<p class="lg-sub">读取失败：${e.message}</p>`; return; }
+  const r = d.分彩种 || {};
+  const names = Object.keys(r);
+  const anyData = names.some(n => (r[n].臂 && Object.values(r[n].臂).some(a => a && a.期数)));
+  if (!anyData) {
+    $('lg-shadow').innerHTML = `<p class="lg-sub">三臂影子记录为空：目前没有按同预算并行记录的批次。
+      模块与纪律已就位（<code>data/shadow.py</code>），接入每期调度后才会有读数。</p>`;
+  } else {
+    let rows = '';
+    names.forEach(n => {
+      const s = r[n];
+      ['当前模型', '等注数随机', '固定规则'].forEach(arm => {
+        const a = (s.臂 || {})[arm] || {};
+        if (!a.期数) return;
+        rows += `<tr><td>${n}</td><td>${arm}</td><td>${_lgNum(a.期数)}</td>
+          <td>${_lgNum(a.注数合计)}</td><td>${_lgMoney(a.成本)}</td>
+          <td>${_lgMoney(a.净盈亏)}</td><td class="${_lgCls(a.净盈亏)}">${_lgPct(a.净收益率)}</td></tr>`;
+      });
+    });
+    const flags = names.map(n => {
+      const sb = r[n].同预算 || {};
+      return `<li>${n}：${sb.可比较 ? '同窗口同注数 ✓' : '不可比较 —— ' + (sb.说明 || '原因不明')}</li>`;
+    }).join('');
+    $('lg-shadow').innerHTML = `<table class="lg-tb"><thead><tr>
+      <th>彩种</th><th>臂</th><th>期数</th><th>注数合计</th><th>成本</th><th>净盈亏</th><th>净收益率</th>
+      </tr></thead><tbody>${rows}</tbody></table>
+      <ul class="lg-sub" style="margin-top:10px;padding-left:18px">${flags}</ul>`;
+  }
+  $('lg-shadow').innerHTML += `<div class="lg-honest" style="margin-top:10px">${d.诚实边界 || ''}</div>`;
+}
+
+async function lgShowGlossary() {
+  let d;
+  try { d = await api('/api/ledger/glossary'); } catch (e) { alert('读取术语失败：' + e.message); return; }
+  const terms = d.术语 || {};
+  const tRows = Object.keys(terms).map(k => {
+    const t = terms[k];
+    return `<tr><td style="white-space:nowrap;vertical-align:top"><b>${t.名}</b><br><span class="lg-tag">${t.类}</span></td>
+      <td style="text-align:left"><div>${t.一句话}</div>
+      ${t.口径 ? `<div class="lg-sub" style="margin-top:4px">口径：${t.口径}</div>` : ''}</td></tr>`;
+  }).join('');
+  const cards = (d.卡片 || []).map(c => `<div style="margin:12px 0">
+      <div style="font-weight:700;font-size:13px">${c.序号}. ${c.标题}</div>
+      <div class="lg-sub" style="margin-top:4px">在测什么：${c.在测什么}</div>
+      <div class="lg-sub">口径：${c.口径说明}</div>
+      <div class="lg-sub" style="color:#b9770e">诚实边界：${c.诚实边界}</div>
+    </div>`).join('');
+  const wrap = document.createElement('div');
+  wrap.innerHTML = `<h3 style="margin-bottom:8px">${d.页码}</h3>
+    <div style="font-size:12px;color:var(--gray);margin-bottom:10px">${d.口径说明}</div>
+    <table class="lg-tb"><tbody>${tRows}</tbody></table>
+    <h3 style="margin:18px 0 0">卡片口径</h3>${cards}
+    <div class="lg-honest" style="margin-top:12px">${d.诚实声明 || ''}</div>`;
+  html('modal-body', wrap.innerHTML);
+  show('modal');
+}
+
+document.addEventListener('DOMContentLoaded', lgLoad);
+</script>
+{% endblock %}

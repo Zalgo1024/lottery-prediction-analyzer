@@ -241,6 +241,87 @@ def effective_count(lottery: str, cfg: Optional[Dict[str, Any]] = None) -> int:
 
 
 # ------------------------------------------------------------
+# 配置健康度哨兵
+# ------------------------------------------------------------
+def health(*, path: Optional[Path] = None) -> Dict[str, Any]:
+    """配置健康度哨兵 —— 判「这份配置还能不能用来出号」。
+
+    ★ 为什么必须有它（2026-10-31 事故）
+    ----------------------------------
+    `effective_count()` 在配置文件缺失时会**静默回落** `default_count()`
+    （数字型 5 / 乐透型 100），而 `sanitize()` 还会把 `mode` 兜底成 `fixed`、
+    `锁定` 兜底成 `False`。于是「配置文件被删」这个事实，在系统里表现为：
+    生效注数从 50 悄悄变成 100/100/5/5/5/100，**而且「自动路径不加注」的锁随之失效**
+    （`锁定=False` ⇒ `apply_dynamic_result` 又能改注数）。机器照跑、日志全绿、
+    看板照长，没有任何一处提示 —— 与「一切正常」在外部完全无法区分。
+
+    所以判据不能是「能不能读到配置」，必须是「读到的是不是我们认可的那一份」：
+      `安全` = 文件存在 ∧ mode=dynamic ∧ 锁定=true ∧ limits 覆盖全部彩种。
+
+    ★ 不安全时**停发**，不是回落默认值继续出号。停发是可观测的事件（写台账 +
+      日志 + 看板），回落是静默的，后者正是本函数要消灭的那类故障模式。
+    """
+    p = Path(path) if path is not None else STORE_PATH
+    reasons: List[str] = []
+
+    exists = p.exists()
+    raw: Dict[str, Any] = {}
+    if not exists:
+        reasons.append(f"配置文件缺失：{p}")
+    else:
+        try:
+            loaded = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                raw = loaded
+            else:
+                reasons.append("配置根节点不是对象")
+        except Exception as e:                                # noqa: BLE001
+            reasons.append(f"配置解析失败：{type(e).__name__}: {e}")
+
+    cfg = sanitize(raw) if raw else None
+    if cfg is None:
+        # 完全拿不到配置 ⇒ 上层会走 default_count，模式/锁定都是兜底值
+        mode, locked = MODE_FIXED, False
+        if not reasons:
+            reasons.append("配置为空 ⇒ 生效值与锁定态均为兜底默认")
+    else:
+        mode = cfg.get("mode")
+        locked = bool(cfg.get("锁定"))
+        if mode != MODE_DYNAMIC:
+            reasons.append(f"模式为 {mode}（非 {MODE_DYNAMIC}）")
+        if not locked:
+            reasons.append("锁定=false ⇒ 自动路径可改注数")
+        try:
+            from config import LOTTERY_CONFIG
+            # ★ 必须看**文件里写的** limits，不能看 `sanitize()` 之后的：
+            #   `_resolve_limits()` 会用 DEFAULT_LIMITS 兜底补全每个彩种，于是
+            #   sanitize 后的 limits 永远「覆盖全部」—— 那样这个检查就是死代码。
+            #   而本次事故恰恰是「兜底值看起来像配置值」（DEFAULT_LIMITS 正好等于
+            #   用户以为生效的 500/400/100/200/200/300），所以判据只能是「文件里写了」。
+            raw_limits = raw.get("limits") if isinstance(raw.get("limits"), dict) else {}
+            missing = [lot for lot in LOTTERY_CONFIG if lot not in raw_limits]
+            if missing:
+                reasons.append(f"limits 未覆盖彩种：{'/'.join(missing)}")
+        except Exception:                                     # noqa: BLE001
+            pass
+
+    return {
+        "存在": exists,
+        "模式": mode,
+        "锁定": locked,
+        "安全": not reasons,
+        "原因": reasons,
+        "路径": str(p),
+    }
+
+
+def stop_reason(hc: Optional[Dict[str, Any]] = None) -> str:
+    """把 `health()` 的结论压成一句可写进停发台账的原因。"""
+    hc = hc if hc is not None else health()
+    return "出号配置不安全：" + ("；".join(hc.get("原因") or []) or "原因未知")
+
+
+# ------------------------------------------------------------
 # 动态策略
 # ------------------------------------------------------------
 def _redundancy_ratio(kpi: Optional[Dict[str, Any]]) -> Optional[float]:

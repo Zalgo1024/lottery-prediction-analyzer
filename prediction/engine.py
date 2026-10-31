@@ -1676,6 +1676,35 @@ def predict(
                 "停发": {"原因": reason, "来源": "ev.budget_gate"},
                 "说明": "预算额度耗尽 ⇒ 本期不出号。这是既定行为，不是失败。"}
 
+    # ★ 2026-10-31：出号配置健康度哨兵。
+    #   配置文件缺失时 `effective_count()` 会静默回落默认值、`sanitize()` 会把
+    #   `mode` 兜底成 fixed、`锁定` 兜底成 False（⇒ 自动加注的锁失效）。这种失真
+    #   在外部与「一切正常」无法区分，所以必须在**写 pending 之前**拦下并停发。
+    #   只在 `record_pending=True`（生产路径）检查：`record_pending=False` 是验证/
+    #   诊断出号，不写 pending，也就不会把不可信的配置固化成历史记录。
+    if record_pending:
+        try:
+            from data.ticket_size import health as _cfg_health, stop_reason as _stop_reason
+            _hc = _cfg_health()
+        except Exception as _e:                              # noqa: BLE001
+            # 哨兵自身故障不阻断流水线（新加的检查不该把整条链路拖死），
+            # 但必须留下痕迹，否则「检查没跑」会被误读成「检查通过」。
+            logger.error(f"配置健康度哨兵执行失败（不阻断）：{_e}")
+            _hc = None
+        if _hc is not None and not _hc.get("安全"):
+            reason = _stop_reason(_hc)
+            try:
+                from ev.budget_gate import mark_stopped
+                mark_stopped(lottery_name, reason)
+            except Exception as _e:                          # noqa: BLE001
+                logger.warning(f"停发标记写入失败（不影响停发本身）：{_e}")
+            logger.error(f"预测停发：{lottery_name} —— {reason}")
+            return {"彩种": lottery_name, "号码组数": 0, "预测号码": [],
+                    "停发": {"原因": reason, "来源": "data.ticket_size.health"},
+                    "配置健康度": _hc,
+                    "说明": "出号配置不可信 ⇒ 本期不出号。这是既定行为，不是失败；"
+                            "请先修复 config/ticket_size.json 再恢复出号。"}
+
     logger.info(f"预测: {lottery_name}, groups={groups}, mode={mode}")
 
     # 哨兵变量（替代 in dir() 脆弱判断）

@@ -91,6 +91,9 @@ config/*
 # 丢了就还原不出同一套预算约束。注意 `budget_spend.json`（实际记账台账）故意**不**放行，
 # 它是运行时状态，跨机器/回滚都不该跟着搬。
 !config/budget_aggregate.json
+# 审计阈值（异常判据 + 锁定标记 + 设定日期）—— 与预注册同类：**判据必须先定后锁**。
+# 不入库的话，「阈值什么时候被改过」就无从追查，而改阈值正是最容易的事后合理化手段。
+!config/audit_thresholds.json
 logs/flask_stdout.log
 logs/run_supervisor.log
 
@@ -130,3 +133,10 @@ market/.mof_cache/
 # ===== output/ 下的运行日志（跑数重定向产物，不入库；output/ 里的结论性 md/json 仍入库） =====
 output/*.log
 output/*.txt
+
+# 真实浏览器验证脚本的 Chrome 临时 profile（每次跑都重建）
+.cdp_profile*/
+# 账本 / 影子 / 留证：运行时数据，随训练产物一起忽略
+training/ledger/
+training/shadow/
+training/attest/

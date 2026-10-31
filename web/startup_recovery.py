@@ -221,6 +221,22 @@ def ensure_pending_groups() -> dict:
     from data.feedback import _next_issue, load_pending, latest_production_pending
     from web.utils import start_auto_pipeline
 
+    # ★ 2026-10-31：配置健康度哨兵。配置缺失/被兜底时，`resolve_groups()` 返回的是
+    #   **默认值**而非用户设定值 —— 于是「自愈」会按错误注数重新生成 pending，
+    #   比不修更糟。这里必须先确认配置可信，否则整轮跳过（停发）。
+    try:
+        from data import ticket_size as _TS
+        _hc = _TS.health()
+    except Exception as _e:                                  # noqa: BLE001
+        logger.error(f"配置健康度哨兵执行失败（跳过自愈）：{_e}")
+        return {}
+    if not _hc.get("安全"):
+        reason = _TS.stop_reason(_hc)
+        logger.error(f"启动自愈跳过：{reason}")
+        return {lot: {"滑轨": 0, "原组数": None, "目标期号": None,
+                      "动作": f"配置不安全，不触发流水线（{reason}）"}
+                for lot in LOTTERY_CONFIG}
+
     fixed: dict = {}
     for lottery_name in LOTTERY_CONFIG:
         try:

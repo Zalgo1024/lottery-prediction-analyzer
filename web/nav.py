@@ -44,6 +44,8 @@ _ICONS = {
     "feedback": '<path d="M21 11.5a8.4 8.4 0 0 1-9 8.4 8.6 8.6 0 0 1-3.8-.8L3 21l1.9-5.2a8.4 8.4 0 1 1 16.1-4.3z"/>',
     "audit": '<path d="M12 9v4M12 17h.01"/>'
              '<path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/>',
+    "ledger": '<path d="M4 20h16"/><rect x="6" y="10" width="3" height="7"/>'
+              '<rect x="11" y="6" width="3" height="11"/><rect x="16" y="13" width="3" height="4"/>',
 }
 
 
@@ -91,6 +93,8 @@ NAV_GROUPS = [
             _item("/feedback", "反馈", "反馈闭环", "feedback"),
             _item("/audit", "证据看板", "测量与证据看板", "audit",
                   note="开奖质量 · EV · P/L · 距离与实得画像 · A/B 对照 · 中奖归因 · 机制缝隙（只读，不触发测量）"),
+            _item("/ledger", "账本", "盈利账本", "ledger",
+                  note="每期成本 / 奖金 / 净盈亏 / 回撤 + 同预算影子对照（只读，不写盘、不触发重建）"),
         ],
     },
 ]

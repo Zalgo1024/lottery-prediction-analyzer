@@ -62,6 +62,7 @@ from web.routes.system import bp as system_bp
 from web.routes.audit import bp as audit_bp
 from web.routes.settings import bp as settings_bp
 from web.routes.market import bp as market_bp
+from web.routes.ledger import bp as ledger_bp
 
 app.register_blueprint(dashboard_bp)
 app.register_blueprint(stats_bp)
@@ -79,6 +80,7 @@ app.register_blueprint(system_bp)
 app.register_blueprint(audit_bp)
 app.register_blueprint(settings_bp)
 app.register_blueprint(market_bp)
+app.register_blueprint(ledger_bp)
 
 
 # 禁用浏览器缓存：静态资源 + HTML 页面
