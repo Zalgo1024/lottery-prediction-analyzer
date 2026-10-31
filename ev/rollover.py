@@ -89,8 +89,35 @@ def fixed_prizes_for(name: str, issue: Any = None) -> Dict[str, Tuple[float, flo
     return out
 
 
-# 现行版本固定小奖（兼容既有导入点；内容由 rules_for 现算，非手写副本）
-_FIXED_PRIZES = {n: fixed_prizes_for(n) for n in _RB_GEOM}
+def __getattr__(name: str) -> Any:
+    """PEP 562 惰性属性：只服务于 `_FIXED_PRIZES`（现行版本固定小奖）。
+
+    ★★★ 为什么不能写成模块级常量
+    `_FIXED_PRIZES = {n: fixed_prizes_for(n) for n in _RB_GEOM}` 会在**导入本模块期间**
+    执行 `fixed_prizes_for()` 内部的 `from ev.profit.rules import rules_for`，
+    而 `ev/__init__.py` 又 eager import 了 `.rollover` ⇒ 形成导入环：
+
+        ev/__init__ → .rollover → ev.profit.rules → config → ev.budget_gate → ev
+
+    只要有任何一条 import 链从 `ev.profit.rules` 或 `ev.payout` 侧进入（例如
+    `web/routes/settings.py` 的 `from ev.payout import grade_probabilities`），
+    就会抛 `_frozen_importlib._DeadlockError: deadlock detected by
+    _ModuleLock('ev.profit.rules')`。
+
+    后果不只是 500：异常逃出请求线程 ⇒ 应用崩溃 ⇒ supervisor 重启 ⇒
+    启动自愈发现 pending 注数 ≠ 滑轨 ⇒ **按新注数重生成预测**。
+    2026-11-01 01:01 就是这样在用户表态之前花掉了 3,200 元；
+    日志显示同类崩溃从 2026-10-25 起已发生 5 次。
+
+    惰性化后，导入本模块**不再触碰 `ev.profit.rules`**，环断掉；
+    `from ev.rollover import _FIXED_PRIZES` 仍可用（首次访问时现算并写回模块
+    `__dict__`，后续不再经过本函数）。
+    """
+    if name == "_FIXED_PRIZES":
+        value = {n: fixed_prizes_for(n) for n in _RB_GEOM}
+        globals()["_FIXED_PRIZES"] = value      # 缓存，后续查找直接命中 __dict__
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def fixed_prizes_robust(name: str, issue: Any) -> Dict[str, Tuple[float, float]]:

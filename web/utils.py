@@ -1132,6 +1132,21 @@ def run_auto_pipeline_core(lottery_name: str, params: dict, task_id: Optional[st
         f"权重[{weights_str}]"
     )
 
+    # ②b 影子对照结算（2026-11-01）
+    #   位置在评估之后：评估已把开奖结果写进 history，影子读同一份开奖数据，
+    #   口径不会与生产账本分叉。
+    #   ★ 只结算**已存在的记录行**，绝不因为「这期开奖了」就补录 ——
+    #     补录等于事后生成，无法自证提前出号，整个对照就作废了。
+    try:
+        from data import shadow_run as _SR
+        _shd = _SR.settle(lottery_name)
+        if _shd.get("结算行数"):
+            steps.append(f"影子结算 {_shd['结算期数']}期/{_shd['结算行数']}行")
+        if _shd.get("仍未开奖"):
+            steps.append(f"影子待开奖 {len(_shd['仍未开奖'])}期")
+    except Exception as e:                                    # noqa: BLE001
+        logger.warning(f"影子结算失败（不影响主流程）: {e}")
+
     # 命中摘要（本期新增「真预测」反馈的等级分布，马后炮训练样本不算预测命中）
     new_recs_all = eval_result.get('new_feedback_records') or []
     new_recs = [r for r in new_recs_all if r.get('valid_prediction', True)]
@@ -1231,6 +1246,26 @@ def run_auto_pipeline_core(lottery_name: str, params: dict, task_id: Optional[st
                         steps.append(f"研究批未出号：{_lc.get('原因')}")
                 except Exception as e:  # noqa: BLE001 - 研究侧绝不阻塞主流程
                     logger.warning(f"低拥挤研究批接入失败（不影响主流程）: {e}")
+
+            # ③b 影子三臂（2026-11-01）：同预算对照，**不占预算、不写 pending**。
+            #   为什么放这里：调度器 / worker / 启动恢复三条路径都经过本函数，
+            #   一处接入即全覆盖；位置在生产出号之后 ⇒ 影子任何失败都不影响出号。
+            #   ★ 只在 record_pending=True 时记：试算（record_pending=False）的号码
+            #     不是「当时真要买的票」，记进去就是伪样本。
+            #   ★ 三臂注数 K 直接取生产号码条数 —— 「同注数」不是另外指定，而是天然成立。
+            if _record_pending(params):
+                try:
+                    from data import shadow_run as _SR
+                    _sh = _SR.record_batch(lottery_name, target_issue, predictions)
+                    if _sh.get("状态") == "已记录":
+                        _warn = [f"{k}：{v.get('告警')}"
+                                 for k, v in (_sh.get("臂") or {}).items() if v.get("告警")]
+                        steps.append(f"影子三臂 各 {_sh.get('注数')} 注"
+                                     + (f"（⚠ {'；'.join(_warn)}）" if _warn else ""))
+                    elif _sh.get("状态") == "跳过":
+                        steps.append(f"影子跳过（{_sh.get('原因')}）")
+                except Exception as e:                        # noqa: BLE001
+                    logger.warning(f"影子三臂记录失败（不影响出号）: {e}")
 
     # ③b 前瞻 A/B 对照实验（NetPayout WP3）
     #   先结算已开奖期次（开奖数据刚在①更新），再为下一期记录 A/B 两组号码。

@@ -136,7 +136,9 @@ output/*.txt
 
 # 真实浏览器验证脚本的 Chrome 临时 profile（每次跑都重建）
 .cdp_profile*/
-# 账本 / 影子 / 留证：运行时数据，随训练产物一起忽略
+# 账本 / 影子 / 留证：运行时数据。
+# ★ 已被上面的 `training/` 整目录规则覆盖，这里显式再列一遍只为「意图可见」——
+#   读到这三行的人不必再去确认 training/ 是否被忽略。
 training/ledger/
 training/shadow/
 training/attest/
