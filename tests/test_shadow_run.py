@@ -217,3 +217,23 @@ def test_concurrent_record_writes_only_once(tmp_path):
     assert results.count("已记录") == 1, results
     assert results.count("跳过") == 3, results
     assert len(SH.load("双色球", base=tmp_path)) == 3
+
+def test_summary_separates_settled_from_pending(tmp_path, last_draw):
+    """★ 未开奖的期必须与「开了且没中」分开报。
+
+    只给一个「净收益率 −100%」时，两种完全不同的情况长得一模一样：
+      (a) 一期都没开奖 —— 成本已记、奖金尚未产生，这个 −100% 不构成任何结论；
+      (b) 开了 30 期全没中 —— 这才是读数。
+    只看百分比会把它读成 (b)。
+    """
+    SR.record_batch("双色球", last_draw.期号, _model_tickets(2), base=tmp_path)
+    SR.record_batch("双色球", "FUTURE-1", _model_tickets(2), base=tmp_path)
+
+    s = SH.summary("双色球", base=tmp_path)
+    arm = s["臂"][SH.ARM_MODEL]
+    assert arm["期数"] == 2
+    assert arm["已结算期数"] == 0 and arm["待结算期数"] == 2
+
+    SR.settle("双色球", base=tmp_path, issues=[last_draw.期号])
+    arm = SH.summary("双色球", base=tmp_path)["臂"][SH.ARM_MODEL]
+    assert arm["已结算期数"] == 1 and arm["待结算期数"] == 1

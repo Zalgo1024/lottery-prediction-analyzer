@@ -297,6 +297,11 @@ def summary(lottery: str, *, base: Optional[Any] = None) -> Dict[str, Any]:
         net = gross - cost
         out["臂"][a] = {
             "期数": len(rs),
+            # ★ 必须分开报：`净收益率 = -100%` 在两种情况下长得一模一样 ——
+            #   「一期都还没开奖（奖金尚未产生）」与「开了 30 期全没中」。
+            #   前者不构成任何结论，后者才是读数。只给一个 -100% 会被读成后者。
+            "已结算期数": sum(1 for r in rs if r.get("结算")),
+            "待结算期数": sum(1 for r in rs if not r.get("结算")),
             "注数合计": sum(int(r.get("注数") or 0) for r in rs),
             "成本": round(cost, 2),
             "税前奖金": round(gross, 2),

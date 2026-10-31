@@ -272,8 +272,10 @@ async function lgLoadShadow() {
   const names = Object.keys(r);
   const anyData = names.some(n => (r[n].臂 && Object.values(r[n].臂).some(a => a && a.期数)));
   if (!anyData) {
-    $('lg-shadow').innerHTML = `<p class="lg-sub">三臂影子记录为空：目前没有按同预算并行记录的批次。
-      模块与纪律已就位（<code>data/shadow.py</code>），接入每期调度后才会有读数。</p>`;
+    $('lg-shadow').innerHTML = `<p class="lg-sub">三臂影子记录为空：本彩种尚未按同预算并行记录批次。
+      影子读写已随每期出号自动执行（见 <code>data/shadow_run.py</code>），
+      下一次出号后这里会出现「当前模型 / 等注数随机 / 固定规则」三行；
+      开奖后自动结算，无需手动触发。</p>`;
   } else {
     let rows = '';
     names.forEach(n => {
@@ -282,6 +284,7 @@ async function lgLoadShadow() {
         const a = (s.臂 || {})[arm] || {};
         if (!a.期数) return;
         rows += `<tr><td>${n}</td><td>${arm}</td><td>${_lgNum(a.期数)}</td>
+          <td>${_lgNum(a.已结算期数)}${a.待结算期数 ? ` <span class="lg-tag">待结算 ${a.待结算期数}</span>` : ''}</td>
           <td>${_lgNum(a.注数合计)}</td><td>${_lgMoney(a.成本)}</td>
           <td>${_lgMoney(a.净盈亏)}</td><td class="${_lgCls(a.净盈亏)}">${_lgPct(a.净收益率)}</td></tr>`;
       });
@@ -290,9 +293,14 @@ async function lgLoadShadow() {
       const sb = r[n].同预算 || {};
       return `<li>${n}：${sb.可比较 ? '同窗口同注数 ✓' : '不可比较 —— ' + (sb.说明 || '原因不明')}</li>`;
     }).join('');
-    $('lg-shadow').innerHTML = `<table class="lg-tb"><thead><tr>
-      <th>彩种</th><th>臂</th><th>期数</th><th>注数合计</th><th>成本</th><th>净盈亏</th><th>净收益率</th>
+    $('lg-shadow').innerHTML = `<p class="lg-sub" style="margin:0 0 8px">
+      <b>影子模式</b>：三臂号码都会落盘，但 <b>不记账、不占预算、不触发加注</b>；
+      同一期三臂注数必须相同，下方逐彩种核对（不同则「不可比较」并点名原因）。</p>
+      <table class="lg-tb"><thead><tr>
+      <th>彩种</th><th>臂</th><th>期数</th><th>已结算</th><th>注数合计</th><th>成本</th><th>净盈亏</th><th>净收益率</th>
       </tr></thead><tbody>${rows}</tbody></table>
+      <p class="lg-sub" style="margin:8px 0 0">★ 未开奖的期只记了成本、还没有奖金，净收益率会显示 −100%。
+        看「已结算」列：<b>已结算 0 期时这个 −100% 不构成任何结论</b>，别当成「买了就亏光」。</p>
       <ul class="lg-sub" style="margin-top:10px;padding-left:18px">${flags}</ul>`;
   }
   $('lg-shadow').innerHTML += `<div class="lg-honest" style="margin-top:10px">${d.诚实边界 || ''}</div>`;
