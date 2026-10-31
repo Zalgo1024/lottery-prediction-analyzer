@@ -164,15 +164,26 @@ def api_periods(lottery):
 @bp.route("/api/ledger/shadow")
 @api_error_handler
 def api_shadow():
-    """同预算三臂对照摘要。影子模式 `记账=False`，不占预算。"""
+    """同预算三臂对照摘要 + **可判性判决**。影子模式 `记账=False`，不占预算。
+
+    ★ 读数与判决一起给、也一起不给：只给读数时，8~10 期的三行净收益率几乎一定长得
+      不一样，人眼会挑最小的那个当「模型变强了」。判决层负责回答「够不够算」。
+    """
     from data import shadow as S
 
     out = {}
     for lot in _ALL:
         try:
-            out[lot] = S.summary(lot)
+            summ = S.summary(lot)
         except Exception as e:                     # 单彩种失败不影响其余
             out[lot] = {"错误": str(e)}
+            continue
+        try:
+            from data import shadow_verdict as V
+            summ["判决"] = V.compare(lot)
+        except Exception as e:                     # 判决失败不能让读数一起消失
+            summ["判决"] = {"可用": False, "原因": f"判决计算失败：{e}"}
+        out[lot] = summ
     return jsonify({"分彩种": out, "诚实边界": S.HONEST_NOTE})
 
 

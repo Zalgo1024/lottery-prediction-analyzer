@@ -182,6 +182,31 @@ def test_shadow_endpoint_says_not_booked(client):
     assert "影子" in d["诚实边界"] or "同预算" in d["诚实边界"]
 
 
+def test_shadow_endpoint_always_ships_verdict_or_reason(client):
+    """★ 读数与判决必须一起出现：只给读数时，三行净收益率总能挑出"最小的那个"。
+
+    没有判决也要给「为什么没有」—— 空态不许长得像「三臂一样好」。
+    """
+    d = _get_json(client, "/api/ledger/shadow")
+    per = d["分彩种"]
+    assert per
+    for lot, row in per.items():
+        if "错误" in row:
+            continue
+        assert "判决" in row, f"{lot} 缺可判性判决"
+        v = row["判决"]
+        assert isinstance(v.get("可用"), bool)
+        if not v["可用"]:
+            assert v.get("原因"), f"{lot} 无判决却没给原因"
+        else:
+            assert v.get("对照"), f"{lot} 声称可用却没有对照行"
+            for r in v["对照"]:
+                assert r["判决"] in ("可判", "边缘", "不可判", "未检出差异")
+                assert r.get("判决说明"), "判决必须带依据"
+                # 6 个检验必须过 BH：校正后 p 不可能小于原始 p
+                assert r["p_BH"] >= r["p_原始"] - 1e-12
+
+
 def test_glossary_reuses_narrative_constants(client):
     """术语的诚实边界必须**引用** narrative 常量，不许手抄。"""
     from ev.mechanism.narrative import EV_NEGATIVE_CAVEAT

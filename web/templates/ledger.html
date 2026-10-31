@@ -117,6 +117,13 @@ function _lgPct(n) {
   if (n === null || n === undefined || n === "") return "—";
   return (Number(n) * 100).toFixed(1) + "%";
 }
+// 判决里的 z / p：null、NaN、±Infinity 一律「—」（±∞ 的 z 是「零方差且 Δ≠0」，不是数值）
+function _lgFix(n, nd) {
+  if (n === null || n === undefined || n === "") return "—";
+  const v = Number(n);
+  if (!isFinite(v)) return isNaN(v) ? "—" : (v > 0 ? "+∞" : "-∞");
+  return v.toFixed(nd);
+}
 function _lgCls(n) {
   if (n === null || n === undefined) return "";
   return Number(n) >= 0 ? "up" : "down";
@@ -293,6 +300,35 @@ async function lgLoadShadow() {
       const sb = r[n].同预算 || {};
       return `<li>${n}：${sb.可比较 ? '同窗口同注数 ✓' : '不可比较 —— ' + (sb.说明 || '原因不明')}</li>`;
     }).join('');
+
+    // 可判性判决：只给读数时，三行净收益率总能挑出"最小的那个"，判决层负责说"够了没"
+    let vrows = '';
+    const vnotes = [];
+    names.forEach(n => {
+      const v = r[n].判决 || {};
+      if (!v.可用) { vnotes.push(`${n}：${v.原因 || '无判决'}`); return; }
+      const list = (v.对照 || []);
+      if (!list.length) { vnotes.push(`${n}：${v.总结 || '无对照'}`); return; }
+      list.forEach(x => {
+        vrows += `<tr><td>${n}</td><td>${x.对照 || '—'}</td><td>${x.口径名 || '—'}</td>
+          <td class="${_lgCls(x.实测Δ)}">${_lgMoney(x.实测Δ)}</td>
+          <td>${_lgFix(x.z_实测, 2)}</td><td>${_lgFix(x.p_BH, 3)}</td>
+          <td>${x.判决 || '—'}</td>
+          <td class="lg-sub">${x.判决说明 || ''}</td></tr>`;
+      });
+      vnotes.push(`${n}：${v.总结 || ''}（已结算 ${(v.期数 || {}).已结算} 期）`);
+    });
+    const vblock = (vrows || vnotes.length) ? `
+      <h4 class="lg-sub" style="margin:16px 0 6px;font-weight:600">可判性判决</h4>
+      <p class="lg-sub" style="margin:0 0 8px">
+        Δ = 同一期两臂净盈亏相减（元/期）。<b>先看「判决」再看 Δ</b>：
+        <code>不可判</code> 的 Δ 只是描述，不是结论；<code>可判</code> 也只对这一批期成立
+        （n* 用实测 Δ 反推，偏乐观）。6 个检验（3 对 × 2 口径）已过 BH 校正。</p>
+      ${vrows ? `<div class="lg-scroll"><table class="lg-tb"><thead><tr>
+        <th>彩种</th><th>对照</th><th>口径</th><th>Δ/期</th><th>z</th><th>p_BH</th>
+        <th>判决</th><th>依据</th></tr></thead><tbody>${vrows}</tbody></table></div>` : ''}
+      <ul class="lg-sub" style="margin-top:8px;padding-left:18px">${vnotes.map(x => `<li>${x}</li>`).join('')}</ul>` : '';
+
     $('lg-shadow').innerHTML = `<p class="lg-sub" style="margin:0 0 8px">
       <b>影子模式</b>：三臂号码都会落盘，但 <b>不记账、不占预算、不触发加注</b>；
       同一期三臂注数必须相同，下方逐彩种核对（不同则「不可比较」并点名原因）。</p>
@@ -301,7 +337,8 @@ async function lgLoadShadow() {
       </tr></thead><tbody>${rows}</tbody></table>
       <p class="lg-sub" style="margin:8px 0 0">★ 未开奖的期只记了成本、还没有奖金，净收益率会显示 −100%。
         看「已结算」列：<b>已结算 0 期时这个 −100% 不构成任何结论</b>，别当成「买了就亏光」。</p>
-      <ul class="lg-sub" style="margin-top:10px;padding-left:18px">${flags}</ul>`;
+      <ul class="lg-sub" style="margin-top:10px;padding-left:18px">${flags}</ul>
+      ${vblock}`;
   }
   $('lg-shadow').innerHTML += `<div class="lg-honest" style="margin-top:10px">${d.诚实边界 || ''}</div>`;
 }

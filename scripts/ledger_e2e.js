@@ -153,6 +153,12 @@ class CDP {
     ok('合计行给出净收益率', /%/.test(dump.totalRow), dump.totalRow.slice(0, 140));
     ok('逐期明细有数据行', dump.detailRows > 0, String(dump.detailRows));
     ok('影子区说明了「不占预算」', /不占预算/.test(dump.shadow) || /影子/.test(dump.shadow), '');
+    // ★ 只给读数时，三行净收益率总能挑出"最小的那个"；判决层必须同屏出现且带理由。
+    ok('影子区给出「可判性判决」', /可判性判决/.test(dump.shadow), dump.shadow.slice(0, 80));
+    ok('判决带档位或拒绝理由',
+      /(可判|不可判|未检出差异|边缘)/.test(dump.shadow), '');
+    ok('判决提醒「已结算 0 期不构成结论」',
+      /不构成任何结论|尚未产生|已结算/.test(dump.shadow), '');
     ok('诚实边界已渲染（不是空块）', dump.honest.length > 20, dump.honest.slice(0, 60));
     ok('页面无 JS 异常/console.error', errors.length === 0, errors.slice(0, 3).join(' | '));
 
