@@ -140,3 +140,5 @@ output/*.txt
 training/ledger/
 training/shadow/
 training/attest/
+# 推送前的运行时文件备份目录（用完即删；万一推送脚本的重置吞掉改动，靠它还原）
+.pre_push_backup/

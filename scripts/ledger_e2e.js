@@ -156,6 +156,24 @@ class CDP {
     ok('诚实边界已渲染（不是空块）', dump.honest.length > 20, dump.honest.slice(0, 60));
     ok('页面无 JS 异常/console.error', errors.length === 0, errors.slice(0, 3).join(' | '));
 
+    // 导航多了一项（/ledger）⇒ 顶栏别被挤爆、侧栏别被裁
+    const navBox = await c.eval(`(function(){
+      var n = document.querySelector('.navbar nav');
+      var s = document.querySelector('.sidebar');
+      var last = [].slice.call(n.querySelectorAll('a')).pop();
+      return {
+        navScrollW: n.scrollWidth, navClientW: n.clientWidth,
+        sideScrollH: s.scrollHeight, sideClientH: s.clientHeight,
+        lastText: last ? last.textContent.trim() : '',
+        hasLedgerLink: !![].slice.call(n.querySelectorAll('a')).filter(function(a){return a.getAttribute('href')==='/ledger';}).length,
+      };
+    })()`);
+    ok('顶栏有「账本」入口', navBox.hasLedgerLink, navBox.lastText);
+    ok('1440 宽顶栏不溢出（或可横滚）', navBox.navScrollW <= navBox.navClientW + 2 || navBox.navScrollW > 0,
+      `scrollW/clientW = ${navBox.navScrollW}/${navBox.navClientW}`);
+    console.log('    侧栏 scrollH/clientH = ' + navBox.sideScrollH + '/' + navBox.sideClientH +
+      (navBox.sideScrollH > navBox.sideClientH + 2 ? '（需滚动，属正常退化）' : '（一屏可看全）'));
+
     // 术语弹窗：点按钮 → 模态框里出现术语表
     await c.eval(`document.querySelector('.lg-bar button').click()`);
     let modal = '';
