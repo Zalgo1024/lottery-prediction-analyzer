@@ -97,8 +97,18 @@ def money_gate(mp: Dict[str, Any], money: Dict[str, Any]) -> Dict[str, Any]:
 
 def run_cell(cell: Dict[str, Any], *, const: Optional[Dict[str, Any]] = None,
              arms: Optional[Sequence[str]] = None,
-             verbose: bool = True) -> Dict[str, Any]:
-    """跑一个格。返回结构化结果 dict（可直接进 JSON 与报告）。"""
+             verbose: bool = True,
+             keep_objects: bool = False) -> Dict[str, Any]:
+    """跑一个格。返回结构化结果 dict（可直接进 JSON 与报告）。
+
+    `keep_objects=True` 时结果里多一个 `_内部` 键（**不进 JSON 契约**）：
+    `{objs: {臂: ArmResult}, recs, issues, pool, target_issue}`。
+    存在的理由：`ev/arena/kgrid.py` 要在同一批票上算多门指标、还要补跑
+    `random` 的种子副本 —— 两者都需要 `ArmResult.h/j` 与**同一个**候选池。
+    重算池子虽然按 seed 可复现，但「同一池」是硬不变量（方案 §1.2 G4），
+    宁可把它传出来，也不要在下游再生成一次。
+    ★ 默认 False ⇒ 既有调用点（report / 脚本）的返回结构一位不变。
+    """
     doc = None
     const = dict(const if const is not None else PR.constants())
     lottery = cell["彩种"]
@@ -269,7 +279,7 @@ def run_cell(cell: Dict[str, Any], *, const: Optional[Dict[str, Any]] = None,
             p["p_BH"] = ap
             p["BH通过"] = bool(ap <= 0.05)
 
-    return {
+    out = {
         "格": cell["名"], "主假设": bool(cell.get("主假设")),
         "彩种": lottery, "K": K, "预算元每期": K * int(const["单注成本元"]),
         "目标": res0["label"], "规则版本": res0["rule_version"],
@@ -282,3 +292,7 @@ def run_cell(cell: Dict[str, Any], *, const: Optional[Dict[str, Any]] = None,
         "多重比较": adj,
         "耗时秒": round(time.time() - t0, 1),
     }
+    if keep_objects:
+        out["_内部"] = {"objs": objs, "recs": recs, "issues": list(issues),
+                        "pool": pool, "target_issue": target_issue}
+    return out

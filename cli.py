@@ -8,7 +8,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from config import LOTTERY_CONFIG, TRIALS_ENABLED, resolve_groups, TRIAL_ARMS
+from config import (DEFAULT_TICKET_PRICE, LOTTERY_CONFIG, TRIALS_ENABLED,
+                    resolve_groups, TRIAL_ARMS)
 from logs.logger import setup_logger, set_module_level
 
 logger = setup_logger("cli")
@@ -237,6 +238,12 @@ def main():
         help="输出号码组数（留空则按「出号数量」配置：固定/动态，见看板滑轨；显式给出则覆盖）",
     )
     pred_parser.add_argument(
+        "--research",
+        action="store_true",
+        help="研究模式：豁免预算闸门（不占生产账、不做额度夹取）。"
+             "★ 只用于回测/试算；正式出号不要加这一项",
+    )
+    pred_parser.add_argument(
         "--no-record",
         action="store_true",
         help="只算不落库：不写生产 pending（冒烟/验证专用；robust 模式同样生效）",
@@ -363,7 +370,8 @@ def main():
     )
     plan_parser.add_argument("--ev", type=float, default=-0.96, help="单注EV（元，默认排列3直选-0.96）")
     plan_parser.add_argument("--prob", type=float, default=1/1000, help="中奖概率（默认1/1000）")
-    plan_parser.add_argument("--cost", type=float, default=2.0, help="单注成本（默认2元）")
+    plan_parser.add_argument("--cost", type=float, default=DEFAULT_TICKET_PRICE,
+                             help="单注成本（元，默认取 config 单价真源）")
     plan_parser.add_argument("--bankroll", type=float, default=1000.0, help="本金（默认1000元）")
     plan_parser.add_argument("--periods", type=int, default=100, help="蒙特卡洛期数（默认100）")
     plan_parser.add_argument("--sim", action="store_true", help="EV>0 时运行蒙特卡洛模拟")
@@ -1028,7 +1036,9 @@ def _cmd_auto(args):
             log_lines.append(f"[{name}] 跳过预测")
         else:
             # 每期出号按彩种分流（数字型 5 / 乐透型 100）：--groups 显式给出时优先
-            groups_eff = resolve_groups(name, args.groups)
+            # ★ 2026-10-30：这里是人跑 CLI，来源记 `manual` —— 闸门会夹取（额度是硬约束）
+            #   但允许超过基线；`auto`（≤基线、永不自动加注）只留给调度器/web worker。
+            groups_eff = resolve_groups(name, args.groups, source="manual")
             # 智能跳过：下一期若已有 pending 预测则不重复生成
             target_issue = _next_issue(name)
             # ★ 只看生产批：研究台账批后写且 200 注，被当成「已有预测」复用会让整期
@@ -1488,9 +1498,13 @@ def _cmd_predict(args):
     record = not getattr(args, "no_record", False)
     if args.mode == "lowcrowd":
         record = record and bool(getattr(args, "record_pending", False))
+    research = bool(getattr(args, "research", False))
+    if research:
+        print("提示：--research 已启用 —— 本轮豁免预算闸门，不入生产账（仅研究/试算）")
     result = predict(
         lottery_name=args.lottery,
-        groups=resolve_groups(args.lottery, args.groups),
+        groups=resolve_groups(args.lottery, args.groups,
+                              source=("research" if research else "manual")),
         mode=args.mode,
         record_pending=record,
     )

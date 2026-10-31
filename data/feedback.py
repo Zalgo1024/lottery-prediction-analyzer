@@ -552,6 +552,28 @@ def record_pending_prediction(lottery_name: str, prediction: dict):
     """
     prediction["状态"] = "pending"
     prediction["记录时间"] = datetime.now().isoformat()
+    # ★ 2026-10-30（任务 2）：预算闸门停发 ⇒ **不入 pending**。
+    #   理由：pending 的语义是「待开奖核对的一批票」。写一条 0 注记录会让
+    #   「滑轨 == pending 组数」的一致性判据变成 0==0 的假通过，还会让结算时
+    #   凭空多出一期「全空」战绩；而停发本身已经记在预算台账（`mark_stopped`）。
+    # ★★ 判据必须是**显式停发标记**（`engine.predict` 在 `groups<=0` 时写入），
+    #   **不能**用「`预测号码` 为空」去猜：空票集是单测里构造记录时的常规写法
+    #   （`test_hindsight_guard` / `test_feedback_tiers` 都这么用），
+    #   靠它猜会在**前瞻校验之前**短路，把 6 个本该验纪律的测试变成假绿/假红。
+    if prediction.get("停发"):
+        reason = (prediction.get("停发") or {}).get("原因") or "预算闸门停发"
+        logger.warning(f"{lottery_name} 停发（{reason}）⇒ 不写 pending")
+        try:
+            from ev.budget_gate import mark_stopped
+            mark_stopped(lottery_name, reason,
+                         目标期号=prediction.get("目标期号"))
+        except Exception as e:                                # noqa: BLE001
+            logger.warning(f"停发标记写入失败（不阻断）：{e}")
+        return None
+    if not (prediction.get("预测号码") or []):
+        # 只提示、不拦截：没有停发标记却交了空票集，是调用方的问题，
+        # 但这里不是判它的地方（改了就会抢在前面短路其他纪律检查）。
+        logger.warning(f"{lottery_name} 预测号码为空且无停发标记 ⇒ 照常记录")
     # —— 台账域：写入时**固化**，不依赖调用方显式传 ——
     # 由策略（顶层或首注票面）推导：低拥挤策略 → 研究，其余 → 生产。旧记录无此字段时
     # `_domain_of()` 也走同一条推导，天然落「生产」。
@@ -667,6 +689,25 @@ def record_pending_prediction(lottery_name: str, prediction: dict):
     _upsert_pending(lottery_name, prediction)
     logger.info(f"已记录 pending 预测: {lottery_name}, 预测日期={prediction.get('预测日期')}, "
                 f"目标期号={prediction.get('目标期号')}, 台账域={_domain_of(prediction)}")
+
+    # —— 预算台账记账（2026-10-30，任务 2）——
+    # 位置：**入账成功之后**（马后炮被拒绝的那几条不该占额度）。
+    # 幂等：同一 (期号, 档位, 域, 彩种) 重复生成是覆盖不是叠加
+    #   ⇒ 反复触发的自愈/重生成不会把「本月已投」虚增成两倍。
+    # 失败不阻断出号（闸门是纪律，不是出号的前置条件），但**必须留日志**：
+    #   账目漏记会让下一个月的额度判断偏松。
+    try:
+        from ev.budget_gate import record_spend
+        record_spend(
+            lottery_name,
+            目标期号=prediction.get("目标期号"),
+            注数=len(prediction.get("预测号码") or []),
+            档位=_tier_of(prediction),
+            台账域=_domain_of(prediction),
+        )
+    except Exception as e:                                    # noqa: BLE001
+        logger.error(f"预算台账记账失败（不阻断出号，但本月额度会偏松）：{e}")
+    return None
 
 
 # ============================================================

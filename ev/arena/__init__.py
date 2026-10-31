@@ -22,10 +22,13 @@ G1~G5）。把它们的结果放在一起比较时，差异里混着**口径差�
 """
 from __future__ import annotations
 
-__all__ = ["types", "periods", "design", "arms", "replay", "stats"]
+from config import ticket_price
+
+__all__ = ["types", "periods", "design", "arms", "replay", "stats", "tier_metrics"]
 
 # 单注成本（元）。★ 所有成本计算必须走这里，禁止在别处写裸 2.0。
-COST_PER_BET = 2.0
+#   2026-10-30 改为从 config 读：唯一真源 config.LOTTERY_CONFIG[*].payout.cost。
+COST_PER_BET = float(ticket_price("双色球"))
 
 # 主终点默认：单期实得 ≥ 10 元
 DEFAULT_MIN_PAYOUT = 10.0

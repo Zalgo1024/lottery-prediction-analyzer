@@ -41,6 +41,12 @@ _TARGETS = (
     # 不隔离的话，本机上「关掉双色球覆盖」的调参会把出号路径用例整批判红/判绿，
     # 而 CI 上看不出原因（仓库里没有这个文件）。
     ("prediction.coverage_production", "CONFIG_PATH", "coverage_production.json"),
+    # 生产预算闸门（2026-10-30 新增，任务 2）。两条路径都要隔离：
+    #   · LIMIT_PATH 是**唯一能改额度**的人工通道 —— 用例写脏它就等于给真实出号
+    #     装了一个测试额度（或关掉闸门）；
+    #   · SPEND_PATH 是「本月已投」台账 —— 写脏会让当晚真实出号误以为额度耗尽而停发。
+    ("ev.budget_gate", "LIMIT_PATH", "budget_aggregate.json"),
+    ("ev.budget_gate", "SPEND_PATH", "budget_spend.json"),
 )
 
 

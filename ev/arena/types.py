@@ -34,6 +34,15 @@ class ArmResult:
     payout: Optional[np.ndarray] = None     # (n,) float —— 每期实得（**税前**主口径）
     money: Dict[str, Any] = field(default_factory=dict)   # money_series 的汇总（标量为主）
     net: Optional[np.ndarray] = None        # (n,) float —— 每期净额 = 实得 − 成本
+    # ---- 命中矩阵透出（2026-10-30 新增，供 ev/arena/tier_metrics 多门复用）----
+    # 背景：多门指标（同一批票算 ≥10元 / ≥四等 / ≥三等）原本要对每门各跑一遍
+    #   replay 才能拿到 (h, j) ⇒ 命中矩阵重算 3 倍时间，且**三门的票集可能不同**
+    #   （不同目标选出不同并集），所以缓存也无法替代。
+    # 形状：(票数 K, 期数 n) 的 int16，h=红/前区命中数、j=蓝/后区命中数。
+    # ★ `to_row()` **不输出**这两项：它们是中间量（MB 级），
+    #   而 row 是进 JSON/报告的标量契约，混进长数组会撑爆报告并破坏契约。
+    h: Optional[np.ndarray] = None          # (K, n) int16 —— 红/前区命中数
+    j: Optional[np.ndarray] = None          # (K, n) int16 —— 蓝/后区命中数
     meta: Dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -41,7 +50,8 @@ class ArmResult:
         return len(self.issues)
 
     def to_row(self) -> Dict[str, Any]:
-        h = self.hit
+        # ★ 局部变量名避开 self.h（命中矩阵），否则下面几行会读错东西
+        hh = self.hit
         n = self.n
         row: Dict[str, Any] = {
             "臂": self.臂,
@@ -51,10 +61,10 @@ class ArmResult:
             "期号止": self.issues[-1] if n else None,
             "成本": round(self.cost, 2),
         }
-        if h is not None and n:
-            row["达标率"] = float(h.mean())
-            row["达标期数"] = int(h.sum())
-            row["抽样SE"] = float(np.sqrt(max(h.mean() * (1 - h.mean()), 0.0) / n))
+        if hh is not None and n:
+            row["达标率"] = float(hh.mean())
+            row["达标期数"] = int(hh.sum())
+            row["抽样SE"] = float(np.sqrt(max(hh.mean() * (1 - hh.mean()), 0.0) / n))
         if self.nhit is not None and n:
             row["哨兵_单期达标注数"] = float(self.nhit.mean())
         # 净收益侧的标量汇总（序列本身不进 row，避免 JSON 里塞两个长数组）
@@ -69,6 +79,8 @@ def arm_result_from(arm: str, lottery: str, issues: Sequence[Any],
                     hit: np.ndarray, nhit: np.ndarray,
                     nbet_per_period: Optional[Sequence[int]] = None,
                     cost_per_bet: float = 2.0,
+                    h: Optional[np.ndarray] = None,
+                    j: Optional[np.ndarray] = None,
                     **meta: Any) -> ArmResult:
     """构造 `ArmResult`，成本一律按**实际投注注数**累加（不允许 `n*K*2`）。"""
     nb = (np.asarray(nbet_per_period, dtype=np.int64) if nbet_per_period is not None
@@ -77,5 +89,8 @@ def arm_result_from(arm: str, lottery: str, issues: Sequence[Any],
     return ArmResult(臂=arm, 彩种=lottery, issues=list(issues),
                      hit=np.asarray(hit, dtype=bool),
                      nhit=np.asarray(nhit, dtype=np.int64),
-                     cost=cost, meta=dict(meta, 每期注数最大值=int(nb.max()) if nb.size else 0,
-                                          每期注数最小值=int(nb.min()) if nb.size else 0))
+                     cost=cost,
+                     h=None if h is None else np.asarray(h, dtype=np.int16),
+                     j=None if j is None else np.asarray(j, dtype=np.int16),
+                     meta=dict(meta, 每期注数最大值=int(nb.max()) if nb.size else 0,
+                               每期注数最小值=int(nb.min()) if nb.size else 0))

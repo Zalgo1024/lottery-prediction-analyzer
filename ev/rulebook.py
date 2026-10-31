@@ -21,7 +21,11 @@ ev/rulebook.py —— 赔率表 + 概率（名义 EV 的地基）
 """
 from typing import Dict
 
-COST = 2  # 单注 2 元
+from config import ticket_price
+
+# 单注票价。★ 2026-10-30 起不再写裸数字：唯一真源是 config.LOTTERY_CONFIG[*].payout.cost
+#   （本模块覆盖的 4 个数字型彩种单价同为 2 元，故取其一作代表即可）。
+COST = ticket_price("排列3")
 
 # 概率计算函数
 def _prob_pl3(name: str) -> Dict[str, float]:

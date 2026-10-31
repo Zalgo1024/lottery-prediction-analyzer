@@ -22,6 +22,7 @@ import math
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
+from config import ticket_price
 from data.prize_versions import (
     DLT_VERSIONS,
     DltVersion,
@@ -30,7 +31,8 @@ from data.prize_versions import (
 )
 
 # 单注成本（元）。大乐透若买追加投注则为 3 元，本模型只做基本投注。
-COST = 2.0
+# ★ 真源 config.ticket_price；此前的裸 2.0 是一份独立拷贝（2026-10-30 收口）。
+COST = float(ticket_price("双色球"))
 
 # 大乐透追加投注反解占比 q（由票量校准因子 1.1324 反推：均价 = 2×1.1324 = 2.2648，
 # 而均价 = 2×(1−q) + 3×q ⇒ q = 0.2648）。实际票量 N = 销售额 / 均价。

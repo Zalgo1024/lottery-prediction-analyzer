@@ -46,6 +46,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from config import DEFAULT_TICKET_PRICE, ticket_price
+
 _BASE_DIR = Path(__file__).resolve().parent.parent
 
 # 运行时账本（「本月已投」）。放 config/ 是刻意：.gitignore 的 config/*.json
@@ -81,7 +83,9 @@ class Envelope:
 
     monthly_budget: float
     per_period_cap: float
-    cost_per_ticket: float = 2.0
+    # ★ 2026-10-30：默认值改为 config.DEFAULT_TICKET_PRICE，不再写裸 2.0；
+    #   按彩种取值的入口是 `default_envelope()`（它按 ticket_price(lottery) 解析）。
+    cost_per_ticket: float = DEFAULT_TICKET_PRICE
     baseline_tickets: int = 0          # 现行生产注数；任何「加注」都被拒
     lottery: str = ""
     标签: str = ""
@@ -109,7 +113,7 @@ def periods_per_month(lottery: str) -> int:
     return int(PERIODS_PER_MONTH.get(lottery, 13))
 
 
-def default_envelope(lottery: str, *, cost_per_ticket: float = 2.0) -> Envelope:
+def default_envelope(lottery: str, *, cost_per_ticket: Optional[float] = None) -> Envelope:
     """按**现行生产注数**折算的默认包络；若有手动定额则优先用手动值。
 
     ★ 这是「当前配置的封顶值」，不是建议投入。生产注数从
@@ -117,7 +121,11 @@ def default_envelope(lottery: str, *, cost_per_ticket: float = 2.0) -> Envelope:
       读不到配置时退回 1 注（宁可过小，不可过大）。
     ★ 手动定额（`set_manual()`）优先：它是唯一能给出比折算值更小（也更大）
       的通道，且必须带 actor / 备注 / 时间戳三条审计。
+    ★ 单价（2026-10-30）：不传则按 `config.ticket_price(lottery)` **逐彩种**取值，
+      不再统一用 2.0 —— 六彩种当前都是 2 元，但口径必须是「读配置」而不是「都一样」。
     """
+    if cost_per_ticket is None:
+        cost_per_ticket = ticket_price(lottery)
     man = _manual_of(lottery)
     if man:
         monthly = float(man.get("月度定额") or 0.0)

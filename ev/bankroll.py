@@ -9,6 +9,8 @@ ev/bankroll.py —— 资金/风险预算（任务 2.2）
 """
 from dataclasses import dataclass
 
+from config import DEFAULT_TICKET_PRICE
+
 
 @dataclass
 class Budget:
@@ -16,7 +18,8 @@ class Budget:
     per_period_pct: float = 0.02          # 单期预算 = 本金 × 2%
     stop_loss_pct: float = 0.30           # 累计亏损达本金 30% 停手
     max_consec_loss: int = 5              # 连亏 5 期熔断
-    cost_per_ticket: float = 2.0
+    # ★ 2026-10-30：单价走 config 单一真源，不再写裸 2.0
+    cost_per_ticket: float = DEFAULT_TICKET_PRICE
 
 
 def budget_plan(budget: Budget, consec_loss: int = 0,

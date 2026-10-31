@@ -99,11 +99,22 @@ class EffectiveCountTests(unittest.TestCase):
 
 
 class ResolveGroupsTests(unittest.TestCase):
-    def test_requested_overrides_everything(self):
+    def test_requested_is_no_longer_a_pure_bypass(self):
+        """★ 2026-10-30（任务 2）：`requested` 不再是纯旁路。
+
+        原断言是 `resolve_groups("双色球", 123) == 123` —— 那意味着
+        `cli.py predict --groups 2000` 能出 2000 注（4000 元），与月度额度无关。
+        现在的契约按**来源**区分：
+          · `auto`（默认，调度器/自愈）：不超过基线（自动路径永不加注）；
+          · `manual`（人在键盘前）：可以超过基线，但受预算闸门夹取；
+          · `research`：豁免（回测/试算，不占生产账）。
+        """
         with _TmpStore():
             ts.save_config({"mode": "fixed", "fixed": {"双色球": 7}})
             from config import resolve_groups
-            self.assertEqual(resolve_groups("双色球", 123), 123)
+            self.assertEqual(resolve_groups("双色球", 123), 7)                    # auto
+            self.assertEqual(resolve_groups("双色球", 123, source="manual"), 123)  # 未启用闸门
+            self.assertEqual(resolve_groups("双色球", 123, source="research"), 123)
 
     def test_config_beats_lottery_default(self):
         with _TmpStore():

@@ -81,6 +81,14 @@ def groups_invariant(lottery_names: Optional[list] = None) -> dict:
         try:
             slide = int(resolve_groups(lot))
             target = _next_issue(lot)
+            # ★ 2026-10-30：滑轨 0 = 预算闸门**停发**态，不是配置错误、也不是不一致。
+            #   若在这里报「不一致」，启动自愈会去重生成，而重生成照样得到 0 注 ⇒
+            #   每轮启动都触发一次流水线（自愈风暴），日志里全是假故障。
+            if slide <= 0:
+                rows.append({"彩种": lot, "滑轨": 0, "组数": 0, "目标期号": target,
+                             "状态": "停发（预算包络）", "一致": True,
+                             "说明": "本期可执行注数为 0（月度额度已用尽），不出号属既定行为"})
+                continue
             # ★ 只看**生产批**：研究批（低拥挤台账）是 200 注、且后写，
             #   混进来会拿它和滑轨比，滑轨恰好 200 时还会「假通过」不再自愈。
             p = latest_production_pending(load_pending(lot), target_issue=target)

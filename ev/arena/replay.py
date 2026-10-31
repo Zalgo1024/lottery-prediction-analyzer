@@ -167,4 +167,9 @@ def replay(lottery: str, tickets: Sequence[Dict[str, Any]],
 
     return ArmResult(臂=arm, 彩种=lottery, issues=[r.期号 for r in recs],
                      hit=hit, nhit=nhit, cost=float(nb.sum()) * float(cost_per_bet),
-                     payout=payout, net=net, money=money, meta=meta)
+                     payout=payout, net=net, money=money,
+                     # ★ 命中矩阵透出（2026-10-30）：供 tier_metrics 在同一批票上
+                     #   复用算多门（≥10元 / ≥四等 / ≥三等），不重跑 replay。
+                     #   它们是**本函数已经算完要丢掉**的中间量，透出的边际成本为 0。
+                     h=h, j=j,
+                     meta=meta)

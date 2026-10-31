@@ -63,7 +63,6 @@ _FALLBACK_LIMIT_LOTTO = 500
 
 # 动态策略参数
 DYNAMIC_STEP_DOWN = 2         # 冗余高且 edge 稳定时，每期下调注数
-DYNAMIC_STEP_UP = 2           # 【已停用】原「命中率偏离 → 上调」，见 decide_next_count 说明
 DYNAMIC_MAX_PER_ADJUST = 8    # 单次调整幅度上限
 DYNAMIC_FLOOR = 1             # 动态模式硬下限（1 注）
 DYNAMIC_REDUNDANCY_HIGH = 0.5  # 压缩淘汰占比 ≥ 此值视为"冗余高"
@@ -71,8 +70,6 @@ DYNAMIC_REDUNDANCY_LOW = 0.2   # 淘汰占比 ≤ 此值视为"冗余低"
 DYNAMIC_DEVIATION_Z = 2.0      # 命中率偏离理论值超过 2 个标准误 → **仅诊断**
 # 命中率偏离只作诊断所需的最小独立观测数（= 批次数，不是注数！）
 MIN_BATCHES_FOR_DEVIATION = 20
-# 冗余下调不得低于「用户意图锚点 × 此比例」
-DYNAMIC_ANCHOR_FLOOR_RATIO = 0.5
 
 _DIGITAL = {"福彩3D", "排列3", "排列5"}
 
@@ -259,6 +256,22 @@ def _redundancy_ratio(kpi: Optional[Dict[str, Any]]) -> Optional[float]:
     return max(0.0, min(1.0, dropped / float(n)))
 
 
+def _assert_no_step_up(cur: int, nxt: int, reason: str) -> int:
+    """静态锁：动态策略**只能减或维持**，任何上调都是 bug。
+
+    ★ 为什么写成运行时断言而不是「靠 review 保证」：2026-10-24 之前的那条
+      「命中率偏离 → 回补 +2 注」让双色球单向爬到上限，用户手动调小后下一期
+      又被推回，表现为「怎么调都固定在最大值」，而日志一路正常。
+      这类「规则本身错」的 bug 不会抛异常，只会让一个数字静默漂移。
+      断言放在返回前，任何未来改动只要引入上调路径就会立刻炸。
+    """
+    if int(nxt) > int(cur):
+        raise AssertionError(
+            f"动态注数策略出现上调：{cur} → {nxt}（{reason}）。"
+            f"★ 自动路径永不加注：E[中奖注数]=K·p，加注不改变单注概率，只放大方差。")
+    return int(nxt)
+
+
 def decide_next_count(
     lottery: str,
     *,
@@ -331,7 +344,8 @@ def decide_next_count(
 
     if r is None:
         reason = "无上一批压缩数据，维持当前注数"
-        return {"next": cur, "reason": reason, "冗余度": None, "z": z,
+        return {"next": _assert_no_step_up(cur, cur, reason), "reason": reason,
+                "冗余度": None, "z": z,
                 "命中率": hit_rate, "理论率": expected_rate,
                 "诊断": diag, "样本够": samples_ok}
 
@@ -351,8 +365,8 @@ def decide_next_count(
         else:
             reason = f"上一批冗余淘汰占比 {r:.0%} 处于合理区间 → 维持 {cur} 注"
 
-    return {"next": nxt, "reason": reason, "冗余度": r, "z": z,
-            "命中率": hit_rate, "理论率": expected_rate,
+    return {"next": _assert_no_step_up(cur, nxt, reason), "reason": reason,
+            "冗余度": r, "z": z, "命中率": hit_rate, "理论率": expected_rate,
             "诊断": diag, "样本够": samples_ok}
 
 

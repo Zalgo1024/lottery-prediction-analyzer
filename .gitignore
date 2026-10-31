@@ -87,6 +87,10 @@ config/*
 !config/profit.json
 # 联合实验的预注册（期窗/常量/主终点/家族/停止规则 + 自校验哈希）—— 实验契约，必须入库
 !config/preregistration.json
+# 月度总投入硬上限（谁的额度、多少、是否启用）—— **业务政策**，与 ticket_size.json 同级：
+# 丢了就还原不出同一套预算约束。注意 `budget_spend.json`（实际记账台账）故意**不**放行，
+# 它是运行时状态，跨机器/回滚都不该跟着搬。
+!config/budget_aggregate.json
 logs/flask_stdout.log
 logs/run_supervisor.log
 

@@ -44,6 +44,10 @@ LOTTERY_CONFIG = {
             {"name": "红球", "min": 1, "max": 33, "choose": 6, "repeatable": False, "ordered": False},
             {"name": "蓝球", "min": 1, "max": 16, "choose": 1, "repeatable": False, "ordered": False},
         ],
+        # 单价（元）。2026-10-30 补齐：本键原只有数字型 4 彩种有，
+        # 乐透型 3 彩种缺 ⇒ 成本口径散落在 ev/rulebook.py、ev/arena/__init__.py、
+        # ev/budget_envelope.py 三处各写一份裸 2.0。现统一由 ticket_price() 读取。
+        "payout": {"cost": 2},
     },
     "大乐透": {
         "red_range": (1, 35),
@@ -57,6 +61,7 @@ LOTTERY_CONFIG = {
             {"name": "红球", "min": 1, "max": 35, "choose": 5, "repeatable": False, "ordered": False},
             {"name": "蓝球", "min": 1, "max": 12, "choose": 2, "repeatable": False, "ordered": False},
         ],
+        "payout": {"cost": 2},
     },
     # ===== 阶段2 数字型（按位有序）=====
     # 每位是一个有序分区，号码范围 0-9，位间可重复。
@@ -108,6 +113,30 @@ LOTTERY_CONFIG = {
         "payout": {"cost": 2, "exact_match": 5000000},
     },
 }
+
+DEFAULT_TICKET_PRICE = 2.0
+
+
+def ticket_price(lottery: str) -> float:
+    """单注票价（元）—— 全项目唯一真源。
+
+    背景（2026-10-30）：此前同一件事有三份互不相干的拷贝 ——
+    `ev/rulebook.py::COST = 2`、`ev/arena/__init__.py::COST_PER_BET = 2.0`、
+    `ev/budget_envelope.py::Envelope.cost_per_ticket = 2.0` 的默认值。
+    改一处不会改另两处 ⇒ 成本口径会静默漂移，而成本是净收益/EV 的分母，
+    漂了以后「每 100 元投入」的所有读数都不可比。
+
+    ★ 缺配置回退 `DEFAULT_TICKET_PRICE`，**不回退 0**：0 会让净收益等于实得、
+      让 EV 变成非负，是最坏的一种「看起来正常」。未知彩种同样走该回退。
+    """
+    cfg = LOTTERY_CONFIG.get(lottery) or {}
+    cost = (cfg.get("payout") or {}).get("cost")
+    try:
+        cost = float(cost)
+    except (TypeError, ValueError):
+        return DEFAULT_TICKET_PRICE
+    return cost if cost > 0 else DEFAULT_TICKET_PRICE
+
 
 # ===== 节假日配置 =====
 # 手工覆盖（优先级最高），格式：{年份: [(月, 日, 天数), ...]}
@@ -282,25 +311,51 @@ TRIAL_ARMS = 100
 TICKET_SIZE_CONTROL_ENABLED = True
 
 
-def resolve_groups(lottery, requested=None):
-    """取"每期出号组数"。
+def resolve_groups(lottery, requested=None, *, source="auto"):
+    """取"每期出号组数"（**经过预算闸门夹取**）。
 
     优先级（自高到低）：
-      1. 显式 requested（`cli.py predict --groups N` 人工大批量，绕过所有配置）；
+      1. 显式 requested（`cli.py predict --groups N` 人工指定）；
       2. data/ticket_size 的当前生效值（固定=设定值 / 动态=策略维护值）；
       3. 本文件的彩种默认（GROUPS_BY_LOTTERY / AUTO_GROUPS）。
 
     自动流水线各调用点统一走本函数，避免数字型与乐透型混用一个常量。
+
+    ★ 2026-10-30（任务 2）：返回值现在是**闸门夹取后**的可执行注数。
+      此前 `requested` 是纯旁路 —— `cli.py predict --groups 2000` 能出 2000 注
+      （4000 元），只被 `PREDICT_DEFAULTS["max_groups"]=2000` 封住，与月度额度无关。
+      现在按来源区分：
+        · `auto`    —— 调度器 / worker / 自愈：强夹，且**不超过基线**（永不自动加注）；
+        · `manual`  —— 命令行/界面显式出号：夹取（额度是硬约束），可超过基线；
+        · `research`—— 回测/训练：豁免，不入生产账。
+      额度未启用时行为与接入前**完全一致**（`config/budget_aggregate.json` 不存在
+      ⇒ 闸门未启用）。
+
+    ★ 唯一的失败方式是显式抛：`启用=true` 但 `月度总额` 缺失 ⇒
+      `GateConfigError` **直接向上抛**，不做 fail-closed。
+      理由：那是一次配置手误，任何「猜一个数继续跑」都是在替人做预算决定；
+      而其它异常（读盘失败等）则 fail-closed 到基线，保证流水线不因闸门自身崩掉。
     """
-    if requested is not None:
-        return int(requested)
+    base = GROUPS_BY_LOTTERY.get(lottery, AUTO_GROUPS)
     if TICKET_SIZE_CONTROL_ENABLED:
         try:
             from data.ticket_size import effective_count
-            return int(effective_count(lottery))
+            base = int(effective_count(lottery))
         except Exception:
             pass
-    return GROUPS_BY_LOTTERY.get(lottery, AUTO_GROUPS)
+    want = int(requested) if requested is not None else int(base)
+
+    try:
+        from ev.budget_gate import clamp
+        return int(clamp(lottery, want, baseline=int(base), source=source)["注数"])
+    except Exception as e:                                   # noqa: BLE001
+        from ev import budget_gate as _BG
+        if isinstance(e, _BG.GateConfigError):
+            raise                     # 配置错误必须响：见 docstring
+        import logging
+        logging.getLogger(__name__).error(
+            f"预算闸门异常，按基线 {base} 注 fail-closed（绝不放宽到 {want}）：{e}")
+        return int(min(want, int(base)))
 
 
 # 前瞻 A/B 对照实验（NetPayout WP3）开关。

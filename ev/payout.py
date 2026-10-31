@@ -34,9 +34,11 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from config import ticket_price
+
 logger = logging.getLogger(__name__)
 
-COST = 2.0  # 单注成本（元）
+COST = float(ticket_price("双色球"))  # 单注成本（元）★ 真源 config.ticket_price
 
 _LOTTERY = ("双色球", "大乐透", "排列3", "福彩3D", "排列5", "七星彩")
 _REDBLUE = ("双色球", "大乐透")

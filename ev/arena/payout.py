@@ -181,6 +181,19 @@ def money_series(lottery: str, tickets: Sequence[Dict[str, Any]],
 
     ★ 成本一律 `Σ 每期实际注数 × cost_per_bet`（倍投时实际注数 = Σ倍数）；
       **不用** `n*K*2` 的估算式。
+
+    ★★★ `≥5元期占比` / `≥10元期占比` 的分母是**该期全部票的实得之和**（`gross`），
+      **不是**「该期是否存在**一注**达到该金额」。两者是不同的量，且前者会随
+      票数 K **机械上升**：
+
+          双色球 K=50（100 元/期）实测 `≥10元期占比` = **1.0000**，
+          而同一批票「至少一注 ≥10 元」的期占比只有 **0.3833**。
+
+      原因很简单：50 注期里几乎不可能一期总实得低于 10 元。所以
+      **这两个字段不能用来比较「覆盖选号有没有改善」，也不能跨 K 比较**。
+      要「至少一注达到某门」的期占比必须用 `tier_metrics.gate_series`
+      （逐票判定 `nhit > 0`）。本字段保留原义（每期总体回本率），
+      供 `tier_backtest` / `lowcrowd_backtest` 等历史模块继续使用。
     """
     if rule_mode not in RULE_MODES:
         raise ValueError(f"rule_mode 必须是 {RULE_MODES} 之一，收到 {rule_mode!r}")

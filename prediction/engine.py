@@ -1660,6 +1660,22 @@ def predict(
     if groups > PREDICT_DEFAULTS["max_groups"]:
         groups = PREDICT_DEFAULTS["max_groups"]
 
+    # ★ 2026-10-30（任务 2）：0 注 = 预算闸门的**停发**态，必须在这里就返回，
+    #   绝不能往下走到 `_pad_to_groups`/压缩/入账 —— 那些函数会把 0 注补齐到
+    #   保底注数（`TICKET_COMPRESS_MIN_KEEP=5`），于是「预算耗尽」被悄悄变成
+    #   「还是买了 5 注」，额度闸门形同虚设。
+    if int(groups) <= 0:
+        reason = "预算闸门：本月额度已用尽（请求 0 注）"
+        try:
+            from ev.budget_gate import mark_stopped
+            mark_stopped(lottery_name, reason)
+        except Exception as _e:                              # noqa: BLE001
+            logger.warning(f"停发标记写入失败（不影响停发本身）：{_e}")
+        logger.warning(f"预测停发：{lottery_name} —— {reason}")
+        return {"彩种": lottery_name, "号码组数": 0, "预测号码": [],
+                "停发": {"原因": reason, "来源": "ev.budget_gate"},
+                "说明": "预算额度耗尽 ⇒ 本期不出号。这是既定行为，不是失败。"}
+
     logger.info(f"预测: {lottery_name}, groups={groups}, mode={mode}")
 
     # 哨兵变量（替代 in dir() 脆弱判断）

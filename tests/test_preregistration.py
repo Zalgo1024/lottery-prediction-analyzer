@@ -18,8 +18,8 @@ from ev import preregistration as PR
 def test_load_ok():
     doc = PR.load()
     # ★ 版本号是硬编码的「锁」：改预注册必须同时改这里，避免静默换版本。
-    assert doc["版本"] == "1.9"
-    assert doc["锁定日"] == "2026-10-26"
+    assert doc["版本"] == "1.10"
+    assert doc["锁定日"] == "2026-10-30"
     # 集中度守门必须有**两级**：单臂大奖占比 + 配对级单期支配
     rules = "".join(doc["停止规则"])
     assert "单次大奖占总实得比" in rules
@@ -36,6 +36,8 @@ def test_load_ok():
     assert "预算包络" in doc
     # v1.9：≥四等 门二次评估（两条轨道都登记，且在跑数之前）
     assert "四等门_二次评估" in doc
+    # v1.10：五档 K 网格（单位预算验证）
+    assert "格_K网格" in doc
 
 
 def test_hash_mismatch_raises(tmp_path):
@@ -420,3 +422,63 @@ def test_v19_does_not_claim_confirmatory_power():
     assert "不产生新的确认性声明" in blob
     for bad in ("证伪", "证否", "已证明", "不可预测"):
         assert bad not in blob, bad
+
+
+# ---------------------------------------------------------------- v1.10
+def test_v110_kgrid_registration():
+    """v1.10：单位预算验证的五档 K 网格 —— 四臂、主终点、附加门纪律。"""
+    b = PR.load()["格_K网格"]
+    # ① 五档 K 必须是用户指定那五档，且预算 = K×2（单价真源）
+    assert b["K网格"] == [50, 100, 200, 400, 500]
+    assert b["预算元每期"] == {str(K): K * 2 for K in b["K网格"]}
+    # ② 四臂齐全；prod_mix 因 cap 污染必须**不**进主检验
+    assert b["臂"] == ["random", "tier_packing", "union_greedy", "prod_mix"]
+    assert "prod_mix" not in b["进主检验"]
+    assert "cap污染" in b["_prod_mix"]
+    assert b["对比臂"] == "random"
+    # ③ 基线必须给副本离散度（单副本基线会把抽样噪声当 Δ）
+    assert "SD_replica" in b["基线臂口径"]
+    # ④ 主终点唯一；附加门**不进 BH**、且不许合成总分
+    assert "≥ 10" in b["主终点"] or "≥10" in b["主终点"]
+    for g in b["附加指标"]:
+        assert g["进BH"] is False
+        assert "描述性" in g["性质"]
+    assert "不做一个加权总分" in b["_附加指标纪律"]
+    # ⑤ 评估窗纪律：判决只能用后 40%
+    assert "60" in b["评估期"]["开发窗"] and "40" in b["评估期"]["评估窗"]
+    assert "唯一判决窗口" in b["评估期"]["评估窗"]
+    # ⑥ 四条判据，且第 3 条是层 1 否决（提高判据数会静默削弱否决力）
+    assert [c["编号"] for c in b["判据"]] == [1, 2, 3, 4]
+    assert "实现缺陷" in b["判据"][2]["判决"]
+    assert "层 1" in b["验收判据"] and "不能" in b["验收判据"]
+    # ⑦ 层 1 数字自洽：空间 = 上限 − 基线，且六格 × 五档全在
+    l1 = b["层1_构造性上界"]
+    for key, v in l1.items():
+        if key.startswith("_"):
+            continue
+        assert set(v["格"]) == set(b["预算元每期"]), key
+        for K, row in v["格"].items():
+            p = v["单注p"]
+            assert row["理论上限"] == pytest.approx(min(1.0, int(K) * p), abs=1e-12), (key, K)
+            assert row["可争取空间"] == pytest.approx(
+                row["理论上限"] - row["随机独立基线"], abs=1e-12), (key, K)
+            assert row["可争取空间"] >= -1e-12, (key, K)
+    # ⑧ 空间**非单调**：峰在 K·p≈1 处，K 越大不等于空间越大
+    #    （双色球 ≥10元 峰在 K=100，大乐透在 K=200；K=500 已过峰 ⇒ 空间收窄）
+    ssq10 = l1["双色球-≥10元"]["格"]
+    dlt10 = l1["大乐透-≥10元"]["格"]
+    assert ssq10["100"]["可争取空间"] > ssq10["500"]["可争取空间"] * 5, "双色球空间应随 K 过峰后收窄"
+    assert dlt10["200"]["可争取空间"] > dlt10["50"]["可争取空间"] * 3
+    assert 0.05 < ssq10["50"]["可争取空间"] < 0.10        # 实测 0.0726，不是 0.0043
+    # ≥三等 空间是 O((K·p)²) 量级（p≈1e-5 ⇒ 最大约 1.3e-5），实质为 0
+    for key in ("双色球-≥三等", "大乐透-≥三等"):
+        for K, row in l1[key]["格"].items():
+            assert row["可争取空间"] < 2e-5, (key, K, row["可争取空间"])
+    # 空间非单调这一事实必须写进块内，否则会被读成「K 越大越值」
+    assert "非单调" in b["_预期"] and "K·p≈1" in b["_空间非单调提醒"]
+    # ⑨ 变更日志自证事前登记（v1.9/v1.10 是 dict 条目，v1.4 起是字符串条目 ⇒ 两种都要认）
+    entry = next(e for e in PR.load()["变更日志"]
+                 if isinstance(e, dict) and e.get("版本") == "1.10")
+    assert "事前登记" in entry["说明"] and "尚未" in entry["说明"]
+    # ⑩ 新增块不得动 Stage 1 的主假设唯一性
+    assert sum(1 for c in PR.load()["格"] if c.get("主假设")) == 1

@@ -24,6 +24,8 @@ import logging
 import time
 from typing import Any, Dict, Optional
 
+from config import ticket_price
+
 logger = logging.getLogger(__name__)
 
 # 固定奖级：彩种 → {奖级: 单注金额}
@@ -44,7 +46,7 @@ FLOATING_REF: Dict[str, Dict[str, Optional[float]]] = {
     "七星彩": {"一等": 5000000, "二等": None},    # 封顶 500 万
 }
 
-COST = 2.0  # 单注成本（元）
+COST = float(ticket_price("双色球"))  # 单注成本（元）★ 真源 config.ticket_price
 
 # 浮动奖单注奖金的**历史均值估算**：仅用于「缺当期实际数据」时的兜底
 # （静态 EV / 方差 / 凯利 这类不需要当期开奖的粗算）。

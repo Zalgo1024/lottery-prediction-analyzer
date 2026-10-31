@@ -225,6 +225,14 @@ def ensure_pending_groups() -> dict:
     for lottery_name in LOTTERY_CONFIG:
         try:
             slide = int(resolve_groups(lottery_name))
+            # ★ 2026-10-30（任务 2）：滑轨 0 = 预算闸门停发。必须在 `_claim_trigger`
+            #   **之前**返回 —— 否则会先占住本轮任务再触发流水线，重生成照样 0 注，
+            #   下一轮再占一次：自愈风暴 + 日志假故障。
+            if slide <= 0:
+                logger.info(f"启动自愈：{lottery_name} 预算包络停发（滑轨 0）⇒ 不触发流水线")
+                fixed[lottery_name] = {"滑轨": 0, "原组数": None,
+                                       "目标期号": None, "动作": "停发，不触发流水线"}
+                continue
             next_issue = _next_issue(lottery_name)
             # ★ 只看生产批：研究批（200 注）若被算进来，滑轨恰好 200 时会「一致」而跳过自愈，
             #   真正的生产批缺失反而修不上；只有研究批时必须视为「无 pending」并触发补跑。
