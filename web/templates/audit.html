@@ -6,7 +6,7 @@
 
 {% block content %}
 <h2><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg> 测量与证据看板（质量 · EV · P/L · 机制缝隙）</h2>
-<p style="color:var(--gray);margin-bottom:15px">八块<b>只读</b>指标：① 开奖质量监控、② 名义 EV、③ 反馈盈亏、④ 距离画像、⑤ 实得画像、⑥ 前瞻 A/B 对照、⑦ 中奖归因、⑧ 机制缝隙测量。<br>本页只呈现<b>已测量的结果</b>，不输出任何中奖承诺，也不在这里触发测量。每张卡顶部有「这张卡在测什么 / 关键名词 / 口径与诚实边界」；结论的适用范围由后端单一真源给出（见下方「诚实边界」与每张卡的同名小节），本页面不另写一份。</p>
+<p style="color:var(--gray);margin-bottom:15px">{{ audit_cards|length }} 块<b>只读</b>指标：{% for c in audit_cards %}{{ c.序号 }} {{ c.标题 }}{% if not loop.last %}、{% endif %}{% endfor %}。<br>本页只呈现<b>已测量的结果</b>，不输出任何中奖承诺，也不在这里触发测量。每张卡顶部有「这张卡在测什么 / 关键名词 / 口径与诚实边界」；结论的适用范围由后端单一真源给出（见下方「诚实边界」与每张卡的同名小节），本页面不另写一份。</p>
 <div class="alert alert-info" style="font-size:13px">ℹ️ 真正的「数据体检」（期号连续性、重复期号、号码合法性、数据滞后等 A~G 七项）是离线脚本 <code>scripts/health_check.py</code> 的产物，结论写在 <code>logs/项目体检_*.md</code> 与推送里，<b>不在本页</b>。本页只做指标测量。</div>
 
 <!-- 工具栏：彩种选择 + 刷新 + 解释开关 + 名词速查 -->
@@ -26,7 +26,7 @@
 
 <!-- 第一层：摘要（八格状态一览，点一下跳到对应卡片） -->
 <div class="audit-summary">
-  <div style="font-size:13px;color:var(--gray)">第一层 · 八张卡片的状态一览。点任意一格会展开并跳到那张卡；<b>解释：开</b>时每张卡顶部还有「这张卡在测什么 / 关键名词 / 口径与诚实边界」。</div>
+  <div style="font-size:13px;color:var(--gray)">第一层 · {{ audit_cards|length }} 张卡片的状态一览。点任意一格会展开并跳到那张卡；<b>解释：开</b>时每张卡顶部还有「这张卡在测什么 / 关键名词 / 口径与诚实边界」。</div>
   <div class="audit-sum-grid" id="audit-sum-grid"></div>
   <div class="audit-callout audit-explain" id="audit-page-caveat" style="display:none"></div>
 </div>
@@ -90,6 +90,7 @@ async function loadAll() {
   await Promise.all([
     loadQuality(lot), loadEv(lot), loadPl(lot), loadDistance(lot),
     loadPayoutProfile(lot), loadTrials(lot), loadAttribution(lot), loadGap(lot),
+    loadRobustness(lot),
   ]);
 }
 
@@ -650,6 +651,85 @@ async function loadGap(lot) {
   } catch (e) {
     el.innerHTML = `<div class="alert alert-warning">机制缝隙测量加载失败：${esc(e.message)}</div>`;
     EXPL.onCardRendered("gap", el, {__error: e.message});
+  }
+}
+
+/** 策略判决徽章：把「结论」与「缺数据」分开着色 —— 无优势不是故障，尚未运行才是缺数据。 */
+function robustBadge(v) {
+  const m = { "退化": "warn", "脆弱": "warn", "稳定": "ok",
+              "无优势": "none", "不可判": "none" };
+  return badge(v || "未知", m[v] || "muted");
+}
+
+async function loadRobustness(lot) {
+  const el = document.getElementById("hn-robustness");
+  el.innerHTML = '<div class="alert alert-info">加载策略鲁棒性…</div>';
+  try {
+    const r = await fetch("/api/audit/robustness");
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const d = await r.json();
+    if (d.error) {
+      el.innerHTML = `<div class="alert alert-warning">${esc(d.error)}</div>`;
+      EXPL.onCardRendered("robustness", el, d);
+      return;
+    }
+
+    if (!d.可用) {
+      // ★ 没测过就说没测过：这里**不画任何 0%**，因为 0% 会被读成「测了、优势归零」。
+      el.innerHTML = `
+        <div class="alert alert-info">${esc(d.原因 || "尚未运行")}</div>
+        <div class="audit-note-item" style="list-style:none">夜间日报会跑一次压力检验并留痕；本卡只读缓存，不在页面里触发测量（一次约 40 秒）。</div>`;
+      EXPL.onCardRendered("robustness", el, d);
+      return;
+    }
+
+    const all = Object.keys(d.彩种 || {});
+    const tested = all.filter(k => (d.彩种[k] || {}).已测 !== false);
+    const skipped = all.filter(k => (d.彩种[k] || {}).已测 === false);
+
+    let html = `<div class="audit-note">缓存生成：${esc(d.生成时间 || "未记录")}（夜间自动刷新，超过 3 天视为陈旧）</div>`;
+    for (const k of tested) {
+      const it = d.彩种[k] || {};
+      html += `<div style="margin-top:12px"><strong>${esc(k)}</strong> ${robustBadge(it.判决)}`
+        + `　基准优势 ${num(it["基准优势_元每注"], 4)} 元/注`
+        + `　最差保留率 ${it["最差保留率"] == null ? "—" : pct(it["最差保留率"])}`
+        + `　策略：与等注数随机比`
+        + (it.前视检查 === false ? " " + badge("前视检查未通过", "warn") : "")
+        + `</div>`;
+      if (it.原因) html += `<div class="audit-note-item">${esc(it.原因)}</div>`;
+      const sc = it.情景 || [];
+      if (sc.length) {
+        html += '<div style="margin-top:6px;overflow-x:auto"><table class="audit-table" style="font-size:12px">'
+          + '<thead><tr><th>情景</th><th style="text-align:right">优势(元/注)</th>'
+          + '<th style="text-align:right">保留率</th><th>仍优于随机</th></tr></thead><tbody>';
+        for (const s of sc) {
+          html += `<tr><td>${esc(s.情景)}</td>`
+            + `<td style="text-align:right">${num(s["优势_元每注"], 6)}</td>`
+            + `<td style="text-align:right">${s["保留率"] == null ? "—" : pct(s["保留率"])}</td>`
+            + `<td>${s.仍优于随机 ? badge("是", "ok") : badge("否", "warn")}</td></tr>`;
+        }
+        html += "</tbody></table></div>";
+      }
+    }
+    if (!tested.length) html += '<div class="alert alert-info">缓存里没有任何已检验的彩种</div>';
+
+    // ★ 未纳入检验的彩种必须**逐个列出理由**，不能因为「没结果」就不显示：
+    //   表里没有它，读者只会理解成「测过且没问题」。缺席不等于通过。
+    if (skipped.length) {
+      html += `<div style="margin-top:16px"><strong>未纳入检验（${skipped.length} 个）</strong>`
+        + `<div class="audit-note">这些彩种没有跑压力检验 —— 既不代表通过，也不代表失败。</div>`
+        + '<div style="margin-top:6px;overflow-x:auto"><table class="audit-table" style="font-size:12px">'
+        + '<thead><tr><th>彩种</th><th>为什么没测</th></tr></thead><tbody>';
+      for (const k of skipped) {
+        html += `<tr><td>${esc(k)}</td><td>${esc((d.彩种[k] || {}).原因 || "未给出理由")}</td></tr>`;
+      }
+      html += "</tbody></table></div></div>";
+    }
+    el.innerHTML = html;
+    EXPL.onCardRendered("robustness", el, d);
+  } catch (e) {
+    el.innerHTML = `<div class="alert alert-warning">策略鲁棒性加载失败：${esc(e.message)}</div>`;
+    EXPL.onCardRendered("robustness", el, {__error: e.message});
   }
 }
 

@@ -250,7 +250,7 @@ def _worst_retention(r: Dict[str, Any]) -> Optional[float]:
     return min(rets) if rets else None
 
 
-def _strategy_robustness() -> Dict[str, Any]:
+def strategy_robustness() -> Dict[str, Any]:
     """读取策略鲁棒性缓存（夜间 refresh 写入）。**纯只读、快**，可在 Web 请求里调。"""
     try:
         if not ROBUSTNESS_PATH.exists():
@@ -273,11 +273,22 @@ def _strategy_robustness() -> Dict[str, Any]:
     for lot, r in (d.get("彩种") or {}).items():
         out["彩种"][lot] = {
             "判决": r.get("判决"),
+            # ★ 老缓存里没有 `已测` 字段 ⇒ 视为 True（那时只有真跑出来的结果才会写进缓存）
+            "已测": bool(r.get("已测", True)),
             "基准优势_元每注": r.get("基准优势_元每注"),
             "最差保留率": _worst_retention(r),
             "前视检查": r.get("前视检查"),
             "原因": r.get("原因"),
+            # 以下三项只给看板用：日报/推送不读，但页面上要能看见「优势随失真衰减」的整条曲线，
+            # 否则只有一个「最差保留率」的孤立数字，读者无法判断它是在哪一档掉下来的。
+            "期号": r.get("期号"),
+            "K": r.get("K"),
+            "判据版本": r.get("判据版本"),
+            "情景": list(r.get("情景") or []),
         }
+    lots = out["彩种"]
+    out["已检验"] = [k for k, v in lots.items() if v["已测"]]
+    out["未纳入"] = [k for k, v in lots.items() if not v["已测"]]
     return out
 
 
@@ -290,27 +301,79 @@ def _latest_target_issue(lottery: str) -> Optional[str]:
         return None
 
 
-def refresh_strategy_robustness(lotteries: Sequence[str] = ("双色球",),
+def _robustness_skip_reason(lottery: str) -> Optional[str]:
+    """这个彩种**为什么结构上不做**压力检验；返回 `None` 表示可测。
+
+    ★ 必须显式给理由，不许靠「结果表里没有它」来表达 —— 缺席会被读成「测过且通过」。
+      这是本项目反复踩的那条：「缺席 ≠ 通过」。
+    ★ 判据只用**结构性事实**（有没有浮动奖）+ 倾斜来源是否过 Go 门槛，不做任何近似测量。
+    ★ 读取出错**不在这里**吞掉（不返回理由）：那是「这次没读成」，不是「没有可测的东西」。
+      两者混用会把一次临时故障永久写成「不适用」，见 `refresh_strategy_robustness` 的
+      `不可判` 分支。
+    """
+    from ev.profit import tilt as T
+    from ev.profit.rules import rules_for
+
+    rules = rules_for(lottery)
+    if not any(g.kind != "fixed" for g in rules.grades.values()):
+        return ("无浮动奖 ⇒ 优势只可能来自分奖，本彩种结构性优势恒为 0"
+                "（不是测出来为 0，是没有可测的东西）")
+
+    tl = T.outer_tilt(lottery)
+    if tl is None:
+        return "倾斜不可用（热度模型未达 Go 门槛或不支持该彩种）⇒ 策略与随机无差别"
+
+    src = str(getattr(tl, "source", "") or "")
+    if not (src.startswith("measured_GO") or src.startswith("walk_forward")):
+        return (f"倾斜来源 {src or '未知'} 是未检验代理（无 Go 门槛）"
+                "⇒ 不许它主导选票，检验也没有意义")
+    return None
+
+
+def refresh_strategy_robustness(lotteries: Optional[Sequence[str]] = None,
                                 K: int = 20) -> Dict[str, Any]:
     """跑一次策略压力测试并落盘（夜间日报调用；双色球约 30~60 秒）。**永不抛出**。
 
-    ★ 只跑「有可测优势」的彩种（默认仅双色球）：大乐透热度模型未 Go、七星彩浮动奖权重
-      太小、数字型无浮动奖 ⇒ 优势恒为 0，跑它们只会白等。
+    ★ `lotteries=None` ⇒ **覆盖全部彩种**：能测的测，不能测的**写明理由**存进同一份缓存。
+      只写「测了的那个」会让看板显示成一行，读者无从知道另外几个是没测还是通过了。
+    ★ 实际只跑「有可测优势」的彩种：无浮动奖（数字型）、热度模型未达 Go 门槛（大乐透、
+      七乐彩、快乐8）、倾斜来源是未检验代理（排列3/排列5/七星彩）⇒ 全部只记理由。
     """
     from ev.profit import stress as ST
+
+    if lotteries is None:
+        from config import LOTTERY_CONFIG
+
+        lotteries = list(LOTTERY_CONFIG)
 
     out: Dict[str, Any] = {"生成时间": datetime.now().isoformat(timespec="seconds"),
                            "彩种": {}}
     for lot in lotteries:
         try:
+            reason = _robustness_skip_reason(lot)
+        except Exception as e:                               # noqa: BLE001
+            # 读取失败 ≠ 结构性不适用：标 `不可判`，不要写成「没东西可测」
+            out["彩种"][lot] = {"彩种": lot, "判决": "不可判", "已测": False,
+                                "原因": f"适用范围判定失败：{type(e).__name__}: {e}"[:200],
+                                "情景": []}
+            continue
+        if reason:
+            out["彩种"][lot] = {"彩种": lot, "判决": "不适用", "已测": False,
+                                "基准优势_元每注": None, "情景": [], "原因": reason}
+            continue
+        try:
             issue = _latest_target_issue(lot)
             if not issue:
-                out["彩种"][lot] = {"判决": "不可判", "原因": "无可用目标期号"}
+                # 没期号 ⇒ 根本没跑 ⇒ 与「不适用」一样按**未纳入**计（带理由，不静默消失）
+                out["彩种"][lot] = {"彩种": lot, "判决": "不可判", "已测": False,
+                                    "原因": "无可用目标期号", "情景": []}
                 continue
-            out["彩种"][lot] = ST.stress_test(lot, issue, K=K)
+            rec = dict(ST.stress_test(lot, issue, K=K))
+            rec["已测"] = True
+            out["彩种"][lot] = rec
         except Exception as e:                               # noqa: BLE001
-            out["彩种"][lot] = {"判决": "不可判",
-                                "原因": f"{type(e).__name__}: {e}"[:200]}
+            out["彩种"][lot] = {"彩种": lot, "判决": "不可判", "已测": False,
+                                "原因": f"{type(e).__name__}: {e}"[:200], "情景": []}
     try:
         ROBUSTNESS_PATH.parent.mkdir(parents=True, exist_ok=True)
         ROBUSTNESS_PATH.write_text(
@@ -334,7 +397,7 @@ def build_digest(days: int = WINDOW_DAYS) -> Dict[str, Any]:
     lag = _data_lag()
     health = _latest_health_report()
     market = _market_freshness()
-    robustness = _strategy_robustness()
+    robustness = strategy_robustness()
 
     problems: List[Dict[str, str]] = []
     for it in pipeline.get("失败明细") or []:

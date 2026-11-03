@@ -180,6 +180,23 @@ window.EXPL = (function () {
       if (v === "strong") return "warn";
       return "none";
     }
+    if (key === "robustness") {
+      // ★ 「没测」与「测了但无优势」不能共用一个状态：
+      //   前者是缺数据（unmeasured），后者是结论（none/ok），混在一起会让读者以为策略没被检验过。
+      if (d.可用 === false) return "unmeasured";
+      var ks = Object.keys(d.彩种 || {});
+      if (!ks.length) return "nodata";
+      // 只看真跑过检验的行：未纳入的彩种不是「结论」，不该参与这张卡的状态判定
+      var tested = ks.filter(function (k) { return (d.彩种[k] || {}).已测 !== false; });
+      if (!tested.length) return "none";
+      var degraded = tested.filter(function (k) {
+        var it = d.彩种[k] || {};
+        return it.判决 === "退化" || it.判决 === "脆弱";
+      });
+      if (degraded.length) return "warn";
+      var undecided = tested.filter(function (k) { return (d.彩种[k] || {}).判决 === "不可判"; });
+      return undecided.length === tested.length ? "none" : "ok";
+    }
     return "nodata";
   }
 
@@ -222,6 +239,20 @@ window.EXPL = (function () {
         if (d.未测量) return "尚未测量，请先运行 " + (S.cardMeta.gap && d.测量命令 ? d.测量命令 : "python cli.py gap");
         return "裁决：" + (((d.快照 || {}).裁决 === "strong") ? "检出缝隙（多轨一致）" :
                ((d.快照 || {}).裁决 === "weak") ? "弱线索（单轨）" : "未检出");
+      }
+      if (key === "robustness") {
+        if (d.可用 === false) return "尚未运行：" + (d.原因 || "夜间日报后生成");
+        var ks = Object.keys(d.彩种 || {});
+        if (!ks.length) return "缓存里没有任何彩种的结果";
+        var tested = ks.filter(function (k) { return (d.彩种[k] || {}).已测 !== false; });
+        var skipped = ks.length - tested.length;
+        var head = tested.map(function (k) {
+          var it = d.彩种[k] || {};
+          return k + " " + (it.判决 || "-") +
+                 "（最差保留 " + (it["最差保留率"] == null ? "—" : pct(it["最差保留率"])) + "）";
+        }).join(" · ");
+        if (!tested.length) head = "没有彩种纳入检验";
+        return head + (skipped ? " · 另 " + skipped + " 个未纳入" : "");
       }
     } catch (e) { /* fallthrough */ }
     return "";

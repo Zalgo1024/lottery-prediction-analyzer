@@ -1507,13 +1507,21 @@ def push_digest(
         ]
         rob = d.get("策略鲁棒性") or {}
         if rob.get("可用"):
-            segs = []
+            segs, skipped = [], 0
             for lot, it in (rob.get("彩种") or {}).items():
+                # ★ 「未纳入检验」的彩种不进这一行：写成一串「不适用」只会把真正的结论淹掉。
+                #   但也**不能省略不提**，否则读的人会以为其余彩种都测过且通过 ⇒ 末尾给个数。
+                if it.get("已测") is False:
+                    skipped += 1
+                    continue
                 ret = it.get("最差保留率")
                 rets = f"{ret * 100:.0f}%" if isinstance(ret, (int, float)) else "—"
                 segs.append(f"{lot} {it.get('判决')}（最差保留 {rets}）")
             if segs:
-                lines.append(f"- 策略鲁棒性：{'；'.join(segs)}")
+                # 未纳入的原因有好几种（无浮动奖 / 热度未达 Go / 本次读取失败）⇒ 正文不逐一展开，
+                # 只报个数并指向看板，避免把一句概括写成对某个彩种的断言。
+                tail = f"；另 {skipped} 个彩种未纳入检验（原因见看板）" if skipped else ""
+                lines.append(f"- 策略鲁棒性：{'；'.join(segs)}{tail}")
 
         if problems:
             lines.append(f"- 待处理 **{len(problems)} 项**：")

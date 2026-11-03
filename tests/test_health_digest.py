@@ -327,7 +327,7 @@ def test_digest_includes_strategy_robustness(env):
 
 def test_strategy_robustness_reads_cache(env):
     _write_rob_cache(H.ROBUSTNESS_PATH)
-    r = H._strategy_robustness()
+    r = H.strategy_robustness()
     assert r["可用"] is True
     item = r["彩种"]["双色球"]
     assert item["判决"] == "退化"
@@ -337,7 +337,7 @@ def test_strategy_robustness_reads_cache(env):
 
 def test_strategy_robustness_stale_is_unavailable(env):
     _write_rob_cache(H.ROBUSTNESS_PATH, age_days=10)
-    r = H._strategy_robustness()
+    r = H.strategy_robustness()
     assert r["可用"] is False
     assert "未更新" in r["原因"]
 
@@ -364,78 +364,7 @@ def test_run_digest_refreshes_when_asked(env, monkeypatch):
 def test_refresh_strategy_robustness_writes_cache(env, monkeypatch):
     """refresh 跑完必须落盘（build_digest 靠它读）。"""
     import ev.profit.stress as ST
-    monkeypatch.setattr(H, "_latest_target_issue", lambda lot: "26127")
-    monkeypatch.setattr(ST, "stress_test",
-                        lambda lot, issue, K=20, **k: {
-                            "判决": "退化", "基准优势_元每注": 0.08,
-                            "前视检查": True, "情景": []})
-    out = H.refresh_strategy_robustness(("双色球",))
-    assert out["彩种"]["双色球"]["判决"] == "退化"
-    assert H.ROBUSTNESS_PATH.exists()
-    d = json.loads(H.ROBUSTNESS_PATH.read_text(encoding="utf-8"))
-    assert d["彩种"]["双色球"]["判决"] == "退化"
-
-# ---------------------------------------------------------------- 策略鲁棒性接入
-def _write_rob_cache(path, *, 判决="退化", age_days=0.0):
-    from datetime import datetime as _dt, timedelta as _td
-    gen = (_dt.now() - _td(days=age_days)).isoformat(timespec="seconds")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({
-        "生成时间": gen,
-        "彩种": {"双色球": {
-            "判决": 判决, "基准优势_元每注": 0.0827, "前视检查": True, "原因": "x",
-            "情景": [{"情景": "热度噪声σ=0.5", "保留率": 0.36},
-                     {"情景": "拥挤度缺失", "保留率": 0.0}]}},
-    }, ensure_ascii=False), encoding="utf-8")
-
-
-def test_digest_includes_strategy_robustness(env):
-    """日报必须带上「策略鲁棒性」一节；缓存不存在时如实说未运行（不是补 0）。"""
-    d = H.build_digest(days=7)
-    assert "策略鲁棒性" in d
-    assert d["策略鲁棒性"]["可用"] is False
-    assert "尚未运行" in d["策略鲁棒性"]["原因"]
-
-
-def test_strategy_robustness_reads_cache(env):
-    _write_rob_cache(H.ROBUSTNESS_PATH)
-    r = H._strategy_robustness()
-    assert r["可用"] is True
-    item = r["彩种"]["双色球"]
-    assert item["判决"] == "退化"
-    assert item["最差保留率"] == 0.0          # min(0.36, 0.0)
-    assert item["前视检查"] is True
-
-
-def test_strategy_robustness_stale_is_unavailable(env):
-    _write_rob_cache(H.ROBUSTNESS_PATH, age_days=10)
-    r = H._strategy_robustness()
-    assert r["可用"] is False
-    assert "未更新" in r["原因"]
-
-
-def test_run_digest_default_does_not_refresh_stress(env, monkeypatch):
-    """默认不跑压力测试 —— 冷启补报与单测不该被 30~60 秒拖慢。"""
-    called = []
-    monkeypatch.setattr(H, "refresh_strategy_robustness",
-                        lambda *a, **k: called.append(1) or {})
-    env["set_status"]([])
-    H.run_digest(notify=False)
-    assert not called
-
-
-def test_run_digest_refreshes_when_asked(env, monkeypatch):
-    called = []
-    monkeypatch.setattr(H, "refresh_strategy_robustness",
-                        lambda *a, **k: called.append(1) or {})
-    env["set_status"]([])
-    H.run_digest(notify=False, refresh_stress=True)
-    assert called == [1]
-
-
-def test_refresh_strategy_robustness_writes_cache(env, monkeypatch):
-    """refresh 跑完必须落盘（build_digest 靠它读）。"""
-    import ev.profit.stress as ST
+    monkeypatch.setattr(H, "_robustness_skip_reason", lambda lot: None)
     monkeypatch.setattr(H, "_latest_target_issue", lambda lot: "26127")
     monkeypatch.setattr(ST, "stress_test",
                         lambda lot, issue, K=20, **k: {
@@ -474,29 +403,92 @@ def test_push_digest_omits_robustness_when_unavailable(monkeypatch):
                    "策略鲁棒性": {"可用": False, "原因": "尚未运行"}})
     assert "策略鲁棒性" not in sent[0][1]
 
-def test_push_digest_includes_strategy_robustness(monkeypatch):
-    """有问题时推送文案要带上「策略鲁棒性」一行（可用才带，不可用不臆造）。"""
+# ---------------------------------------------------------------- 覆盖全部彩种（缺席≠通过）
+def test_refresh_covers_every_lottery_with_explicit_reason(env, monkeypatch):
+    """默认跑**全部**彩种：能测的测，不能测的存下理由。
+
+    ★ 只写「测了的那个」会让看板显示成一行，读者无从知道另外几个是「没测」还是「通过了」。
+      所以缓存里必须每个彩种都有一条，未测的带 `已测=False` + 原因。
+    """
+    from config import LOTTERY_CONFIG
+
+    reasons = {lot: ("无浮动奖" if lot != "双色球" else None) for lot in LOTTERY_CONFIG}
+    monkeypatch.setattr(H, "_robustness_skip_reason", lambda lot: reasons.get(lot))
+    monkeypatch.setattr(H, "_latest_target_issue", lambda lot: "26127")
+    import ev.profit.stress as ST
+    monkeypatch.setattr(ST, "stress_test", lambda lot, issue, K=20, **k: {
+        "判决": "退化", "基准优势_元每注": 0.08, "前视检查": True, "情景": []})
+
+    out = H.refresh_strategy_robustness()          # 不传 ⇒ 全部彩种
+    assert set(out["彩种"]) == set(LOTTERY_CONFIG)
+    assert out["彩种"]["双色球"]["已测"] is True
+    for lot in LOTTERY_CONFIG:
+        if lot == "双色球":
+            continue
+        assert out["彩种"][lot]["已测"] is False
+        assert out["彩种"][lot]["原因"] == "无浮动奖"
+
+    r = H.strategy_robustness()
+    assert r["已检验"] == ["双色球"]
+    assert set(r["未纳入"]) == set(LOTTERY_CONFIG) - {"双色球"}
+
+
+def test_skip_reason_is_structural_not_guesswork():
+    """未纳入的理由必须来自结构性事实（无浮动奖 / 倾斜不可用），不是编的。"""
+    # 数字型（无浮动奖）⇒ 一定给出理由，且点明「没有可测的东西」
+    for lot in ("排列3", "福彩3D", "排列5"):
+        why = H._robustness_skip_reason(lot)
+        assert why and ("无浮动奖" in why or "倾斜" in why), (lot, why)
+
+
+def test_push_digest_counts_skipped_lotteries(monkeypatch):
+    """未纳入的彩种不进正文，但必须在行末给出数量（否则读者以为都测过了）。"""
     import data.push_notify as P
     sent = []
     _patch_push(monkeypatch, sent)
     P.push_digest({"窗口天数": 7, "结论": "有 1 项需要处理",
-                   "问题": [{"彩种": "双色球", "项": "注数不一致", "详情": "x"}],
-                   "流水线": {"总次数": 3, "成功": 3, "失败": 0},
-                   "注数一致性": {"全部一致": True}, "数据滞后": [],
-                   "策略鲁棒性": {"可用": True, "彩种": {"双色球": {
-                       "判决": "退化", "最差保留率": 0.0}}}})
-    assert len(sent) == 1
-    body = sent[0][1]
-    assert "策略鲁棒性" in body and "退化" in body and "最差保留 0%" in body
-
-
-def test_push_digest_omits_robustness_when_unavailable(monkeypatch):
-    """缓存不可用时不得臆造这一行。"""
-    import data.push_notify as P
-    sent = []
-    _patch_push(monkeypatch, sent)
-    P.push_digest({"窗口天数": 7, "结论": "有 1 项需要处理",
-                   "问题": [{"彩种": "双色球", "项": "注数不一致", "详情": "x"}],
+                   "问题": [{"彩种": "双色球", "项": "x", "详情": "y"}],
                    "流水线": {}, "注数一致性": {"全部一致": True}, "数据滞后": [],
-                   "策略鲁棒性": {"可用": False, "原因": "尚未运行"}})
-    assert "策略鲁棒性" not in sent[0][1]
+                   "策略鲁棒性": {"可用": True, "彩种": {
+                       "双色球": {"判决": "退化", "最差保留率": 0.0, "已测": True},
+                       "排列3": {"判决": "不适用", "已测": False, "原因": "无浮动奖"},
+                       "大乐透": {"判决": "不适用", "已测": False, "原因": "倾斜不可用"}}}})
+    body = sent[0][1]
+    assert "双色球 退化" in body
+    assert "排列3" not in body and "大乐透" not in body   # 不把「不适用」堆进正文
+    assert "另 2 个彩种未纳入检验" in body                  # 但必须报个数
+
+def test_skip_check_failure_is_undecidable_not_inapplicable(env, monkeypatch):
+    """判定过程抛错 ⇒ 记「不可判」，不许写成「不适用」。
+
+    ★ 两者含义不同：不适用=结构上没有可测的东西（永远如此）；不可判=这次没跑成（可能是临时故障）。
+      混用会把一次读取失败永久写成结构性结论，以后再也没人回头查。
+    """
+    def _boom(_lot):
+        raise RuntimeError("模型读不到")
+
+    monkeypatch.setattr(H, "_robustness_skip_reason", _boom)
+    out = H.refresh_strategy_robustness(("双色球",))
+    r = out["彩种"]["双色球"]
+    assert r["判决"] == "不可判"
+    assert r["已测"] is False
+    assert "判定失败" in r["原因"]
+
+    api = H.strategy_robustness()
+    assert api["已检验"] == [] and api["未纳入"] == ["双色球"]
+
+
+def test_stress_failure_is_undecidable_and_not_counted_as_tested(env, monkeypatch):
+    """压力检验本身抛错 ⇒ 同样按「未纳入」计（带原因），不得计成已检验。"""
+    monkeypatch.setattr(H, "_robustness_skip_reason", lambda lot: None)
+    monkeypatch.setattr(H, "_latest_target_issue", lambda lot: "26127")
+    import ev.profit.stress as ST
+
+    def _boom(*a, **k):
+        raise RuntimeError("模拟测量失败")
+
+    monkeypatch.setattr(ST, "stress_test", _boom)
+    out = H.refresh_strategy_robustness(("双色球",))
+    r = out["彩种"]["双色球"]
+    assert r["判决"] == "不可判" and r["已测"] is False
+    assert "模拟测量失败" in r["原因"]

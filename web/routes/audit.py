@@ -1,5 +1,5 @@
 """
-测量与证据看板 Web 路由（八块只读指标）
+测量与证据看板 Web 路由（只读指标，卡片清单见 `web.audit_glossary._CARDS`）
 
 ★ 页面在导航里叫「证据看板」（侧栏「测量与证据看板」），本 docstring、导航 note、
   模板 h2 三处用同一句话，避免重演「三者各说一套」。
@@ -16,6 +16,7 @@
 - GET /api/audit/attribution_global       ⑦ 六彩种归因汇总
 - GET /api/audit/gap/<lottery>            ⑧ 机制缝隙测量状态卡（四轨裁决）
 - GET /api/audit/gap_global               ⑧ 六彩种缝隙测量汇总
+- GET /api/audit/robustness               ⑨ 策略鲁棒性（压力检验：优势在失真下是否存活）
 - GET /api/audit/glossary                 本页术语与卡片口径（文案单一真源）
 
 定位：只呈现已测量的结果与它们的适用边界，不输出任何"中奖承诺"。
@@ -276,6 +277,25 @@ def api_gap_global():
     from ev.mechanism.snapshot import mechanism_snapshot_all
 
     return jsonify(mechanism_snapshot_all())
+
+
+@bp.route("/api/audit/robustness")
+@api_error_handler
+def api_robustness():
+    """策略鲁棒性：盈利排序策略在「热度失真 / 拥挤度缺失」下相对随机基线还剩多少优势。
+
+    ★ 只读夜间缓存（`health_digest.refresh_strategy_robustness` 落盘），本接口**不触发**
+      那次约 40 秒的测量 —— 页面刷新不该等于重跑一次压力测试。
+
+    ★ 三条诚实纪律（对应 `web/health_digest.strategy_robustness` 的口径）：
+      ① 缓存缺失或陈旧 ⇒ 回 `可用=False` + 原因，**绝不补 0**（0% 与「没测」是两件事）；
+      ② 「无优势」也是结论而不是故障（该彩种没有可用的分奖杠杆），前端按类型渲染、不进红框；
+      ③ 保留率的分母是**基准优势**，基准优势 ≤0 时上游返回 `None` ⇒ 这里照传 `None`，
+         不做「除以接近 0」的除法去凑一个看起来很大的百分比。
+    """
+    from web.health_digest import strategy_robustness
+
+    return jsonify(strategy_robustness())
 
 
 @bp.route("/api/audit/glossary")

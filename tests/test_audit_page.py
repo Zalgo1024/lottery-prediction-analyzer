@@ -32,6 +32,7 @@ WEB = ROOT / "web"
 CARD_IDS = (
     "hn-quality", "hn-ev", "hn-pl", "hn-distance",
     "hn-payout", "hn-trials", "hn-attribution", "hn-gap",
+    "hn-robustness",                       # ⑨ 策略鲁棒性（11-04 新增）
 )
 # 旧页面名（改名后不许在 web/ 里再出现）
 OLD_PAGE_NAMES = ("数据体检看板",)
@@ -85,7 +86,7 @@ def test_glossary_api_contract(glossary):
     for key in ("术语", "卡片", "状态口径", "悬停提示", "口径说明", "诚实边界", "诚实声明"):
         assert key in glossary, "glossary 缺键 %s" % key
     assert glossary["悬停提示"], "「悬停提示」不能是空的（否则用户不知道要悬停 2 秒）"
-    assert len(glossary["卡片"]) == 8
+    assert len(glossary["卡片"]) == 9
     assert [c["id"] for c in glossary["卡片"]] == list(CARD_IDS)
 
 
@@ -259,3 +260,95 @@ def test_hover_uses_delayed_ring_not_instant_pop(client):
     # 6. 无障碍：读秒期间不能只靠鼠标（点击/键盘仍可立即弹出）
     assert re.search(r"focusin[\s\S]{0,160}showPop", js), "键盘聚焦应直接弹出，不走 2 秒延迟"
     assert "prefers-reduced-motion" in css
+
+# ---------------------------------------------------------------- ⑨ 策略鲁棒性
+def _write_rob_cache(path, *, age_days=0.0, retention=0.0):
+    from datetime import datetime as _dt, timedelta as _td
+    gen = (_dt.now() - _td(days=age_days)).isoformat(timespec="seconds")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "生成时间": gen,
+        "彩种": {"双色球": {
+            "判决": "退化", "基准优势_元每注": 0.0827, "前视检查": True,
+            "期号": "26127", "K": 20, "判据版本": "2026-11-04-A", "原因": "无信息即无优势",
+            "情景": [{"情景": "热度噪声σ=0.5", "优势_元每注": 0.0296, "保留率": 0.36,
+                      "仍优于随机": True},
+                     {"情景": "拥挤度缺失", "优势_元每注": 0.0, "保留率": retention,
+                      "仍优于随机": False}]}},
+    }, ensure_ascii=False), encoding="utf-8")
+
+
+def test_robustness_api_未运行时不补零(client, monkeypatch, tmp_path):
+    """缓存不存在 ⇒ 明确说「尚未运行」，**绝不返回一串 0**。
+
+    ★ 0% 与「没测」是两件事：前者是结论（优势归零），后者是缺数据。
+      混用会让读者以为策略「测得退化」，实际是压根没跑过。
+    """
+    import web.health_digest as H
+
+    monkeypatch.setattr(H, "ROBUSTNESS_PATH", tmp_path / "none.json")
+    d = client.get("/api/audit/robustness").get_json()
+    assert d["可用"] is False
+    assert "尚未运行" in d["原因"]
+    assert "彩种" not in d, "没测过时不许带一份空/零的结果表"
+
+
+def test_robustness_api_reads_cache_with_scenarios(client, monkeypatch, tmp_path):
+    import web.health_digest as H
+
+    p = tmp_path / "rob.json"
+    _write_rob_cache(p)
+    monkeypatch.setattr(H, "ROBUSTNESS_PATH", p)
+    d = client.get("/api/audit/robustness").get_json()
+    assert d["可用"] is True and d["生成时间"]
+    it = d["彩种"]["双色球"]
+    assert it["判决"] == "退化" and it["最差保留率"] == 0.0
+    assert it["前视检查"] is True and it["期号"] == "26127"
+    # 情景曲线要能透传（页面靠它展示「优势随失真衰减」，只有一个最差值无法判断）
+    assert [s["情景"] for s in it["情景"]][:2] == ["热度噪声σ=0.5", "拥挤度缺失"]
+
+
+def test_robustness_api_stale_cache_says_so(client, monkeypatch, tmp_path):
+    """超过 3 天判陈旧 —— 陈旧数据不许冒充当前结论。"""
+    import web.health_digest as H
+
+    p = tmp_path / "old.json"
+    _write_rob_cache(p, age_days=10)
+    monkeypatch.setattr(H, "ROBUSTNESS_PATH", p)
+    d = client.get("/api/audit/robustness").get_json()
+    assert d["可用"] is False
+    assert "未更新" in d["原因"]
+
+
+def test_robustness_card_wired_into_page(client):
+    """新卡必须真的被模板渲染、且被 loadAll 调用（只加术语不加载 = 永远空白）。"""
+    html = client.get("/audit").get_data(as_text=True)
+    assert 'id="hn-robustness"' in html
+    assert 'data-card="robustness"' in html
+    assert "loadRobustness(lot)" in html
+    assert 'id="oneline-robustness"' in html
+
+def test_robustness_api_separates_tested_from_skipped(client, monkeypatch, tmp_path):
+    """已检验 / 未纳入必须分开给 —— 未纳入的彩种要带理由，不能凭空消失。"""
+    import web.health_digest as H
+
+    p = tmp_path / "mix.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({
+        "生成时间": __import__("datetime").datetime.now().isoformat(timespec="seconds"),
+        "彩种": {
+            "双色球": {"判决": "退化", "已测": True, "基准优势_元每注": 0.08,
+                       "前视检查": True, "情景": [{"情景": "拥挤度缺失", "保留率": 0.0}]},
+            "排列3": {"判决": "不适用", "已测": False, "情景": [],
+                      "原因": "无浮动奖 ⇒ 优势只可能来自分奖"},
+        },
+    }, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(H, "ROBUSTNESS_PATH", p)
+
+    d = client.get("/api/audit/robustness").get_json()
+    assert d["已检验"] == ["双色球"]
+    assert d["未纳入"] == ["排列3"]
+    assert d["彩种"]["排列3"]["已测"] is False
+    assert "无浮动奖" in d["彩种"]["排列3"]["原因"]
+    # 未纳入的行不许伪造数值
+    assert d["彩种"]["排列3"]["最差保留率"] is None
