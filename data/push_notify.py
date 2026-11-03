@@ -1505,6 +1505,16 @@ def push_digest(
             + (f"（{'; '.join(str(r['彩种']) + ' ' + str(r['滞后天数']) + '天' for r in lag_bad[:3])}）"
                if lag_bad else ""),
         ]
+        rob = d.get("策略鲁棒性") or {}
+        if rob.get("可用"):
+            segs = []
+            for lot, it in (rob.get("彩种") or {}).items():
+                ret = it.get("最差保留率")
+                rets = f"{ret * 100:.0f}%" if isinstance(ret, (int, float)) else "—"
+                segs.append(f"{lot} {it.get('判决')}（最差保留 {rets}）")
+            if segs:
+                lines.append(f"- 策略鲁棒性：{'；'.join(segs)}")
+
         if problems:
             lines.append(f"- 待处理 **{len(problems)} 项**：")
             for p in problems[:HEALTH_MAX_ITEMS]:

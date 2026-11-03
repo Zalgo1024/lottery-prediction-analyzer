@@ -444,7 +444,7 @@ class AutoScheduler:
         def _run():
             try:
                 from web.health_digest import maybe_run
-                res = maybe_run()
+                res = maybe_run(refresh_stress=True)
                 if res:
                     logger.info(f"离线体检已执行: {res.get('已执行')}")
             except Exception as e:

@@ -34,7 +34,7 @@ import logging
 import os
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -237,6 +237,89 @@ def _latest_health_report() -> Dict[str, Any]:
 # ------------------------------------------------------------
 # 组装
 # ------------------------------------------------------------
+# ------------------------------------------------------------------
+# 策略鲁棒性（夜间跑一次、落盘；build_digest 只读缓存）
+# ------------------------------------------------------------------
+ROBUSTNESS_PATH = BASE_DIR / "logs" / "automation" / "strategy_robustness.json"
+ROBUSTNESS_MAX_AGE_DAYS = 3
+
+
+def _worst_retention(r: Dict[str, Any]) -> Optional[float]:
+    rets = [s.get("保留率") for s in (r.get("情景") or [])
+            if isinstance(s.get("保留率"), (int, float))]
+    return min(rets) if rets else None
+
+
+def _strategy_robustness() -> Dict[str, Any]:
+    """读取策略鲁棒性缓存（夜间 refresh 写入）。**纯只读、快**，可在 Web 请求里调。"""
+    try:
+        if not ROBUSTNESS_PATH.exists():
+            return {"可用": False, "原因": "尚未运行（夜间日报后生成）"}
+        d = json.loads(ROBUSTNESS_PATH.read_text(encoding="utf-8"))
+    except Exception as e:                                   # noqa: BLE001
+        return {"可用": False, "原因": f"读取失败：{type(e).__name__}: {e}"[:200]}
+
+    try:
+        gen = datetime.fromisoformat(str(d.get("生成时间")))
+        age = (datetime.now() - gen).total_seconds() / 86400.0
+        if age > ROBUSTNESS_MAX_AGE_DAYS:
+            return {"可用": False,
+                    "原因": f"缓存已 {age:.1f} 天未更新（> {ROBUSTNESS_MAX_AGE_DAYS} 天）",
+                    "生成时间": d.get("生成时间")}
+    except Exception:                                        # noqa: BLE001
+        pass
+
+    out: Dict[str, Any] = {"可用": True, "生成时间": d.get("生成时间"), "彩种": {}}
+    for lot, r in (d.get("彩种") or {}).items():
+        out["彩种"][lot] = {
+            "判决": r.get("判决"),
+            "基准优势_元每注": r.get("基准优势_元每注"),
+            "最差保留率": _worst_retention(r),
+            "前视检查": r.get("前视检查"),
+            "原因": r.get("原因"),
+        }
+    return out
+
+
+def _latest_target_issue(lottery: str) -> Optional[str]:
+    try:
+        from data import feedback as fb
+        prod = fb.latest_production_pending(fb.load_pending(lottery))
+        return (prod or {}).get("目标期号")
+    except Exception:                                        # noqa: BLE001
+        return None
+
+
+def refresh_strategy_robustness(lotteries: Sequence[str] = ("双色球",),
+                                K: int = 20) -> Dict[str, Any]:
+    """跑一次策略压力测试并落盘（夜间日报调用；双色球约 30~60 秒）。**永不抛出**。
+
+    ★ 只跑「有可测优势」的彩种（默认仅双色球）：大乐透热度模型未 Go、七星彩浮动奖权重
+      太小、数字型无浮动奖 ⇒ 优势恒为 0，跑它们只会白等。
+    """
+    from ev.profit import stress as ST
+
+    out: Dict[str, Any] = {"生成时间": datetime.now().isoformat(timespec="seconds"),
+                           "彩种": {}}
+    for lot in lotteries:
+        try:
+            issue = _latest_target_issue(lot)
+            if not issue:
+                out["彩种"][lot] = {"判决": "不可判", "原因": "无可用目标期号"}
+                continue
+            out["彩种"][lot] = ST.stress_test(lot, issue, K=K)
+        except Exception as e:                               # noqa: BLE001
+            out["彩种"][lot] = {"判决": "不可判",
+                                "原因": f"{type(e).__name__}: {e}"[:200]}
+    try:
+        ROBUSTNESS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        ROBUSTNESS_PATH.write_text(
+            json.dumps(out, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    except Exception as e:                                   # noqa: BLE001
+        logger.warning(f"策略鲁棒性落盘失败: {e}")
+    return out
+
+
 def build_digest(days: int = WINDOW_DAYS) -> Dict[str, Any]:
     """汇总过去 N 天的运行事实。纯只读，可在 Web 请求里直接调。
 
@@ -251,6 +334,7 @@ def build_digest(days: int = WINDOW_DAYS) -> Dict[str, Any]:
     lag = _data_lag()
     health = _latest_health_report()
     market = _market_freshness()
+    robustness = _strategy_robustness()
 
     problems: List[Dict[str, str]] = []
     for it in pipeline.get("失败明细") or []:
@@ -294,6 +378,7 @@ def build_digest(days: int = WINDOW_DAYS) -> Dict[str, Any]:
         "数据滞后": lag,
         "全量体检": health,
         "开奖数据库": market,
+        "策略鲁棒性": robustness,
     }
 
 
@@ -336,8 +421,18 @@ def _write_digest(d: Dict[str, Any]) -> Path:
     return p
 
 
-def run_digest(*, notify: bool = True, days: int = WINDOW_DAYS) -> Dict[str, Any]:
-    """生成并落盘一份日报；有问题时推送。返回 digest 字典。"""
+def run_digest(*, notify: bool = True, days: int = WINDOW_DAYS,
+               refresh_stress: bool = False) -> Dict[str, Any]:
+    """生成并落盘一份日报；有问题时推送。返回 digest 字典。
+
+    `refresh_stress=True`（夜间调度传）⇒ 先跑一次策略鲁棒性并落盘，供 `build_digest` 读取。
+    默认关闭：冷启补报与单测不该被 30~60 秒的压力测试拖慢。
+    """
+    if refresh_stress:
+        try:
+            refresh_strategy_robustness()
+        except Exception as e:                               # noqa: BLE001
+            logger.warning(f"策略鲁棒性刷新失败(降级): {e}")
     d = build_digest(days)
     try:
         d["本地文件"] = str(_write_digest(d))
@@ -387,7 +482,8 @@ def is_due(now: Optional[datetime] = None, *, cold_start: bool = False) -> bool:
 
 
 def maybe_run(now: Optional[datetime] = None, *, cold_start: bool = False,
-              notify: bool = True) -> Optional[Dict[str, Any]]:
+              notify: bool = True,
+              refresh_stress: bool = False) -> Optional[Dict[str, Any]]:
     """到点就跑，同一时点一天只跑一次。
 
     两个独立时点（互不挤占）：
@@ -414,7 +510,7 @@ def maybe_run(now: Optional[datetime] = None, *, cold_start: bool = False,
     due_daily = (now.hour, now.minute) >= (DIGEST_HOUR, DIGEST_MINUTE)
     if due_daily and st.get("last_daily") != today:
         try:
-            run_digest(notify=notify)
+            run_digest(notify=notify, refresh_stress=refresh_stress)
         except Exception as e:
             logger.warning(f"日报失败: {e}")
         else:

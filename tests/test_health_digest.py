@@ -36,6 +36,10 @@ def env(tmp_path, monkeypatch):
     status = tmp_path / "status.json"
     monkeypatch.setattr(H, "STATUS_FILE", status)
     monkeypatch.setattr(H, "DIGEST_DIR", tmp_path / "automation")
+    # ★ 策略鲁棒性缓存也要钉到 tmp：否则 build_digest 会读到真实 logs/automation 下的
+    #   生产缓存（夜间日报写入），用例随运行时刻飘红。
+    monkeypatch.setattr(H, "ROBUSTNESS_PATH",
+                        tmp_path / "automation" / "strategy_robustness.json")
     monkeypatch.setattr(H, "HEALTH_DIR", tmp_path / "health")
     monkeypatch.setattr(H, "STATE_PATH", tmp_path / "digest_state.json")
     monkeypatch.setattr(H, "HEALTH_DIR", tmp_path / "health")
@@ -298,3 +302,201 @@ def test_api_digest_does_not_pollute_cache(env):
     app.register_blueprint(bp)
     app.test_client().get("/api/system/digest?days=7")
     assert "ok" not in (H._CACHE.get("7") or (0, {}))[1]
+
+# ---------------------------------------------------------------- 策略鲁棒性接入
+def _write_rob_cache(path, *, 判决="退化", age_days=0.0):
+    from datetime import datetime as _dt, timedelta as _td
+    gen = (_dt.now() - _td(days=age_days)).isoformat(timespec="seconds")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "生成时间": gen,
+        "彩种": {"双色球": {
+            "判决": 判决, "基准优势_元每注": 0.0827, "前视检查": True, "原因": "x",
+            "情景": [{"情景": "热度噪声σ=0.5", "保留率": 0.36},
+                     {"情景": "拥挤度缺失", "保留率": 0.0}]}},
+    }, ensure_ascii=False), encoding="utf-8")
+
+
+def test_digest_includes_strategy_robustness(env):
+    """日报必须带上「策略鲁棒性」一节；缓存不存在时如实说未运行（不是补 0）。"""
+    d = H.build_digest(days=7)
+    assert "策略鲁棒性" in d
+    assert d["策略鲁棒性"]["可用"] is False
+    assert "尚未运行" in d["策略鲁棒性"]["原因"]
+
+
+def test_strategy_robustness_reads_cache(env):
+    _write_rob_cache(H.ROBUSTNESS_PATH)
+    r = H._strategy_robustness()
+    assert r["可用"] is True
+    item = r["彩种"]["双色球"]
+    assert item["判决"] == "退化"
+    assert item["最差保留率"] == 0.0          # min(0.36, 0.0)
+    assert item["前视检查"] is True
+
+
+def test_strategy_robustness_stale_is_unavailable(env):
+    _write_rob_cache(H.ROBUSTNESS_PATH, age_days=10)
+    r = H._strategy_robustness()
+    assert r["可用"] is False
+    assert "未更新" in r["原因"]
+
+
+def test_run_digest_default_does_not_refresh_stress(env, monkeypatch):
+    """默认不跑压力测试 —— 冷启补报与单测不该被 30~60 秒拖慢。"""
+    called = []
+    monkeypatch.setattr(H, "refresh_strategy_robustness",
+                        lambda *a, **k: called.append(1) or {})
+    env["set_status"]([])
+    H.run_digest(notify=False)
+    assert not called
+
+
+def test_run_digest_refreshes_when_asked(env, monkeypatch):
+    called = []
+    monkeypatch.setattr(H, "refresh_strategy_robustness",
+                        lambda *a, **k: called.append(1) or {})
+    env["set_status"]([])
+    H.run_digest(notify=False, refresh_stress=True)
+    assert called == [1]
+
+
+def test_refresh_strategy_robustness_writes_cache(env, monkeypatch):
+    """refresh 跑完必须落盘（build_digest 靠它读）。"""
+    import ev.profit.stress as ST
+    monkeypatch.setattr(H, "_latest_target_issue", lambda lot: "26127")
+    monkeypatch.setattr(ST, "stress_test",
+                        lambda lot, issue, K=20, **k: {
+                            "判决": "退化", "基准优势_元每注": 0.08,
+                            "前视检查": True, "情景": []})
+    out = H.refresh_strategy_robustness(("双色球",))
+    assert out["彩种"]["双色球"]["判决"] == "退化"
+    assert H.ROBUSTNESS_PATH.exists()
+    d = json.loads(H.ROBUSTNESS_PATH.read_text(encoding="utf-8"))
+    assert d["彩种"]["双色球"]["判决"] == "退化"
+
+# ---------------------------------------------------------------- 策略鲁棒性接入
+def _write_rob_cache(path, *, 判决="退化", age_days=0.0):
+    from datetime import datetime as _dt, timedelta as _td
+    gen = (_dt.now() - _td(days=age_days)).isoformat(timespec="seconds")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "生成时间": gen,
+        "彩种": {"双色球": {
+            "判决": 判决, "基准优势_元每注": 0.0827, "前视检查": True, "原因": "x",
+            "情景": [{"情景": "热度噪声σ=0.5", "保留率": 0.36},
+                     {"情景": "拥挤度缺失", "保留率": 0.0}]}},
+    }, ensure_ascii=False), encoding="utf-8")
+
+
+def test_digest_includes_strategy_robustness(env):
+    """日报必须带上「策略鲁棒性」一节；缓存不存在时如实说未运行（不是补 0）。"""
+    d = H.build_digest(days=7)
+    assert "策略鲁棒性" in d
+    assert d["策略鲁棒性"]["可用"] is False
+    assert "尚未运行" in d["策略鲁棒性"]["原因"]
+
+
+def test_strategy_robustness_reads_cache(env):
+    _write_rob_cache(H.ROBUSTNESS_PATH)
+    r = H._strategy_robustness()
+    assert r["可用"] is True
+    item = r["彩种"]["双色球"]
+    assert item["判决"] == "退化"
+    assert item["最差保留率"] == 0.0          # min(0.36, 0.0)
+    assert item["前视检查"] is True
+
+
+def test_strategy_robustness_stale_is_unavailable(env):
+    _write_rob_cache(H.ROBUSTNESS_PATH, age_days=10)
+    r = H._strategy_robustness()
+    assert r["可用"] is False
+    assert "未更新" in r["原因"]
+
+
+def test_run_digest_default_does_not_refresh_stress(env, monkeypatch):
+    """默认不跑压力测试 —— 冷启补报与单测不该被 30~60 秒拖慢。"""
+    called = []
+    monkeypatch.setattr(H, "refresh_strategy_robustness",
+                        lambda *a, **k: called.append(1) or {})
+    env["set_status"]([])
+    H.run_digest(notify=False)
+    assert not called
+
+
+def test_run_digest_refreshes_when_asked(env, monkeypatch):
+    called = []
+    monkeypatch.setattr(H, "refresh_strategy_robustness",
+                        lambda *a, **k: called.append(1) or {})
+    env["set_status"]([])
+    H.run_digest(notify=False, refresh_stress=True)
+    assert called == [1]
+
+
+def test_refresh_strategy_robustness_writes_cache(env, monkeypatch):
+    """refresh 跑完必须落盘（build_digest 靠它读）。"""
+    import ev.profit.stress as ST
+    monkeypatch.setattr(H, "_latest_target_issue", lambda lot: "26127")
+    monkeypatch.setattr(ST, "stress_test",
+                        lambda lot, issue, K=20, **k: {
+                            "判决": "退化", "基准优势_元每注": 0.08,
+                            "前视检查": True, "情景": []})
+    out = H.refresh_strategy_robustness(("双色球",))
+    assert out["彩种"]["双色球"]["判决"] == "退化"
+    assert H.ROBUSTNESS_PATH.exists()
+    d = json.loads(H.ROBUSTNESS_PATH.read_text(encoding="utf-8"))
+    assert d["彩种"]["双色球"]["判决"] == "退化"
+
+def test_push_digest_includes_strategy_robustness(monkeypatch):
+    """有问题时推送文案要带上「策略鲁棒性」一行（可用才带，不可用不臆造）。"""
+    import data.push_notify as P
+    sent = []
+    _patch_push(monkeypatch, sent)
+    P.push_digest({"窗口天数": 7, "结论": "有 1 项需要处理",
+                   "问题": [{"彩种": "双色球", "项": "注数不一致", "详情": "x"}],
+                   "流水线": {"总次数": 3, "成功": 3, "失败": 0},
+                   "注数一致性": {"全部一致": True}, "数据滞后": [],
+                   "策略鲁棒性": {"可用": True, "彩种": {"双色球": {
+                       "判决": "退化", "最差保留率": 0.0}}}})
+    assert len(sent) == 1
+    body = sent[0][1]
+    assert "策略鲁棒性" in body and "退化" in body and "最差保留 0%" in body
+
+
+def test_push_digest_omits_robustness_when_unavailable(monkeypatch):
+    """缓存不可用时不得臆造这一行。"""
+    import data.push_notify as P
+    sent = []
+    _patch_push(monkeypatch, sent)
+    P.push_digest({"窗口天数": 7, "结论": "有 1 项需要处理",
+                   "问题": [{"彩种": "双色球", "项": "注数不一致", "详情": "x"}],
+                   "流水线": {}, "注数一致性": {"全部一致": True}, "数据滞后": [],
+                   "策略鲁棒性": {"可用": False, "原因": "尚未运行"}})
+    assert "策略鲁棒性" not in sent[0][1]
+
+def test_push_digest_includes_strategy_robustness(monkeypatch):
+    """有问题时推送文案要带上「策略鲁棒性」一行（可用才带，不可用不臆造）。"""
+    import data.push_notify as P
+    sent = []
+    _patch_push(monkeypatch, sent)
+    P.push_digest({"窗口天数": 7, "结论": "有 1 项需要处理",
+                   "问题": [{"彩种": "双色球", "项": "注数不一致", "详情": "x"}],
+                   "流水线": {"总次数": 3, "成功": 3, "失败": 0},
+                   "注数一致性": {"全部一致": True}, "数据滞后": [],
+                   "策略鲁棒性": {"可用": True, "彩种": {"双色球": {
+                       "判决": "退化", "最差保留率": 0.0}}}})
+    assert len(sent) == 1
+    body = sent[0][1]
+    assert "策略鲁棒性" in body and "退化" in body and "最差保留 0%" in body
+
+
+def test_push_digest_omits_robustness_when_unavailable(monkeypatch):
+    """缓存不可用时不得臆造这一行。"""
+    import data.push_notify as P
+    sent = []
+    _patch_push(monkeypatch, sent)
+    P.push_digest({"窗口天数": 7, "结论": "有 1 项需要处理",
+                   "问题": [{"彩种": "双色球", "项": "注数不一致", "详情": "x"}],
+                   "流水线": {}, "注数一致性": {"全部一致": True}, "数据滞后": [],
+                   "策略鲁棒性": {"可用": False, "原因": "尚未运行"}})
+    assert "策略鲁棒性" not in sent[0][1]
