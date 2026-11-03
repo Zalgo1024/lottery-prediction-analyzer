@@ -79,7 +79,15 @@ def ev_proxy(lottery: str, rows: np.ndarray, scores: np.ndarray,
         p = _uniform_prob(r, h, j)
         if p <= 0:
             continue
-        w = float(p_j[j]) * p
+        # ★ 2026-11-03 修：`_uniform_prob` 返回的已经是**联合概率 P(h,j)**
+        #   （内部乘过 `inner_multiplicity[j] / inner_size`）。原来这里又乘一次
+        #   `p_j[j]`，等于内层概率算了两遍。实测（双色球单票，同一口径下 monkeypatch 复原）：
+        #     仅固定奖 0.0934 → 0.4863（旧值只有真实的 19.2%）
+        #     含浮动奖 0.2457 → 1.1754（旧值 20.9%）
+        #   扭曲是**按 j 分类**的（j=1 的格被压到 1/16，j=0 的格几乎不变），
+        #   所以：同彩种内每票内层结构相同 ⇒ 排序不变；但**绝对水平只有真实的 ~1/5**，
+        #   不能拿去和成本/返奖率对账（1.1754/2 = 58.8% 名义返奖，才是合理量级）。
+        w = float(p)
         if gr.kind == "fixed":
             ev += w * float(gr.fixed)
         else:
