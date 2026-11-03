@@ -251,38 +251,94 @@ def _decide_core(lottery: str, issue: Any, tickets: Optional[Sequence[dict]] = N
     return out
 
 
+def _stress_gate(upstream: str, st: Dict[str, Any]) -> Dict[str, Any]:
+    """把鲁棒性判决折进上游判决 —— **只降级不升级**（与包络闸门同款）。
+
+    为什么只降不升：鲁棒性检验回答的是「优势在模型失真下是否还活着」，
+    它没有能力**创造**优势（基准优势本身就是上游模型给的），所以只能否决。
+    """
+    rob = st.get("判决")
+    if upstream == VERDICT_NO_DATA:
+        return {"是否降级": False, "最终判决": upstream,
+                "原因": f"上游不出结论；鲁棒性={rob}"}
+    if upstream == VERDICT_REJECT:
+        return {"是否降级": False, "最终判决": upstream,
+                "原因": f"上游已不建议参与；鲁棒性={rob}（作为证据附加）"}
+    # upstream == VERDICT_PARTICIPATE
+    if rob in ("退化", "无优势"):
+        return {"是否降级": True, "最终判决": VERDICT_REJECT,
+                "原因": (f"鲁棒性判决={rob}：{st.get('原因', '')} ⇒ 相对随机基线无稳健优势，"
+                         "由「条件性可参与」降为不建议参与")}
+    if rob == "脆弱":
+        return {"是否降级": False, "最终判决": upstream,
+                "原因": "鲁棒性=脆弱（优势部分依赖模型准确性）：保留条件性可参与但须标注"}
+    return {"是否降级": False, "最终判决": upstream,
+            "原因": f"鲁棒性={rob}，保留上游判决"}
+
+
+def _apply_stress_gate(out: Dict[str, Any], lottery: str, issue: Any, *,
+                       K: int, stress_kwargs: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """跑压力测试并把证据挂到 `out["鲁棒性"]`，必要时降级。"""
+    from ev.profit import stress as ST
+
+    upstream = out.get("判决")
+    try:
+        st = ST.stress_test(lottery, issue, K=K, **(stress_kwargs or {}))
+    except Exception as e:                                   # noqa: BLE001
+        out["鲁棒性"] = {"ok": False, "原因": f"{type(e).__name__}: {e}"[:200]}
+        out["鲁棒性闸门"] = {"是否降级": False, "最终判决": upstream,
+                           "原因": "压力测试失败，未改变判决"}
+        return out
+
+    out["鲁棒性"] = st
+    gate = _stress_gate(upstream, st)
+    out["鲁棒性闸门"] = gate
+    if gate["是否降级"]:
+        out["上游判决"] = upstream
+        out["判决"] = gate["最终判决"]
+        out["原因"] = gate["原因"]
+        out["注数"] = 0
+    return out
+
+
 def decide(lottery: str, issue: Any, tickets: Optional[Sequence[dict]] = None,
            K: int = 20, min_history: int = 1200, allow_mc: bool = False,
            seed: int = 0, *, envelope: Any = None,
            spent_this_month: float = 0.0,
            periods_done: Optional[int] = None,
-           periods_total: Optional[int] = None) -> Dict[str, Any]:
-    """`_decide_core` + 可选的**娱乐预算包络闸门**（v1.8，用户指令一）。
+           periods_total: Optional[int] = None,
+           with_stress: bool = False,
+           stress_kwargs: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """`_decide_core` + 可选的**娱乐预算包络闸门**（v1.8）+ **鲁棒性闸门**（v1.10）。
 
-    ★ 默认 `envelope=None` ⇒ 与 v1.7 返回**逐位相同**（不新增任何键），
-      这样既有调用点与快照测试不受影响。
-    ★ 传入 `envelope` 时只做一件事：把上游判决与包络**取更保守者**
-      （见 `ev/budget_envelope.gate_verdict`，只降级不升级）。
-      它不重判 EV —— EV 归本判定树，闸门只管「本月还剩多少钱」。
+    ★ 默认 `envelope=None` 且 `with_stress=False` ⇒ 与 v1.7 返回**逐位相同**
+      （不新增任何键），这样既有调用点与快照测试不受影响。
+    ★ `envelope`：把上游判决与包络**取更保守者**（`ev/budget_envelope.gate_verdict`，
+      只降级不升级）。它不重判 EV —— EV 归本判定树，闸门只管「本月还剩多少钱」。
+    ★ `with_stress=True`：跑 `ev/profit/stress.stress_test`（策略 vs 等注数随机基线在
+      热度失真下的存活率），结果挂在 `out["鲁棒性"]`。若上游是「条件性可参与」而鲁棒性
+      判「退化 / 无优势」⇒ 降为「本期不建议参与」。**同样只降不升。**
+      注意：压力测试较慢（双色球约 30~60 秒），故默认关闭、按需开启。
     ★ `periods_done` / `periods_total`（v1.9）：传了才启用**机制①滚动分摊**
       （单期上限 = 剩余额度 ÷ 剩余期数）；不传 ⇒ 静态单期上限，与 v1.8 一致。
     """
     out = _decide_core(lottery, issue, tickets=tickets, K=K,
                        min_history=min_history, allow_mc=allow_mc, seed=seed)
-    if envelope is None:
-        return out
-
-    from ev import budget_envelope as BE
-    gate = BE.gate_verdict(out.get("判决"), envelope, spent_this_month,
-                           want_tickets=out.get("注数"),
-                           periods_done=periods_done,
-                           periods_total=periods_total)
-    out["包络"] = gate
-    if gate["是否降级"]:
-        out["上游判决"] = out.get("判决")
-        out["判决"] = gate["最终判决"]
-        out["原因"] = gate["原因"]
-        out["注数"] = 0
-    else:
-        out["注数"] = int(gate["注数"])
+    if envelope is not None:
+        from ev import budget_envelope as BE
+        gate = BE.gate_verdict(out.get("判决"), envelope, spent_this_month,
+                               want_tickets=out.get("注数"),
+                               periods_done=periods_done,
+                               periods_total=periods_total)
+        out["包络"] = gate
+        if gate["是否降级"]:
+            out["上游判决"] = out.get("判决")
+            out["判决"] = gate["最终判决"]
+            out["原因"] = gate["原因"]
+            out["注数"] = 0
+        else:
+            out["注数"] = int(gate["注数"])
+    if with_stress:
+        out = _apply_stress_gate(out, lottery, issue, K=K,
+                                 stress_kwargs=stress_kwargs)
     return out

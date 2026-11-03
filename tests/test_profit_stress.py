@@ -82,3 +82,40 @@ def test_ssq_advantage_decays_under_noise_and_vanishes_without_info():
     assert miss["仍优于随机"] is False
     # 因此判决应为「退化」（优势在无信息时消失）
     assert r["判决"] == "退化"
+
+# ---------------------------------------------------------------- 决策流接入
+def test_stress_gate_matrix_only_downgrades():
+    """鲁棒性闸门：上游可参与时退化/无优势 ⇒ 降为不建议参与；绝不升级。"""
+    from ev.profit.solvers import (_stress_gate, VERDICT_PARTICIPATE,
+                                   VERDICT_REJECT, VERDICT_NO_DATA)
+
+    for rob in ("退化", "无优势"):
+        g = _stress_gate(VERDICT_PARTICIPATE, {"判决": rob, "原因": "x"})
+        assert g["是否降级"] is True and g["最终判决"] == VERDICT_REJECT
+    for rob in ("脆弱", "稳定"):
+        g = _stress_gate(VERDICT_PARTICIPATE, {"判决": rob, "原因": "x"})
+        assert g["是否降级"] is False and g["最终判决"] == VERDICT_PARTICIPATE
+    for up in (VERDICT_REJECT, VERDICT_NO_DATA):
+        for rob in ("退化", "无优势", "脆弱", "稳定"):
+            g = _stress_gate(up, {"判决": rob, "原因": "x"})
+            assert g["是否降级"] is False and g["最终判决"] == up   # 绝不升级
+
+
+@pytest.mark.realdata
+def test_decide_without_stress_adds_no_key():
+    """默认（不传 with_stress）不得新增键 —— 既有调用点与快照不受影响。"""
+    from ev.profit.solvers import decide
+    d = decide("双色球", "26126", K=10)
+    assert "鲁棒性" not in d and "鲁棒性闸门" not in d
+
+
+@pytest.mark.realdata
+def test_decide_with_stress_attaches_evidence_and_never_upgrades():
+    """with_stress=True：挂上鲁棒性证据；判决只可能降级、不会升级。"""
+    from ev.profit.solvers import decide
+    base = decide("双色球", "26126", K=10)
+    d = decide("双色球", "26126", K=10, with_stress=True)
+    assert "鲁棒性" in d and "鲁棒性闸门" in d
+    assert d["鲁棒性"]["判决"] in ("退化", "无优势", "脆弱", "稳定")
+    # 只降不升：开启压力测试后，判决不可能比不开时更乐观
+    assert d["判决"] in (base["判决"], "本期不建议参与")

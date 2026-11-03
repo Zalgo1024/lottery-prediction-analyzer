@@ -451,6 +451,8 @@ def main():
     profit_parser.add_argument("--issue", default=None, help="目标期号（默认自动取下一期）")
     profit_parser.add_argument("--groups", type=int, default=20, help="出号注数（默认 20）")
     profit_parser.add_argument("--scenario", action="store_true", help="同时输出情景倍数扫描")
+    profit_parser.add_argument("--stress", action="store_true",
+                               help="同时做鲁棒性压力测试（策略 vs 等注数随机基线；较慢）")
     profit_parser.add_argument("--save", action="store_true", help="写入影子台账（training/profit）")
     profit_parser.add_argument("--summary", action="store_true", help="只输出台账汇总")
     profit_parser.add_argument("--backtest", type=int, default=0, metavar="N",
@@ -2363,7 +2365,8 @@ def _cmd_profit(args):
         print(_json.dumps(res, ensure_ascii=False, indent=1, default=str))
         return
 
-    d = solvers.decide(lot, issue, K=args.groups)
+    d = solvers.decide(lot, issue, K=args.groups,
+                       with_stress=bool(getattr(args, "stress", False)))
     if getattr(args, "scenario", False) and d.get("选号"):
         ctx = P.build_ctx(lot, issue)
         up = (d.get("机制强度上界") or {}).get("kappa") or 0.0
