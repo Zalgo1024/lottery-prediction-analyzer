@@ -5,7 +5,7 @@
 #   auto_scheduled.ps1           正常模式：跑当天该跑的全部彩种（LotteryAutoDaily 22:05）
 #   auto_scheduled.ps1 -Daytime  白天兜底：仅补跑数据滞后的彩种（LotteryAutoDaytime_xx 每 3 小时）
 #   auto_scheduled.ps1 -Force    强制独立跑（忽略一切，手动/测试用）
-# 组数按彩种分流读 config.GROUPS_BY_LOTTERY（勿在此写死；数字型 5 / 乐透型 100）
+# 组数按彩种分流读 config.resolve_groups（滑轨当前生效值；勿在此写死数字）
 # ============================================================
 
 param([switch]$Force, [switch]$Daytime)
@@ -28,6 +28,9 @@ function Write-Log($msg) {
 function Get-Groups($lot) {
     $g = & 'E:\Python\python.exe' -c "import sys;sys.path.insert(0,r'E:\707');from config import resolve_groups;print(resolve_groups(r'$lot'))" 2>$null
     if ($g) { return [int]$g }
+    # ★ 回落值必须**喊出来**：静默用 100 会让这一期的注数与滑轨不一致，
+    #   而启动自愈会按滑轨把 pending 重生成一遍 —— 从日志看像是「无缘无故又出了一次号」。
+    Write-Log "⚠️ $lot 组数解析失败（resolve_groups 无输出），本次回落 100 注"
     return 100
 }
 
@@ -58,11 +61,23 @@ Write-Log '已创建锁文件'
 
 try {
     # ---------- 2. 按当天星期几计算该跑的彩种 ----------
+    # ★ 开奖日的**唯一真源是 config.LOTTERY_CONFIG[*]["draw_days"]**（Python weekday：
+    #   周一=0 … 周日=6）。本脚本用的是 .NET `[DayOfWeek]`（周日=0），换算公式：
+    #       .NET = (weekday + 1) % 7
+    #   两套编码混用极易错位 ⇒ 例如七乐彩 draw_days=[0,2,4]（一/三/五）
+    #   在本脚本里必须写成 @(1, 3, 5)，写成 @(0,2,4) 就变成「日/二/四」。
+    # ★★ 2026-11-03：七乐彩、快乐8 此前**不在本脚本的清单里**（手写 6 个彩种）——
+    #   一旦本任务被启用，这两个彩种就永远不会被它跑，而日志里没有任何一行说
+    #   "跳过了谁"（典型静默缺席）。现按 draw_days 补齐。
+    #   注：本机 2026-09-28 之后并未注册该任务（夜间由 Flask 内置调度器承担），
+    #   所以这是「补齐潜在缺口」，不是「修一个正在发生的漏跑」。
     $dow = [int](Get-Date).DayOfWeek
-    $lots = @('排列5', '福彩3D', '排列3')      # 每日开奖
-    if ($dow -in @(2, 4, 0)) { $lots += '双色球' }   # 周二、周四、周日
-    if ($dow -in @(1, 3, 6)) { $lots += '大乐透' }   # 周一、周三、周六
-    if ($dow -in @(2, 5, 0)) { $lots += '七星彩' }   # 周二、周五、周日
+    # 每日开奖：快乐8 + 数字型三兄弟（draw_days 均为 [0..6]）
+    $lots = @('排列5', '福彩3D', '排列3', '快乐8')
+    if ($dow -in @(2, 4, 0)) { $lots += '双色球' }   # 周二、周四、周日  (draw_days=[1,3,6])
+    if ($dow -in @(1, 3, 6)) { $lots += '大乐透' }   # 周一、周三、周六  (draw_days=[0,2,5])
+    if ($dow -in @(2, 5, 0)) { $lots += '七星彩' }   # 周二、周五、周日  (draw_days=[1,4,6])
+    if ($dow -in @(1, 3, 5)) { $lots += '七乐彩' }   # 周一、周三、周五  (draw_days=[0,2,4])
     Write-Log "当天(星期$dow)流水线彩种: $($lots -join ', ')"
 
     if ($Daytime) {

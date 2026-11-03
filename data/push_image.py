@@ -743,9 +743,23 @@ def render_draw_image(
     if not toks:
         raise ValueError(f"{lottery or '该彩种'}没有可渲染的开奖号码")
 
+    # ★ 「只开不选」的分区必须有文字说明：七乐彩开奖是 7 个基本号 + 1 个特别号，
+    #   图上只表现为"第 8 个球是蓝的"。不给说明，读者会以为那是第 8 个可投注号码，
+    #   或者以为一注要选 8 个数 —— 两种理解都错。
+    extra_notes: list[str] = []
+    if lottery:
+        try:
+            from data.schema import get_schema
+            for z in get_schema(lottery).zones:
+                if getattr(z, "draw_only", False):
+                    extra_notes.append(
+                        f"{z.name}（{z.draw_count} 个）只出现在开奖，票面不含")
+        except Exception:      # 未知彩种 / schema 缺失：不影响出图
+            pass
+
     fig_w = 7.0
     head_h = 0.92 if subtitle else 0.66
-    note_list = [c for c in (_clean(x) for x in (notes or [])) if c]
+    note_list = [c for c in (_clean(x) for x in (list(notes or ()) + extra_notes)) if c]
 
     num_top = head_h + 0.04
     y = num_top + SEC_H + 0.16

@@ -26,14 +26,17 @@ for _stream_name in ("stdout", "stderr"):
 from flask import Flask, send_from_directory, request
 from pathlib import Path
 
-from config import TRAINING_DIR
+from config import TRAINING_DIR, LOTTERY_CONFIG
 from logs.logger import setup_logger
 from web.scheduler import scheduler
 from web.worker import start_worker, get_worker
 
 app = Flask(__name__)
 app.config["TITLE"] = "彩票预测分析系统"
-app.config["LOTTERIES"] = ["双色球", "大乐透"]
+# ★ 2026-11-02：这里曾写死 ["双色球","大乐透"]。全仓无人读这个键，但它是
+#   一个**会骗人的常量**（新增七乐彩/快乐8 后仍自称只有两个彩种）。
+#   改为从 config 派生：以后加彩种不会再出现第二份真相。
+app.config["LOTTERIES"] = list(LOTTERY_CONFIG)
 # 模板改动即时生效（每次请求重新加载模板），避免“改了 HTML 浏览器仍是旧版”的困惑
 app.config["TEMPLATES_AUTO_RELOAD"] = True
 app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
@@ -116,6 +119,18 @@ def _inject_asset_version():
 def _inject_nav():
     from web.nav import NAV_GROUPS, nav_flat
     return {"nav_groups": NAV_GROUPS, "nav_flat": nav_flat()}
+
+
+# 彩种清单单一真源：所有页面下拉框、前端绘图/筛选的彩种表都从这里取。
+# ★ 2026-11-02：此前 12 个模板各自硬编码「双色球/大乐透/排列5/福彩3D/排列3/七星彩」，
+#   七乐彩、快乐8 在后端已进主链路（出号/结算/账本/推送/体检全通），页面上却**选不到**；
+#   `main.js` 里的 `tsIdx` 还给未登记彩种返回 99，于是「注数改了保存不上」会静默发生。
+#   加一个彩种要改 12 个文件、漏一个就静默退化 —— 与「多份手写彩种清单」是同一个坑。
+@app.context_processor
+def _inject_lotteries():
+    digital = [n for n, c in LOTTERY_CONFIG.items()
+               if all(z.get("ordered") for z in c.get("zones", []))]
+    return {"lotteries": list(LOTTERY_CONFIG), "lotteries_digital": digital}
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:

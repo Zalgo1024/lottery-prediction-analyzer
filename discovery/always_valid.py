@@ -67,7 +67,10 @@ OUT_JSON = BASE_DIR / "discovery" / "evalues.json"
 # 七星彩第7位规则变更日（后区 0-9 → 0-14），与 credibility/data_quality.py 一致
 _QXC_CUTOFF = date(2020, 10, 11)
 
-_LOTTERIES = ["双色球", "大乐透", "排列5", "福彩3D", "排列3", "七星彩"]
+# ★ 清单跟注册清单同源（手写清单 = 静默少查，报告里只少两行）
+from config import LOTTERY_CONFIG as _LOTTERY_CFG      # noqa: E402
+
+_LOTTERIES = list(_LOTTERY_CFG)
 
 
 # ============================================================
@@ -170,7 +173,16 @@ def _zone_matrix(records, zone):
     if not B_rows:
         return None, None, []
     B = np.vstack(B_rows).astype(float)
-    p = np.full(K, zone.choose / float(K))
+    # ★ 零假设概率 = **每期开出几个号 / 值域**，不是票面 choose。
+    #   七乐彩特别号 choose=0 / draw=1（draw_only），快乐8 票面选 10 而开奖摇 20。
+    #   用 choose 会让 p0 只有真实值的 1/2（快乐8）或直接为 0（特别号）：
+    #   前者让每个单元都像「出现次数翻倍」，财富过程指数级发散
+    #   —— 实见 快乐8 选出 e-max=3.6e31 的假告警；后者 denom=0 直接除零。
+    #   draw_count 已封装「draw 优先，缺省 choose」的语义，是唯一正确来源。
+    c_draw = int(zone.draw_count)
+    if c_draw <= 0:
+        return None, None, []
+    p = np.full(K, c_draw / float(K))
     return B, p, issues
 
 
@@ -235,8 +247,8 @@ def _monitor_lottery(name: str, alpha: float = 0.05, warm: int = 200) -> dict:
                       f"告警 ≠ 可预测")
     else:
         conclusion = (f"全部分区任意停时无告警（各分区 e-max < {threshold:.0f}）"
-                      f" → 『该彩种开奖分区边际公平』通过持续监控，"
-                      f"与闸门『假设全驳回』一致")
+                      f" → 未检出分区边际偏离（未检出 ≠ 已证明公平：只说明这套检验"
+                      f"在已测维度与该样本量下没异常；与闸门『假设全驳回』一致）")
     return {
         "彩种": name,
         "期数(总)": n_total,

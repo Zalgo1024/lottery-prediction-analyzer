@@ -49,7 +49,11 @@ OUT_JSON = BASE_DIR / "discovery" / "randomness_audit.json"
 # 七星彩第7位规则变更日（后区 0-9 → 0-14），与 credibility/data_quality.py 一致
 _QXC_CUTOFF = date(2020, 10, 11)
 
-_LOTTERIES = ["双色球", "大乐透", "排列5", "福彩3D", "排列3", "七星彩"]
+# ★ 清单跟注册清单同源：手写 6 个的代价是**静默少查两个彩种**，
+#   报告里只会少两行，读的人把「没列出来」当成「也没问题」。
+from config import LOTTERY_CONFIG as _LOTTERY_CFG      # noqa: E402
+
+_LOTTERIES = list(_LOTTERY_CFG)
 
 
 def _bh_fdr(pvals, alpha: float = 0.05):
@@ -272,6 +276,14 @@ def audit_zone(zone, records, B: int = 200, block: int = 500,
             _test_block_freq(seq, K, block),
         ] if t is not None]
     else:              # 乐透型区：每期不放回抽 c 个 → 只审计边际（含指示计数）
+        # ★ c 必须取**开奖实际摇出几个**（zone.draw_count），不是票面 choose：
+        #   七乐彩特别号 choose=0/draw=1（draw_only ⇒ exp=0 ⇒ 0/0 假报「实质偏离」），
+        #   快乐8 票面选 10 而开奖摇 20（⇒ exp 只有真实值的 1/2，观测卡方系统性偏大，
+        #   只能靠效应门偶然兜住）。两处都是「数字看着正常、结论却是假的」。
+        c_draw = int(zone.draw_count)
+        if c_draw <= 0:
+            out["注"] = "该分区每期取号数为 0，无边际可审计"
+            return out
         draws = [np.asarray(list(record_zone_numbers(r, zone)), dtype=int)
                  for r in base]
         n_used = len(draws)
@@ -279,13 +291,23 @@ def audit_zone(zone, records, B: int = 200, block: int = 500,
         for i, dv in enumerate(draws):
             inc[i, dv[dv >= zone.min] - zone.min] = 1
         colsum = inc.sum(axis=0)             # 每号出现总次数
-        exp = n_used * zone.choose / float(K)
+        # 与数据交叉核对：实测每期取号数必须等于配置，否则口径有问题（照实测跑，并写进注）
+        per = inc.sum(axis=1)
+        c_data = int(np.median(per)) if len(per) else 0
+        note = "乐透型区内不放回抽取，时序类检验零假设不成立，仅审计边际"
+        if c_data != c_draw:
+            note += f"；★每期取号数实测 {c_data}（{int(per.min())}~{int(per.max())}）≠ 配置 {c_draw}，按实测审计"
+            c_draw = c_data
+            if c_draw <= 0:
+                out["注"] = "开奖记录里没有该分区号码，无边际可审计"
+                return out
+        exp = n_used * c_draw / float(K)
         obs_chi2 = float(np.sum((colsum - exp) ** 2 / exp))
         # MC 零分布：每期真不放回抽 c 个（保持号间负相关，二项近似会偏）
         sim_chi2 = np.empty(B)
         rows = np.arange(n_used)
         for b in range(B):
-            order = np.argsort(rng.random((n_used, K)), axis=1)[:, :zone.choose]
+            order = np.argsort(rng.random((n_used, K)), axis=1)[:, :c_draw]
             sm = np.zeros((n_used, K), dtype=np.int64)
             sm[rows[:, None], order] = 1
             cs = sm.sum(axis=0)
@@ -297,7 +319,7 @@ def audit_zone(zone, records, B: int = 200, block: int = 500,
             "检验": "T1频率(含指示均匀MC)", "统计量": f"V={v:.4f}",
             "p值": round(p, 4), "MC_B": B,
             "效应门": bool(v >= 0.10), "_p": p,
-            "注": "乐透型区内不放回抽取，时序类检验零假设不成立，仅审计边际",
+            "注": note,
         }]
     out["检验"] = tests
     return out
@@ -336,7 +358,7 @@ def audit_lottery(name: str, B: int = 200, block: int = 500,
         f" —— 先按机制/数据口径变化排查（与 P2-2 变点交叉验证）"
         if flagged else
         f"全部分区通过 NIST 风格随机性审计（各检验 q>0.05 或效应量不足）"
-        f" → 『{name}开奖数据随机性/完整性良好』获得权威背书"
+        f" → 仅表示已测维度在该样本量下未见异常，不构成对开奖公平性的证明"
     )
     return {
         "彩种": name,

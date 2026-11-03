@@ -6,7 +6,7 @@
     <h3>预测参数</h3>
     <div class="form-group">
       <label>彩票类型</label>
-      <select id="pred-lottery" onchange="loadPredRecords()"><option>双色球</option><option>大乐透</option><option>排列5</option><option>福彩3D</option><option>排列3</option><option>七星彩</option></select>
+      <select id="pred-lottery" onchange="loadPredRecords()">{% for lot in lotteries %}<option>{{ lot }}</option>{% endfor %}</select>
     </div>
     <div class="form-row">
       <div class="form-group">

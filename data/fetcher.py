@@ -20,6 +20,7 @@ import logging
 import os
 import re
 import ssl
+import time
 import urllib.request
 from datetime import datetime
 from pathlib import Path
@@ -52,6 +53,16 @@ CSV_FILES = {
 
 # 数字型彩种走 500.com 通用接口
 DIGITAL_LOTTERIES = {"排列5", "福彩3D", "排列3", "七星彩"}
+
+# 七乐彩 / 快乐8 不在 500.com 的六彩种页面上，数据来自 market 层：
+#   快乐8 → cwl（体彩/福彩官网列表页）
+#   七乐彩 → zhcw（唯一给出球顺序）
+# 抓到 market.db 后再导出成同名派生 CSV，供既有 loader 读取。
+# ★ 2026-11-02：注册这两个彩种后，流水线第一步 `update_lottery_data` 直接
+#   返回「不支持的彩票类型」⇒ 启动自愈触发的两次出号任务全部失败，
+#   生产永远建不出 pending。这里补委托路径；**不许**改成"跳过抓取直接成功"
+#   —— 那会把"没抓到"伪装成"已是最新"。
+MARKET_SOURCE = {"七乐彩": "zhcw", "快乐8": "cwl"}
 
 # 原始 CSV 编码（GBK/GB18030）
 CSV_ENCODING = "gb18030"
@@ -228,6 +239,96 @@ def _write_csv(csv_path: Path, header: List[str], records: List[List[str]]):
 # 主入口：更新指定彩票数据
 # ============================================================
 
+def _market_latest_issue(code: str) -> Optional[str]:
+    """market.db 里该彩种的最新期号（只读）；库不存在返回 None。"""
+    import sqlite3
+    db = Path(__file__).resolve().parent.parent / "market" / "market.db"
+    if not db.exists():
+        return None
+    try:
+        con = sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True)
+        try:
+            row = con.execute(
+                "SELECT MAX(issue) FROM draw WHERE lottery = ?", (code,)).fetchone()
+            return str(row[0]) if row and row[0] is not None else None
+        finally:
+            con.close()
+    except sqlite3.Error as e:                               # noqa: BLE001
+        logger.warning(f"读取 market.db 失败（{code}）：{e}")
+        return None
+
+
+def _load_export_script():
+    """按路径加载 scripts/export_lottery_csv.py（scripts 不是包，不能直接 import）。"""
+    import importlib.util
+    p = Path(__file__).resolve().parent.parent / "scripts" / "export_lottery_csv.py"
+    spec = importlib.util.spec_from_file_location("_export_lottery_csv", p)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)                             # type: ignore[union-attr]
+    return mod
+
+
+# 槽位排队上限（秒）。market 层的更新槽位是全进程唯一的，而启动自愈会同时拉多个
+# 彩种的流水线；两个增量更新各十几秒，给 3 分钟足够串行跑完两轮。超过就照实报错。
+MARKET_WAIT_SEC = 180.0
+
+
+def _update_via_market(lottery_name: str) -> Dict:
+    """七乐彩 / 快乐8 的抓取：market 层抓 → 导出派生 CSV。
+
+    只在**该源**上跑增量更新（incremental，各源只看最近一页），十几秒级。
+    失败一律返回 error（流水线会把它抛成任务失败并留痕），不返回"成功但没数据"。
+
+    ★ wait_sec：槽位被占时**排队等**，不要立刻判失败。
+      2026-11-02 02:31 实测：启动自愈同时给七乐彩（zhcw）和快乐8（cwl）触发流水线，
+      两者源不同、数据不重叠，却共用 market 层同一个全局槽位 ⇒ 后到的直接 busy ⇒
+      流水线抛「抓取失败」⇒ 该彩种这一轮没有任何 pending（新彩种首期预测就是这么丢的）。
+      排队串行做完即可，等多久记在 `waited_sec` 里，方便事后区分「排队」与「没抓」。
+    """
+    from market import update as MU
+
+    code = (LOTTERY_CONFIG.get(lottery_name) or {}).get("name_en") or ""
+    src = MARKET_SOURCE[lottery_name]
+    before = _market_latest_issue(code)
+
+    t_wait = time.time()
+    res = MU.run_update(sources=(src,), rebuild_cache=False, log=logger.info,
+                        wait_sec=MARKET_WAIT_SEC)
+    waited = round(time.time() - t_wait, 1)
+    if waited >= 2.0:
+        logger.info(f"{lottery_name}：market 槽位排队 {waited}s 后取得（源={src}）")
+    if not res.get("ok"):
+        why = res.get("error") or res
+        if res.get("busy"):
+            why = f"另一个数据更新任务正在运行（{why}）；本次未抓取，请稍后重试"
+        return {"error": f"market 抓取失败（源={src}）：{why}"}
+
+    try:
+        meta = _load_export_script().export(lottery_name)
+    except Exception as e:                                   # noqa: BLE001
+        return {"error": f"派生 CSV 导出失败：{e}"}
+
+    after = _market_latest_issue(code)
+    fetched = 0
+    try:
+        if before and after:
+            fetched = max(0, int(after) - int(before))
+    except (TypeError, ValueError):
+        fetched = 0
+
+    return {
+        "lottery": lottery_name,
+        "latest_before": before,
+        "latest_after": after,
+        "fetched": fetched,
+        "new_records": [],
+        "cleaned": False,
+        "source": f"market:{src}",
+        "csv_rows": meta.get("期数"),
+        "waited_sec": waited,
+    }
+
+
 def update_lottery_data(
     lottery_name: str,
     end_draw: Optional[str] = None,
@@ -254,6 +355,10 @@ def update_lottery_data(
         "cleaned": 是否已重新清洗,
     }
     """
+    if lottery_name in MARKET_SOURCE:
+        # 500.com 没有这两个彩种页面 ⇒ 走 market 层（见 _update_via_market 的说明）
+        return _update_via_market(lottery_name)
+
     if lottery_name not in CSV_FILES:
         return {"error": f"不支持的彩票类型: {lottery_name}"}
 

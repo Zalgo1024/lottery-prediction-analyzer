@@ -24,13 +24,19 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 CODE = {"双色球": "ssq", "大乐透": "dlt", "七星彩": "qxc",
-        "排列3": "pl3", "排列5": "pl5", "福彩3D": "sd"}
+        "排列3": "pl3", "排列5": "pl5", "福彩3D": "sd",
+        # 2026-11-01：七乐彩/快乐8 的实测单注金额在 market.db 里齐备
+        # （七乐彩 7 档、快乐8 39 档，2011~2111 期），不接这一层就只能永远用名义值。
+        "七乐彩": "qlc", "快乐8": "kl8"}
 
 # 源优先级：体彩/福彩官方 > 中彩网 > csv500
 _SRC_ORDER = {"sporttery": 0, "cwl": 0, "zhcw": 1, "csv500": 2}
 
 _CN = "一二三四五六七八九十"
+_CN_0 = "零一二三四五六七八九十"
 _RE_GRADE = re.compile(rf"^([{_CN}])等奖$")
+# 快乐8 的库内奖级名是 x10z10（选10中10），与规则层的「选十中十」互转
+_RE_KL8 = re.compile(r"^[xX](\d{1,2})[zZ](\d{1,2})$")
 
 _DB: Optional[Path] = None
 
@@ -46,7 +52,11 @@ def _db_path() -> Optional[Path]:
 
 
 def normalize_level_name(name: str) -> Tuple[str, bool, bool]:
-    """`三等奖派奖` → ("三等", is_award=True, is_addon=False)。"""
+    """`三等奖派奖` → ("三等", is_award=True, is_addon=False)。
+
+    快乐8 的 `x10z10` → "选十中十"（与 ev/profit/rules.kl8_grade_name 同一命名）。
+    ★ 不做这条归一，快乐8 的 39 档实测金额一条都查不到，会静默全部回退名义值。
+    """
     s = (name or "").strip()
     is_addon = "追加" in s
     is_award = "派奖" in s
@@ -54,6 +64,12 @@ def normalize_level_name(name: str) -> Tuple[str, bool, bool]:
     m = _RE_GRADE.match(s)
     if m:
         s = m.group(1) + "等"
+    else:
+        m2 = _RE_KL8.match(s)
+        if m2:
+            a, z = int(m2.group(1)), int(m2.group(2))
+            if 0 <= a <= 10 and 0 <= z <= 10:
+                s = f"选{_CN_0[a]}中{_CN_0[z]}"
     return s.strip(), is_award, is_addon
 
 

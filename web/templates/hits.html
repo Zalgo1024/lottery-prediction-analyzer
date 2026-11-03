@@ -25,12 +25,7 @@
 <div style="margin:15px 0;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
   <select id="hits-lottery" onchange="_onHitsLotteryChange()" style="padding:8px 15px;border:1px solid #ddd;border-radius:5px;font-size:14px">
     <option value="全部" selected>全部彩票</option>
-    <option value="双色球">双色球</option>
-    <option value="大乐透">大乐透</option>
-    <option value="排列5">排列5</option>
-    <option value="福彩3D">福彩3D</option>
-    <option value="排列3">排列3</option>
-    <option value="七星彩">七星彩</option>
+    {% for lot in lotteries %}<option value="{{ lot }}">{{ lot }}</option>{% endfor %}
   </select>
   <select id="hits-prize" style="padding:8px 15px;border:1px solid #ddd;border-radius:5px;font-size:14px">
     <option value="全部" selected>全部等级</option>

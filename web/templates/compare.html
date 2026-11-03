@@ -6,8 +6,7 @@
 <div class="card">
     <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:15px">
         <select id="compare-lottery" style="padding:5px 10px;border:1px solid #ddd;border-radius:5px">
-            <option>双色球</option><option>大乐透</option><option>排列5</option><option>福彩3D</option><option>排列3</option><option>七星彩</option>
-        </select>
+            {% for lot in lotteries %}<option>{{ lot }}</option>{% endfor %}</select>
         <button class="btn btn-info btn-sm" onclick="loadCompare(document.getElementById('compare-lottery').value)">加载对比</button>
         <button class="btn btn-default btn-sm" onclick="loadCompareBoth()">全部彩种同轨显示</button>
     </div>

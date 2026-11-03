@@ -57,11 +57,25 @@ def test_dlt_all_versions_share_win_probability():
     assert max(totals) - min(totals) < 1e-12, totals
 
 
-@pytest.mark.parametrize("name", R.SUPPORTED)
+@pytest.mark.parametrize("name", [n for n in R.SUPPORTED if n != "快乐8"])
 def test_outcome_size_matches_space(name):
     expect = {"双色球": 17_721_088, "大乐透": 21_425_712, "七星彩": 15_000_000,
-              "排列5": 100_000, "排列3": 1_000, "福彩3D": 1_000}[name]
+              "排列5": 100_000, "排列3": 1_000, "福彩3D": 1_000,
+              # 七乐彩：C(30,7) × 23（特别号从剩余 23 个摇出）= 46,823,400
+              "七乐彩": 46_823_400}[name]
     assert R.rules_for(name).outcome_size == expect
+
+
+def test_kl8_outcome_size_refuses_to_enumerate():
+    """快乐8 选十的「结局数」是 C(80,10)=1.65e12 —— 任何枚举都会挂死。
+
+    宁可显式失败，也不要给一个看着合法的巨数，让下游 lru_cache 去建 16 亿行矩阵。
+    """
+    with pytest.raises(NotImplementedError, match="hypergeom"):
+        R.rules_for("快乐8").outcome_size
+    with pytest.raises(NotImplementedError, match="不可枚举"):
+        from ev.profit.outcomes import outer_universe
+        outer_universe("快乐8")
 
 
 def test_dlt_ticket_price_reflects_addon():

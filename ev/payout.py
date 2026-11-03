@@ -40,7 +40,8 @@ logger = logging.getLogger(__name__)
 
 COST = float(ticket_price("双色球"))  # 单注成本（元）★ 真源 config.ticket_price
 
-_LOTTERY = ("双色球", "大乐透", "排列3", "福彩3D", "排列5", "七星彩")
+_LOTTERY = ("双色球", "大乐透", "排列3", "福彩3D", "排列5", "七星彩",
+            "七乐彩", "快乐8")
 _REDBLUE = ("双色球", "大乐透")
 _DIGITAL = ("排列3", "福彩3D", "排列5", "七星彩")
 
@@ -93,6 +94,30 @@ def normalize_ticket(lottery: str, ticket) -> Dict[str, Any]:
             nums = _digits(ticket)
         return {"类型": "digital", "红球": [], "蓝球": [], "号码": nums}
 
+    if lottery == "七乐彩":
+        # 票面 = {"基本号":[7], "特别号":[]}；EV 与具体号码无关，但需给出"号码"供下游。
+        if isinstance(ticket, dict):
+            z = ticket.get("号码") or {}
+            if isinstance(z, dict):
+                nums = [int(x) for x in (z.get("基本号") or [])]
+            else:
+                nums = [int(x) for x in z]
+        else:
+            nums = _digits(ticket)
+        return {"类型": "qlc", "红球": [], "蓝球": [], "号码": nums}
+
+    if lottery == "快乐8":
+        # 票面 = {"基本号":[N]}（N = 玩法选号数 1~10）。EV 与号码无关，但需给"号码"。
+        if isinstance(ticket, dict):
+            z = ticket.get("号码") or {}
+            if isinstance(z, dict):
+                nums = [int(x) for x in (z.get("基本号") or [])]
+            else:
+                nums = [int(x) for x in z]
+        else:
+            nums = _digits(ticket)
+        return {"类型": "kl8", "红球": [], "蓝球": [], "号码": nums}
+
     raise ValueError(f"不支持的彩种: {lottery}")
 
 
@@ -110,28 +135,135 @@ _PROB_CACHE: Dict[Tuple[str, str], Dict[str, float]] = {}
 
 
 def grade_probabilities(lottery: str, ticket=None, *,
-                        version: Optional[str] = None) -> Dict[str, float]:
+                        version: Optional[str] = None,
+                        play: Optional[str] = None) -> Dict[str, float]:
     """
     返回 {奖级: 概率}（按 (彩种, 版本) 缓存；概率是组合常数，重复计算纯浪费）。
 
     ⚠️ 概率与具体号码无关（任一合法注相同）——这里保留 ticket 形参仅为将来
        支持"复式/多注"等改变概率的玩法，当前忽略。
     version=None ⇒ 该彩种的**现行版本**（大乐透=最近一段，其余忽略）。
+    play：快乐8 的玩法（选一~选十）。版本名自带玩法命名空间（kl8-x10-2020），
+          故缓存键 (彩种, 版本) 仍然唯一，不需要把 play 塞进键里。
     """
-    ver = version or _default_version(lottery)
+    ver = version or _default_version(lottery, play)
     key = (lottery, ver)
     if key in _PROB_CACHE:
         return _PROB_CACHE[key]
-    probs = _grade_probabilities_impl(lottery, ver)
+    probs = _grade_probabilities_impl(lottery, ver, play)
     _PROB_CACHE[key] = probs
     return probs
 
 
-def _default_version(lottery: str) -> str:
-    if lottery == "大乐透":
+def _default_version(lottery: str, play: Optional[str] = None) -> str:
+    if lottery in ("大乐透", "七乐彩", "快乐8"):
         from ev.profit.rules import rules_for
-        return rules_for(lottery).rule_version
+        return rules_for(lottery, play=play).rule_version
     return "default"
+
+
+def _probs_qlc(version: str) -> Dict[str, float]:
+    """七乐彩精确概率（**不能用通用式**）。
+
+    开奖 = 7 个基本号 + 从**剩余 23 个**里摇 1 个特别号。票面 7 个号拆成
+    (命中基本号 h 个, 是否含特别号 j, 其余 7-h-j 个来自剩余 22 个)：
+
+        P(h,j) = C(7,h) · C(1,j) · C(22, 7-h-j) / C(30,7)        C(30,7)=2,035,800
+
+    ★★ 为什么必须单独写，而不是复用 `_probs_from_grade_table`（2026-11-01 实测）：
+      通用式是 C(w,h)·C(n-w,w-h)/C(n,w) · mult(j)/inner_size，它假设**开奖也是 w 个号**。
+      对七乐彩会得到：
+
+        档      精确分子   通用式     偏差
+        一等        1       0.96     −4.3%
+        二等        7       7         0     ✓
+        三等      154     154         0     ✓
+        四等      462     231      −50.0%
+        五等     4851    5082       +4.8%
+        六等     8085    2695      −66.7%
+        七等    53900   59290      +10.0%
+
+      两边的**分子合计完全相同**（67,460），所以：
+        · 总中奖率两边都 3.31% —— 对得上
+        · 「≥10元」达标率两边都 0.2689% —— 也对得上
+        · 名义 EV 只差 4.78%（1.2008 vs 1.1434）
+      ⇒ **聚合指标查不出这个错误**，但四等少一半、六等少三分之二，奖级明细表全错。
+      这是本次接入最容易"看起来完全正常"的一个坑，故用反例测试钉死。
+    """
+    from ev.profit.rules import rules_by_version
+
+    r = rules_by_version("七乐彩", version)
+    n_outer = r.outer_range[1] - r.outer_range[0] + 1        # 30
+    w = r.outer_width                                        # 7
+    rest = n_outer - w - 1                                   # 22（除去特别号）
+    den = math.comb(n_outer, w)                              # C(30,7)
+    out: Dict[str, float] = {}
+    for (h, j), g in r.grade_table.items():
+        tail = w - h - j
+        if tail < 0 or tail > rest:
+            continue
+        cnt = math.comb(w, h) * math.comb(1, j) * math.comb(rest, tail)
+        out[g] = out.get(g, 0.0) + cnt / den
+    return out
+
+
+def _probs_kl8(version: str) -> Dict[str, float]:
+    """快乐8 超几何概率。
+
+    开奖从 80 个号里摇出 20 个；票面选 n 个（n = 玩法）。命中 k 个的概率：
+
+        P(k) = C(20,k) · C(60, n-k) / C(80, n)
+
+    ★ 分母是 **C(80, n)**（票的组合数），不是 C(80,20)。
+      写成 C(80,20) 会让全部概率偏小 C(80,20)/C(80,n)（选十约 215 万倍），
+      形状仍是超几何、肉眼无法分辨 —— 但返奖率会变成 0.0001%。
+    """
+    from ev.profit.rules import KL8_PLAYS, rules_by_version
+
+    r = rules_by_version("快乐8", version)
+    n = KL8_PLAYS[r.play]
+    den = math.comb(80, n)
+    out: Dict[str, float] = {}
+    for (k, _j), g in r.grade_table.items():
+        if k > n or n - k > 60:
+            continue
+        out[g] = math.comb(20, k) * math.comb(60, n - k) / den
+    return out
+
+
+def _grade_probabilities_impl(lottery: str, version: str = "default",
+                              play: Optional[str] = None) -> Dict[str, float]:
+    c = math.comb
+    if lottery == "双色球":
+        den = c(33, 6) * 16                          # 17,721,088
+        f = lambda k: c(6, k) * c(27, 6 - k)          # 红球命中 k 个
+        pb_hit, pb_miss = 1, 15                       # 蓝球命中/未中的"份数"（分母 16）
+        p = lambda k, b: f(k) * b / den               # b=1 蓝中，b=15 蓝不中
+        return {
+            "一等": p(6, pb_hit),
+            "二等": p(6, pb_miss),
+            "三等": p(5, pb_hit),
+            "四等": p(5, pb_miss) + p(4, pb_hit),
+            "五等": p(4, pb_miss) + p(3, pb_hit),
+            "六等": p(2, pb_hit) + p(1, pb_hit) + p(0, pb_hit),
+        }
+    if lottery == "大乐透":
+        return _probs_from_grade_table(lottery, version)
+    if lottery == "七乐彩":
+        return _probs_qlc(version)
+    if lottery == "快乐8":
+        return _probs_kl8(version)
+    if lottery in ("排列3", "福彩3D"):
+        return {"直选": 1 / 1000}
+    if lottery == "排列5":
+        return {"直选": 1 / 100000}
+    if lottery == "七星彩":
+        d = 15_000_000
+        return {"一等": 1 / d, "二等": 14 / d, "三等": 54 / d,
+                "四等": 1971 / d, "五等": 31590 / d, "六等": 1188270 / d}
+    # ★ 保留 raise：它是「漏接彩种」的唯一可见信号。改成返回 {} 会让
+    #   未知彩种静默得到"零中奖概率"，下游 EV 恒为 0 而一切看起来正常。
+    raise ValueError(f"不支持的彩种: {lottery}")
 
 
 def _probs_from_grade_table(lottery: str, version: str) -> Dict[str, float]:
@@ -151,34 +283,6 @@ def _probs_from_grade_table(lottery: str, version: str) -> Dict[str, float]:
         p = p_h * r.inner_multiplicity.get(j, 0) / r.inner_size
         out[g] = out.get(g, 0.0) + p
     return out
-
-
-def _grade_probabilities_impl(lottery: str, version: str = "default") -> Dict[str, float]:
-    c = math.comb
-    if lottery == "双色球":
-        den = c(33, 6) * 16                          # 17,721,088
-        f = lambda k: c(6, k) * c(27, 6 - k)          # 红球命中 k 个
-        pb_hit, pb_miss = 1, 15                       # 蓝球命中/未中的"份数"（分母 16）
-        p = lambda k, b: f(k) * b / den               # b=1 蓝中，b=15 蓝不中
-        return {
-            "一等": p(6, pb_hit),
-            "二等": p(6, pb_miss),
-            "三等": p(5, pb_hit),
-            "四等": p(5, pb_miss) + p(4, pb_hit),
-            "五等": p(4, pb_miss) + p(3, pb_hit),
-            "六等": p(2, pb_hit) + p(1, pb_hit) + p(0, pb_hit),
-        }
-    if lottery == "大乐透":
-        return _probs_from_grade_table(lottery, version)
-    if lottery in ("排列3", "福彩3D"):
-        return {"直选": 1 / 1000}
-    if lottery == "排列5":
-        return {"直选": 1 / 100000}
-    if lottery == "七星彩":
-        d = 15_000_000
-        return {"一等": 1 / d, "二等": 14 / d, "三等": 54 / d,
-                "四等": 1971 / d, "五等": 31590 / d, "六等": 1188270 / d}
-    raise ValueError(f"不支持的彩种: {lottery}")
 
 
 # ---------------- 分薄乘数 ----------------
@@ -241,6 +345,37 @@ def _resolve_issue(lottery: str, issue: Any = None) -> Optional[str]:
                 except Exception:  # pragma: no cover - 防御
                     continue
             return str(recs[0].期号)  # 全表都查不到结算数据 → 保持原行为
+
+        if lottery in ("七乐彩", "快乐8"):
+            # ★ 这两个彩种没有「销售奖级数据.csv」（load_sales 只覆盖 4 个数字型），
+            #   实测单注金额在 market.db 的 prize 表里。所以期号必须解到
+            #   **「当期金额已公布」**的那一期，否则会一路降级到名义值
+            #   （2026-11-02 实踩：payout 打印「期None」且七乐彩一等奖显示名义 127 万）。
+            #   只往前扫 60 期：源若滞后更久，说明数据管道本身有问题，该报警而不是硬猜。
+            #
+            # ★★ 探针档必须选**几乎每期都有人中**的那几档，不能选头奖：
+            #   头奖大多数期无人中出（快乐8 选十中十 实测概率 1/891 万），
+            #   market.db 里该档金额是 0 ⇒ 被当成「金额未公布」⇒ 一路往前退，
+            #   最终拿一个**很旧的期号**去算「当期建议」，却配最新一期的日期。
+            #   2026-11-02 实见：快乐8 建议显示 期号 2026290 / 开奖日期 2026-11-01
+            #   （2026291 才是 11-01），而 2026291 的金额其实早已公布。
+            from data.loader import load_lottery
+            from ev.profit.amounts import SRC_ACTUAL, grade_amount
+            probes = (("三等", "二等", "一等") if lottery == "七乐彩"
+                      else ("选十中五", "选十中六", "选十中七", "选十中八", "选十中零"))
+            recs = load_lottery(lottery).records or []
+            if not recs:
+                return None
+            for rec in recs[:60]:
+                iss = str(rec.期号)
+                for probe in probes:
+                    try:
+                        amt, src = grade_amount(lottery, iss, probe)
+                    except Exception:                        # noqa: BLE001
+                        continue
+                    if amt is not None and src == SRC_ACTUAL:
+                        return iss
+            return str(recs[0].期号)
 
         from data.fetch_sales import load_sales
         df = load_sales(lottery)
@@ -323,6 +458,16 @@ def share_multiplier(lottery: str, ticket, issue: Any = None,
         return 1.0, ("顶层乘数不适用：浮动奖级基准=当期实际单注奖金（已含真实分摊）；"
                      "号码相关路径见 payout_eff 奖级明细（WP1 流行度模型 GO 的彩种自动启用奖池路径）")
 
+    if lottery == "七乐彩":
+        return 1.0, "顶层乘数不适用：固定/受规则约束奖级基准=当期实际单注奖金（已含真实分摊），不分薄"
+
+    if lottery == "快乐8":
+        # 39 档全部是 regulated：基准=当期实际单注奖金，而实际单注奖金本身
+        # 已经把「限赔/封顶」造成的分摊算进去了（如同一档 30 万 vs 25 万）。
+        # 再乘一个分薄系数就是**二次打折**，会把返奖率算低。
+        return 1.0, ("顶层乘数不适用：39 档全为受规则约束奖级，基准=当期实际单注奖金"
+                     "（已含限赔/封顶分摊），再乘分薄会二次打折")
+
     raise ValueError(f"不支持的彩种: {lottery}")
 
 
@@ -344,6 +489,23 @@ def base_payout(lottery: str, grade: str, issue: Any = None) -> Tuple[Optional[f
     某奖级单注「基准赔付」（未乘分薄）与其来源。
     取值链：当期实际单注奖金 → 奖池滚动估计(双/大一等) → rulebook 名义 → None(未知)
     """
+    if lottery == "七乐彩":
+        # ★ 七乐彩一~三等是 regulated（名义受规则约束、单注金额按期公布），
+        #   prize_payout 没有七乐彩条目会把它们误判成"未中"。改用唯一取值链。
+        from ev.profit.amounts import grade_amount
+        amt, src = grade_amount("七乐彩", issue, grade)
+        if amt is not None:
+            return float(amt), src
+        return None, "未知（受规则约束奖级且无当期数据）"
+    if lottery == "快乐8":
+        # 同上：39 档全是 regulated。★ 必须走 grade_amount ——
+        #   固定奖表里 x9z9 名义 30 万、2026 年多期实际 25 万（限赔），
+        #   用名义会把返奖率算高 20%。
+        from ev.profit.amounts import grade_amount
+        amt, src = grade_amount("快乐8", issue, grade)
+        if amt is not None:
+            return float(amt), src
+        return None, "未知（受规则约束奖级且无当期数据）"
     try:
         from data.prize_table import prize_payout
         info = prize_payout(lottery, grade, issue)
@@ -493,7 +655,8 @@ def pool_based_eff(lottery: str, reds: List[int], grade: str, p_grade: float,
 
 # ---------------- 主接口 ----------------
 def payout_eff(lottery: str, ticket, issue: Any = None,
-               total_tickets: Optional[float] = None) -> Dict[str, Any]:
+               total_tickets: Optional[float] = None, *,
+               play: Optional[str] = None) -> Dict[str, Any]:
     """
     实得奖金统一口径。
 
@@ -502,6 +665,8 @@ def payout_eff(lottery: str, ticket, issue: Any = None,
       ticket   号码（见 normalize_ticket）
       issue    期号（缺省=最新一期；用于取「当期实际单注奖金」）
       total_tickets 当期总注数（缺省自动探测）
+      play     快乐8 的玩法（选一~选十）；None ⇒ 由票面宽度反解，再缺省为「选十」。
+               其余彩种忽略（它们的奖级与"选几个"无关）。
 
     返回
       {
@@ -526,7 +691,16 @@ def payout_eff(lottery: str, ticket, issue: Any = None,
     # 期号解析（浮动奖级取「当期实际单注奖金」必需）
     issue = _resolve_issue(lottery, issue)
 
-    probs = grade_probabilities(lottery, tk)
+    # ★ 快乐8 的奖级取决于玩法；号码里不存玩法，故由票面宽度反解（1:1）。
+    #   传了 play 就用传的（允许「这注按选九判」这类显式指定）。
+    if lottery == "快乐8":
+        if not play:
+            from ev.profit.rules import kl8_play_of_width
+            try:
+                play = kl8_play_of_width(len(tk["号码"]))
+            except KeyError:
+                play = None
+    probs = grade_probabilities(lottery, tk, play=play)
     mult, mult_src = share_multiplier(lottery, ticket, issue, total_tickets)
     notes: List[str] = []
 
@@ -580,10 +754,20 @@ def payout_eff(lottery: str, ticket, issue: Any = None,
         mult_src = (f"流行度模型路径（{'/'.join(pool_path_hits)}：奖池×E[1/(1+X)]，"
                     f"号码相关；其余奖级仍为 {mult_src}）")
 
+    # ★ 这两个彩种的浮动档用「当期实测单注奖金」，而实测值里含该期奖池/滚存。
+    #   所以本表算的是**该期**的 EV，不是长期 EV —— 某期奖池高就会显得"接近回本"。
+    #   不写这一句，看表的人会把某一期的高奖池当成结构性优势。
+    if lottery in ("七乐彩", "快乐8") and not notes:
+        notes.append(f"按期{issue}的实测单注奖金计算（浮动档含该期奖池/滚存）⇒ "
+                     f"这是**该期**的 EV，不代表长期期望")
+
     return {
         "彩种": lottery,
         "期号": issue,
         "号码": tk["号码"],
+        # 玩法（仅快乐8 有值）：写进返回值，否则「选九 25 万」和「选十 500 万」
+        # 两张表长得只差数字，事后无法自证看的是哪一档。
+        "玩法": play or "",
         "奖级明细": rows,
         "名义期望": round(nom_exp, 6),
         "实得期望": round(eff_exp, 6),

@@ -119,6 +119,55 @@ def _grade(lottery: str, ticket: dict, actual_zones: Dict[str, Any],
             return g, float(pay or 0.0)
         fixed = {"三等奖": 3000.0, "四等奖": 500.0, "五等奖": 30.0, "六等奖": 5.0}
         return g, fixed.get(g, 0.0)
+    if lottery == "七乐彩":
+        # 票面只选 7 个基本号；特别号票面不含，j 取决于票面是否含开奖特别号。
+        picked = ticket.get("号码") or {}
+        if isinstance(picked, dict):
+            basic = [int(x) for x in (picked.get("基本号") or [])]
+        else:
+            basic = [int(x) for x in picked]
+        actual_basic = actual_zones.get("基本号") or []
+        actual_special = actual_zones.get("特别号") or []
+        spec = actual_special[0] if actual_special else None
+        h = len(set(basic) & set(actual_basic))
+        j = 1 if (spec is not None and spec in set(basic)) else 0
+        g = RULES.grade_of_hits("七乐彩", h, j)
+        if g is None:
+            return None, 0.0
+        # ★ 用唯一取值链 grade_amount（base_payout 走 prize_payout 会把
+        #   七乐彩一~三等当 regulated 误判成「未中」）。
+        from ev.profit.amounts import grade_amount
+        amt, _src = grade_amount("七乐彩", issue, g)
+        if amt is None:
+            # 金额未知：仍记奖级、实得按 0（不计入求和，留痕待披露）
+            return g, 0.0
+        return g, float(amt)
+    if lottery == "快乐8":
+        # 票面选 N 个（玩法「选N」），开奖摇 20 个；奖级只看命中个数。
+        # ★ 玩法由票面宽度反解（号码里不存玩法，宽度是唯一区分依据）。
+        # ★ 选七~选十的「中0」也中奖，故 hits=0 不许直接判未中。
+        picked = ticket.get("号码") or {}
+        if isinstance(picked, dict):
+            basic = [int(x) for x in (picked.get("基本号") or [])]
+        else:
+            basic = [int(x) for x in picked]
+        actual_basic = [int(x) for x in (actual_zones.get("基本号") or [])]
+        if not basic or not actual_basic:
+            return None, 0.0
+        try:
+            play = RULES.kl8_play_of_width(len(basic))
+        except KeyError:
+            return None, 0.0
+        h = len(set(basic) & set(actual_basic))
+        g = RULES.grade_of_hits("快乐8", h, play=play)
+        if g is None:
+            return None, 0.0
+        from ev.profit.amounts import grade_amount
+        amt, _src = grade_amount("快乐8", issue, g)
+        if amt is None:
+            # 金额未知（该期该档未公布 / x10z10 无人中出回退名义）：仍记奖级、实得按 0
+            return g, 0.0
+        return g, float(amt)
     return None, 0.0
 
 

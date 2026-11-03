@@ -23,7 +23,7 @@ from data import push_notify as pn         # noqa: E402
 
 OUT = os.path.join(os.path.dirname(__file__), "..", "logs", "push_preview_v3")
 
-LOTS = ["双色球", "大乐透", "排列3", "排列5", "福彩3D", "七星彩"]
+LOTS = ["双色球", "大乐透", "排列3", "排列5", "福彩3D", "七星彩", "七乐彩", "快乐8"]
 
 
 def _dim(png: bytes):
@@ -45,6 +45,8 @@ def preview_lottery(lottery: str) -> None:
     from data import feedback as fb
     print(f"\n=== {lottery} ===")
 
+    # ★ 文件编号必须与**真实推送顺序**一致（2026-11-03 起：开奖 → 中奖 → 号码）。
+    #   否则预览目录里 `_2_tickets` 排在 `_3_wins` 前面，看图的直觉会与手机收到的相反。
     # ---- ① 今晚开奖 ----
     draw = pn._latest_draw(lottery)
     try:
@@ -58,7 +60,21 @@ def preview_lottery(lottery: str) -> None:
     except ValueError as e:
         print(f"  [跳过开奖图] {e}")
 
-    # ---- ② 本期出号（按真实分页） ----
+    # ---- ② 开奖结算（拿历史中奖记录做样例）----
+    recs = pn.digest_payload(lottery)
+    hits = (recs or {}).get("hit_records") or []
+    if not hits:
+        print("  [跳过结算图] 没有中奖记录")
+    else:
+        wpages = [hits[i:i + pi.PAGE_WINS] for i in range(0, len(hits), pi.PAGE_WINS)][:2]
+        for i, chunk in enumerate(wpages, 1):
+            png = pi.render_wins_image(
+                chunk, title=f"{lottery} · 开奖结算",
+                subtitle=f"新增 {len(chunk)} 条中奖", page=(i, len(wpages)),
+            )
+            _save(f"{lottery}_2_wins_p{i}.png", png)
+
+    # ---- ③ 本期出号（按真实分页）----
     pending = fb.load_pending(lottery)
     prod = fb.latest_production_pending(pending)
     tickets = (prod or {}).get("预测号码") or []
@@ -78,21 +94,7 @@ def preview_lottery(lottery: str) -> None:
             subtitle=f"共 {total} 注 · 第 {i}/{n} 页（第 {lo}–{hi} 注）",
             meta_lines=meta, groups=page_groups, page=(i, n),
         )
-        _save(f"{lottery}_2_tickets_p{i}.png", png)
-
-    # ---- ③ 开奖结算（拿历史中奖记录做样例） ----
-    recs = pn.digest_payload(lottery)
-    hits = (recs or {}).get("hit_records") or []
-    if not hits:
-        print("  [跳过结算图] 没有中奖记录")
-        return
-    wpages = [hits[i:i + pi.PAGE_WINS] for i in range(0, len(hits), pi.PAGE_WINS)][:2]
-    for i, chunk in enumerate(wpages, 1):
-        png = pi.render_wins_image(
-            chunk, title=f"{lottery} · 开奖结算",
-            subtitle=f"新增 {len(chunk)} 条中奖", page=(i, len(wpages)),
-        )
-        _save(f"{lottery}_3_wins_p{i}.png", png)
+        _save(f"{lottery}_3_tickets_p{i}.png", png)
 
 
 def main() -> int:

@@ -272,6 +272,14 @@ def build_pool(lottery: str, m: int = 2000, seed: int = 0) -> List[Dict[str, Any
     if lottery in ("双色球", "大乐透", "七星彩"):
         from ev.selection import _rand_tickets
         return _rand_tickets(lottery, m, rng)
+    if lottery == "七乐彩":
+        # ★ 票面只选 7 个基本号（1-30 无重复），特别号票面不含。
+        out = []
+        for _ in range(m):
+            basic = sorted(int(x) for x in
+                          rng.choice(np.arange(1, 31), size=7, replace=False).tolist())
+            out.append({"号码": {"基本号": basic, "特别号": []}})
+        return out
     return _rand_digit(lottery, m, rng)
 
 
@@ -280,6 +288,10 @@ def _concentration_score(lottery: str, ticket: Dict[str, Any]) -> int:
     用于 top_score 臂（零泄漏，不读历史），与 coverage 的分散形成对照。"""
     if lottery in ("双色球", "大乐透"):
         return sum(ticket.get("红球", [])) + sum(ticket.get("蓝球", []))
+    if lottery == "七乐彩":
+        nums = ticket.get("号码") or {}
+        basic = nums.get("基本号") if isinstance(nums, dict) else nums
+        return sum(basic or [])
     nums = ticket.get("号码") or []
     return sum(nums)
 

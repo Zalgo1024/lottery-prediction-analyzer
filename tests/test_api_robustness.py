@@ -1,6 +1,7 @@
 """L4 第2期：/robustness 页面与 /api/robustness 端点契约"""
 import unittest
 
+from config import LOTTERY_CONFIG
 from web.app import app
 
 
@@ -36,7 +37,7 @@ class RobustnessApiTests(unittest.TestCase):
         d = resp.get_json()
         self.assertIn("lotteries", d)
         self.assertIn("worker", d)
-        self.assertEqual(len(d["lotteries"]), 6)
+        self.assertEqual(len(d["lotteries"]), len(LOTTERY_CONFIG))
         for item in d["lotteries"]:
             for key in ("lottery", "verdict", "alarms", "generated_at", "mode"):
                 self.assertIn(key, item)

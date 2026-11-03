@@ -28,8 +28,19 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-_OVERLAP_CAP = {"双色球": 4, "大乐透": 3, "七星彩": 3}
+_OVERLAP_CAP = {"双色球": 4, "大乐透": 3, "七星彩": 3, "七乐彩": 3, "快乐8": 4}
 _FIXED_ODDS = ("排列3", "福彩3D", "排列5")
+
+# 单注 EV 与选号无关、且不在 ev.rulebook 口径内的彩种 → 拒绝打分的机制说明。
+# 快乐8：39 档全部是「规则名义 + 限赔封顶」，每注概率只取决于玩法，与选哪些号无关。
+# 七乐彩：一~三等浮动，但本仓没有七乐彩的拥挤度模型 ⇒ 分薄乘数无从估计，
+#         不能用「猜一个」冒充"冷门更值"。两者都只能给恒定 EV。
+_CONSTANT_EV = {
+    "快乐8": ("快乐8：10 玩法 / 39 档均为规则名义值+限赔封顶，单注概率只取决于玩法，"
+              "与选哪些号无关 ⇒ EV 恒定，无号码相关收益"),
+    "七乐彩": ("七乐彩：一~三等浮动奖，但本仓无七乐彩拥挤度（分薄）模型 ⇒ "
+               "号码相关项无法估计，只能按恒定 EV 处理；不做伪排序"),
+}
 
 
 def _rand_tickets(lottery: str, m: int, rng: np.random.Generator) -> List[Dict[str, Any]]:
@@ -47,12 +58,21 @@ def _rand_tickets(lottery: str, m: int, rng: np.random.Generator) -> List[Dict[s
         for _ in range(m):
             out.append({"第1位..第7位": None,
                         "号码": rng.integers(0, 10, size=6).tolist() + [int(rng.integers(0, 15))]})
+    elif lottery == "七乐彩":
+        for _ in range(m):
+            basic = sorted(int(x) for x in
+                          rng.choice(np.arange(1, 31), size=7, replace=False).tolist())
+            out.append({"号码": {"基本号": basic, "特别号": []}})
     return out
 
 
 def _overlap(a, b, lottery: str) -> int:
     if lottery in ("双色球", "大乐透"):
         return len(set(a["红球"]) & set(b["红球"]))
+    if lottery == "七乐彩":
+        za = (a.get("号码") or {}).get("基本号") or []
+        zb = (b.get("号码") or {}).get("基本号") or []
+        return len(set(za) & set(zb))
     return sum(1 for x, y in zip(a["号码"], b["号码"]) if x == y)
 
 
@@ -83,7 +103,12 @@ def _portfolio_metrics(picked: List[Dict[str, Any]], lottery: str) -> Dict[str, 
     if m == 0:
         return {"注数": 0, "平均重叠": None, "最大重叠": None,
                 "有效独立注数": None, "口径": "无选中注"}
-    size = len(ts[0]["红球"]) if lottery in ("双色球", "大乐透") else len(ts[0]["号码"])
+    if lottery in ("双色球", "大乐透"):
+        size = len(ts[0]["红球"])
+    elif lottery == "七乐彩":
+        size = len((ts[0].get("号码") or {}).get("基本号") or [])
+    else:
+        size = len(ts[0]["号码"])
     if m < 2:
         return {"注数": m, "平均重叠": None, "最大重叠": None,
                 "有效独立注数": float(m),
@@ -347,6 +372,23 @@ def select_tickets(lottery: str, n: int = 5, pool_size: int = 20000,
             "限号修正": "不适用（固定赔率，无分薄/限号EV概念）",
             "原因": ("选号不改变期望——任何'高奖金号码'的说法对固定赔率彩种都不成立。"
                      "如需反大众形态采样（纯形态偏好）请用 `cli.py ev " + lottery + " --sample N`"),
+        }
+
+    if lottery in _CONSTANT_EV:
+        # ★ 2026-11-02（快乐8/七乐彩接入）：本函数的逐注打分依赖 ev.engine.net_ev
+        #   → ev.rulebook（只收录 4 个数字型彩种）。这两个新彩种的 EV 只能走
+        #   ev.profit（rules_for + grade_probabilities 的超几何/限赔模型）。
+        #   与其让它们落到 net_ev 抛「rulebook 未收录彩种」，不如显式拒绝并说清
+        #   为什么这里**不需要**打分：它们的单注 EV 与选哪些号无关。
+        return {
+            "彩种": lottery,
+            "机制": _CONSTANT_EV[lottery],
+            "拒绝": True,
+            "限号修正": "不适用（EV 与号码无关）",
+            "原因": ("本函数的排序键来自 ev.engine.net_ev（名义 EV / 限号 EV），"
+                     "其口径只覆盖数字型彩种。该彩种的单注 EV 与选号无关 ⇒ 排序无信息量，"
+                     "故这里不做选号打分。要算实得/返奖请用 ev.profit（rules_for / "
+                     "grade_probabilities）或 data.prize_amounts 的实测金额链。"),
         }
 
     rng = np.random.default_rng(seed)

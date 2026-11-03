@@ -49,9 +49,7 @@
 <div class="card" style="padding:15px 20px;margin-bottom:15px">
   <div style="display:flex;flex-wrap:wrap;align-items:center;gap:12px">
     <select id="ano-lottery" style="padding:8px 15px;border:1px solid #ddd;border-radius:5px;font-size:14px">
-      <option>双色球</option><option>大乐透</option>
-      <option>排列5</option><option>福彩3D</option><option>排列3</option><option>七星彩</option>
-    </select>
+      {% for lot in lotteries %}<option>{{ lot }}</option>{% endfor %}</select>
     <select id="ano-threshold" style="padding:8px 15px;border:1px solid #ddd;border-radius:5px;font-size:14px">
       <option value="normal">正常阈值</option>
       <option value="strict">严格阈值</option>

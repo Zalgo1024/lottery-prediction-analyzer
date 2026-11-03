@@ -14,6 +14,58 @@ from web.utils import api_error_handler
 bp = Blueprint("settings", __name__)
 
 
+def _budget_snapshot():
+    """预算闸门的只读快照（供「出号数量」卡显示「本月已投 / 额度 / 剩余」）。
+
+    为什么要有：闸门是**已启用**的硬约束，但它此前在界面上**完全没有出口** ——
+    用户只能翻 `config/budget_aggregate.json` 才知道额度是多少，而额度用尽时
+    表现出来的是「某天起忽然不出号了」，卡片上的滑轨值照样显示得很正常。
+    这类「滑轨看起来正常、实际已停发」正是本项目最怕的失真，故把读数摆到卡片上。
+
+    ★ 只读、不参与任何决策；任何异常都返回 {"可用": False, "原因": ...} 并让前端隐藏，
+      绝不因为「读不到预算」把出号数量卡整块打挂。
+    ★ 金额口径：税前单注奖金无关；这里只是**投入**（注数 × 单价），不是收益。
+    """
+    try:
+        from ev.budget_gate import enabled_limit, load_spend
+        lim = enabled_limit()
+    except Exception as e:                                    # noqa: BLE001
+        # ★ GateConfigError（启用但缺总额）也走这里 —— 它是**必须让人看见**的错，
+        #   所以带出原因；但界面上仍按「不可用」处理，不假装额度是 0 或无穷。
+        return {"可用": False, "原因": f"{type(e).__name__}: {e}"[:200]}
+    if lim is None:
+        return {"可用": False, "原因": "预算闸门未启用"}
+    try:
+        doc = load_spend()
+        spent = float(doc.get("已投") or 0.0)
+        monthly = float(lim["月度总额"])
+        out = {
+            "可用": True,
+            "月度总额": monthly,
+            "单期上限": float(lim["单期上限"]),
+            "已投": round(spent, 2),
+            "剩余": round(max(0.0, monthly - spent), 2),
+            "月份": doc.get("月份"),
+            "锁定": bool(lim.get("锁定", True)),
+        }
+        # ★ 只报「**这一次**读盘读不出来」。不能直接用 `doc.get("★台账损坏")`：
+        #   那是**历史标记**，一旦某次读失败被写回文件就会永久留在里面，之后每次
+        #   读取都「报损坏」—— 我本轮就被它误导过（台账当时是好的）。
+        #   故自己再解析一次文件来判断当下的状态。
+        try:
+            import json as _json
+            from ev.budget_gate import SPEND_PATH as _SP
+            if _SP.exists():
+                _json.loads(_SP.read_text(encoding="utf-8"))
+        except Exception as e:                                # noqa: BLE001
+            out["台账本次读取失败"] = f"{type(e).__name__}: {e}"[:200]
+        # 额度已用尽 ⇒ 明确说出来（此时出号会被夹到 0 注，不是「正常」）
+        out["已用尽"] = out["剩余"] <= 0
+        return out
+    except Exception as e:                                    # noqa: BLE001
+        return {"可用": False, "原因": f"{type(e).__name__}: {e}"[:200]}
+
+
 def _expected_and_stats():
     """构造 snapshot 需要的 {彩种: 理论中奖率} 与 {彩种: 近期命中统计}。"""
     from config import LOTTERY_CONFIG
@@ -41,7 +93,10 @@ def _expected_and_stats():
 def api_ticket_size_get():
     from data import ticket_size as ts
     rates, stats = _expected_and_stats()
-    return jsonify(ts.snapshot(expected_rates=rates, hit_stats=stats))
+    # ★ 预算只读快照跟着一起回：卡片上要同时显示「可拖到多少」与「这个月还能花多少」，
+    #   否则「上限 500」会被读成「可以随便 500」，而真正先撞到的是额度而不是上限。
+    return jsonify({**ts.snapshot(expected_rates=rates, hit_stats=stats),
+                    "预算": _budget_snapshot()})
 
 
 @bp.route("/api/settings/ticket-size", methods=["POST"])
@@ -84,13 +139,30 @@ def api_ticket_size_set():
             continue
         incoming = data.get(key)
         if isinstance(incoming, dict):
+            # ★ 「合法的空提交」必须挡在服务端：前端只收集到 0 个彩种时（曾因 DOM id
+            #   撞成 99 而全部取不到），请求体是 `{"mode":"dynamic","dynamic":{}}` ——
+            #   语法合法、字段合法、业务上也「合法」（等于什么都不改），于是接口回 ok、
+            #   页面重渲染回原值，用户看到的是「保存了但又变回去」。这种静默失败在
+            #   日志里没有任何痕迹，只能在这里显式拒绝。
+            if not incoming:
+                return jsonify({
+                    "ok": False,
+                    "error": "提交里没有任何彩种的注数（内容为空），已拒绝保存",
+                }), 400
+            _saved = 0
             for lot, val in incoming.items():
                 if lot not in LOTTERY_CONFIG:
                     continue
                 try:
                     cfg[key][lot] = ts._clamp(int(val), lot, limits)
+                    _saved += 1
                 except (TypeError, ValueError):
                     continue
+            if not _saved:
+                return jsonify({
+                    "ok": False,
+                    "error": "提交的彩种名都不在注册表里，未保存任何注数",
+                }), 400
 
     saved = ts.save_config(cfg)
     # 固定模式下同步 current = fixed（当前生效值）
@@ -99,7 +171,8 @@ def api_ticket_size_set():
         saved = ts.save_config(saved)
 
     rates, stats = _expected_and_stats()
-    return jsonify({"ok": True, **ts.snapshot(expected_rates=rates, hit_stats=stats)})
+    return jsonify({"ok": True, **ts.snapshot(expected_rates=rates, hit_stats=stats),
+                    "预算": _budget_snapshot()})
 
 
 @bp.route("/api/settings/ticket-size/apply", methods=["POST"])
@@ -144,7 +217,8 @@ def api_ticket_size_reset():
     except Exception:
         pass
     rates, stats = _expected_and_stats()
-    return jsonify({"ok": True, **ts.snapshot(expected_rates=rates, hit_stats=stats)})
+    return jsonify({"ok": True, **ts.snapshot(expected_rates=rates, hit_stats=stats),
+                    "预算": _budget_snapshot()})
 
 
 # ===== 微信推送（出号 + 中奖记录送上门，2026-09-16）=====
@@ -215,8 +289,10 @@ def api_push_set():
 def api_push_test():
     """发测试消息验证渠道连通性（计入统计）。
 
-    2026-10-24 起按**新的分组结构**发：分隔头 → 开奖图 → 出号图，
-    这样在看板上点一下就能把三类渲染器全部验证到，而不用等到晚上自动化跑。
+    2026-10-24 起按**分组结构**发：组头 → 开奖图 → 出号图（示例数据），
+    这样在看板上点一下就能把渲染器验证到，而不用等到晚上自动化跑。
+    ★ 2026-11-03：整段持组锁发送（真实推送是「组头 → 开奖 → 中奖 → 号码」，
+      测试只发其中两类样本，不追求与真实组完全一致）。
     """
     from data import push_notify as pn
     cfg = pn.sanitize(pn.load_config())
@@ -230,11 +306,6 @@ def api_push_test():
              if with_img else
              "当前渠道不支持图片，后续推送会是单条 markdown 文本。\n\n")
     body += f"> {pn.FOOTER_CONDITION}"
-    result = pn.send(pn._divider_title("推送测试"), body, cfg)
-    pn._mark_pushed(cfg, result.get("ok", False), "测试：" + result.get("detail", ""))
-    out = dict(result)
-    if not with_img:
-        return jsonify(out)
 
     from data import push_image as pi
     demo_draw = {"期号": "示例", "日期": pn._today_str(),
@@ -244,24 +315,32 @@ def api_push_test():
             {"号码": {"红球": [4, 10, 13, 18, 28, 29], "蓝球": [13]},
              "策略": "区间均衡策略", "置信度": 0.37}]
 
-    shots = []
-    try:                                    # ② 开奖图（新增）
-        shots.append(("image_draw", pi.render_draw_image(
-            demo_draw, lottery="双色球", title="双色球 · 开奖图（示例）",
-            subtitle="以上为随机示例，不是真实开奖")))
-    except Exception as e:
-        out["image_draw"] = {"ok": False, "detail": str(e)[:200]}
-    try:                                    # ③ 出号图（第 1 页）
-        pages = pi.paginate_tickets(demo)
-        shots.append(("image", pi.render_tickets_image(
-            demo, title="双色球 · 本期出号（示例）",
-            subtitle="以上为随机示例，不是本期出号",
-            groups=pages[0] if pages else None, page=(1, max(1, len(pages))))))
-    except Exception as e:
-        out["image"] = {"ok": False, "detail": str(e)[:200]}
-
-    for key, png in shots:
-        img = pn.send_image(png, cfg)
-        pn._mark_pushed(cfg, img.get("ok", False), f"测试图片：{img.get('detail', '')}")
-        out[key] = img
+    # ★ 整段抢一次组锁（短超时）：测试推送也是「一条头 + 若干图」，
+    #   不抢就可能插进某个彩种的一组图中间，用户会看到「双色球的图里混着示例图」。
+    #   抢不到就降级直接发（这是人手动点的验证，不该被锁卡住）。
+    with pn._group_spin_lock("推送测试", timeout=10.0):
+        result = pn.send(pn._divider_title("推送测试"), body, cfg)
+        pn._mark_pushed(cfg, result.get("ok", False), "测试：" + result.get("detail", ""))
+        out = dict(result)
+        if with_img:
+            shots = []
+            try:                            # ② 开奖图
+                shots.append(("image_draw", pi.render_draw_image(
+                    demo_draw, lottery="双色球", title="双色球 · 开奖图（示例）",
+                    subtitle="以上为随机示例，不是真实开奖")))
+            except Exception as e:
+                out["image_draw"] = {"ok": False, "detail": str(e)[:200]}
+            try:                            # ③ 出号图（第 1 页）
+                pages = pi.paginate_tickets(demo)
+                shots.append(("image", pi.render_tickets_image(
+                    demo, title="双色球 · 本期出号（示例）",
+                    subtitle="以上为随机示例，不是本期出号",
+                    groups=pages[0] if pages else None, page=(1, max(1, len(pages))))))
+            except Exception as e:
+                out["image"] = {"ok": False, "detail": str(e)[:200]}
+            for key, png in shots:
+                img = pn.send_image(png, cfg)
+                pn._mark_pushed(cfg, img.get("ok", False),
+                                f"测试图片：{img.get('detail', '')}")
+                out[key] = img
     return jsonify(out)

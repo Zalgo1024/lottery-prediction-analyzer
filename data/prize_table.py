@@ -37,6 +37,8 @@ FIXED_PAYOUT: Dict[str, Dict[str, float]] = {
     "排列3": {"直选": 1040, "组选3": 346, "组选6": 173},
     "排列5": {"直选": 100000},
     "七星彩": {"三等": 3000, "四等": 500, "五等": 30, "六等": 5},
+    # 七乐彩四~七等：实测 3005 期各自只有 1 种金额 ⇒ 真固定奖
+    "七乐彩": {"四等": 200, "五等": 50, "六等": 10, "七等": 5},
 }
 
 # 浮动奖级的名义参考值（仅当读不到当期实际单注奖金时用于展示「约」）
@@ -55,6 +57,81 @@ FLOATING_ESTIMATE: Dict[str, Dict[str, float]] = {
     "双色球": {"一等": 5_000_000, "二等": 200_000},
     "大乐透": {"一等": 5_000_000, "二等": 150_000},
 }
+
+
+# ============================================================
+# 「名义受规则约束」档（regulated）—— 七乐彩 / 快乐8
+# ============================================================
+# ★ 为什么需要第三类，而不是塞进 fixed 或 floating（2026-11-01 实测 market.db 得出）
+#
+#   快乐8 的 39 档**没有一档是真固定**：
+#     x10z7 = 80/80 恒值，但 x7z7 在 2026 年出现 8500（名义 1 万）；
+#     x9z9 名义 30 万，2026 年有 220 期是 25 万；x10z10 有 173 期 0 元、1101 期无人中出、
+#     其余期满额 500 万或按 418~498 万分摊。
+#   这些既不是"固定奖金"（会随限赔/派奖变动），也不是 ssq/dlt 那种
+#   "奖池按注均分"的浮动奖（`floating` 需要 float_pool 与 μ 建模，硬套会给 0 元）。
+#   它们是**名义值由规则规定、单注实际金额按期由官方公布**，已含分摊/封顶/限赔/派奖。
+#
+#   ⇒ kind="regulated"，取值链唯一：当期实测（market.db 的 prize.amount）→ 名义值（标注）。
+#     不参与 ev/profit/payouts.py 的浮动池建模：官方已经算好了，再套分薄模型只是引入误差。
+#
+#   七乐彩四~七等 200/50/10/5 实测 3005 期各自只有 1 种金额 ⇒ 仍是真 fixed；
+#   一/二/三等分别有 2197/2905/1816 种金额 ⇒ regulated。
+#   一等的 nominal 取全期正金额均值（官方不公布名义值，一等奖本就是奖池分成）。
+
+REGULATED_NOMINAL: Dict[str, Dict[str, float]] = {
+    "七乐彩": {"一等": 1_270_224, "二等": 27_414, "三等": 1_930},
+    "快乐8": {
+        # 选十
+        "选十中十": 5_000_000, "选十中九": 8_000, "选十中八": 800,
+        "选十中七": 80, "选十中六": 5, "选十中五": 3, "选十中零": 2,
+        # 选九
+        "选九中九": 300_000, "选九中八": 2_000, "选九中七": 200,
+        "选九中六": 20, "选九中五": 5, "选九中四": 3, "选九中零": 2,
+        # 选八
+        "选八中八": 50_000, "选八中七": 800, "选八中六": 88,
+        "选八中五": 10, "选八中四": 3, "选八中零": 2,
+        # 选七
+        "选七中七": 10_000, "选七中六": 288, "选七中五": 28,
+        "选七中四": 4, "选七中零": 2,
+        # 选六
+        "选六中六": 3_000, "选六中五": 30, "选六中四": 10, "选六中三": 3,
+        # 选五
+        "选五中五": 1_000, "选五中四": 21, "选五中三": 3,
+        # 选四
+        "选四中四": 100, "选四中三": 5, "选四中二": 3,
+        # 选三
+        "选三中三": 53, "选三中二": 3,
+        # 选二 / 选一
+        "选二中二": 19, "选一中一": 4.6,
+    },
+}
+
+# 单注封顶（仅 regulated 有；七乐彩一等奖无 500 万封顶——实测最大 847 万）
+REGULATED_CAP: Dict[str, Dict[str, float]] = {
+    "快乐8": {"选十中十": 5_000_000},
+}
+
+# 单注保底（限赔下限；七乐彩三等实测最小 400）
+REGULATED_FLOOR: Dict[str, Dict[str, float]] = {
+    "七乐彩": {"三等": 400},
+}
+
+
+def regulated_nominal(lottery: str, grade: str) -> Optional[float]:
+    """regulated 档的名义单注金额；非 regulated 档返回 None。"""
+    tbl = {_norm_grade(k): v for k, v in REGULATED_NOMINAL.get(lottery, {}).items()}
+    return tbl.get(_norm_grade(grade))
+
+
+def regulated_cap(lottery: str, grade: str) -> Optional[float]:
+    tbl = {_norm_grade(k): v for k, v in REGULATED_CAP.get(lottery, {}).items()}
+    return tbl.get(_norm_grade(grade))
+
+
+def regulated_floor(lottery: str, grade: str) -> Optional[float]:
+    tbl = {_norm_grade(k): v for k, v in REGULATED_FLOOR.get(lottery, {}).items()}
+    return tbl.get(_norm_grade(grade))
 
 
 def estimate_floating_prize(lottery: str, grade: str) -> float:
@@ -83,6 +160,11 @@ def _norm_grade(grade: str) -> str:
     g = str(grade or "").strip()
     g = g.replace("奖", "")  # "一等奖" → "一等"；"直选"不受影响
     return g
+
+
+# 公开别名：判级层返回「六等奖」、规则表键是「六等」，两套写法必须走同一个归一。
+# 外部模块请用这个，不要 import 下划线名（本文件历史上已有 3 份各自为政的副本）。
+norm_grade = _norm_grade
 
 
 def clear_cache():

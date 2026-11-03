@@ -174,38 +174,56 @@ def _atomic_write(path: Path, doc: Dict[str, Any]) -> None:
 
 
 def _rec_key(rec: Dict[str, Any]) -> tuple:
-    """幂等键：(月份, 目标期号, 档位, 台账域, 彩种)。
+    """幂等键：(月份, 目标期号, 档位, 台账域, 彩种, 重出批号)。
 
     ★ 与 `data/feedback.py::_pending_key` 同构 + 彩种：
       同构是为了「台账记录」与「pending 记录」能一一对上；
       加彩种是因为六彩种共用一个月度总额。
+
+    ★★ 加「重出批号」（2026-11-02）：同一期点一次「重新出号」就是**又买了一套票**，
+      两批都要计钱。键里没有这一维时，第 2 批会按 (期号, 档位, 域, 彩种) 命中第 1 批
+      并把它**覆盖**掉 ⇒ 两批只记一批的钱 ⇒「本月已投」偏低 ⇒ 闸门比配置更松。
+      缺字段归一化为 0，与首出批一致（老记录形态不变）。
     """
+    try:
+        _rn = int(rec.get("重出批号") or 0)
+    except (TypeError, ValueError):
+        _rn = 0
     return (str(rec.get("月份") or ""),
             str(rec.get("目标期号") or ""),
             str(rec.get("档位") or "一般"),
             str(rec.get("台账域") or "生产"),
-            str(rec.get("彩种") or ""))
+            str(rec.get("彩种") or ""),
+            _rn)
 
 
 def record_spend(lottery: str, *, 目标期号: Any, 注数: int,
                  档位: str = "一般", 台账域: str = "生产",
+                 重出批号: Any = 0,
                  单价: Optional[float] = None,
                  path: Optional[Path] = None,
                  now: Optional[datetime] = None) -> Dict[str, Any]:
     """把一次出号记进本月台账（幂等 upsert）。返回更新后的台账摘要。
 
-    ★ 「覆盖不是叠加」：同一 (期号, 档位, 域, 彩种) 重复写只保留一条，
+    ★ 「覆盖不是叠加」：同一 (期号, 档位, 域, 彩种, 重出批号) 重复写只保留一条，
       金额取**最新**那次的注数 —— 因为后写的才是最终真正要出的号。
+      注意「重出批号」是幂等键的一部分：不同批是**不同的钱**，不能被覆盖成一条。
     """
     price = float(ticket_price(lottery) if 单价 is None else 单价)
     n = max(0, int(注数))
     p = Path(path) if path is not None else SPEND_PATH
     doc = load_spend(path=p, now=now)
     month = doc["月份"]
+    try:
+        _rn = int(重出批号 or 0)
+    except (TypeError, ValueError):
+        _rn = 0
     rec = {"月份": month, "彩种": lottery, "目标期号": str(目标期号),
            "档位": str(档位 or "一般"), "台账域": str(台账域 or "生产"),
            "注数": n, "单价": price, "金额": round(n * price, 2),
            "时间": (now or datetime.now()).isoformat(timespec="seconds")}
+    if _rn:
+        rec["重出批号"] = _rn          # 首出批不写该字段（老记录形态不变）
     key = _rec_key(rec)
     kept = [r for r in doc["记录"] if _rec_key(r) != key]
     kept.append(rec)
@@ -367,6 +385,14 @@ def reconcile(*, path: Optional[Path] = None, now: Optional[datetime] = None,
                     "注数": len(tickets), "单价": float(ticket_price(lot)),
                     "金额": round(len(tickets) * float(ticket_price(lot)), 2),
                     "时间": when, "来源": "对账补记"}
+            # ★ 补记必须带上「重出批号」，否则同期多批会拿同一个幂等键互相覆盖：
+            #   第 2 批的补记把第 1 批挤掉（或反之）⇒ 漏记一批的钱。
+            try:
+                _rn = int(rec.get("重出批号") or 0)
+            except (TypeError, ValueError):
+                _rn = 0
+            if _rn:
+                item["重出批号"] = _rn
             k = _rec_key(item)
             if k in known:
                 continue

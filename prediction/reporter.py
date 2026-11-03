@@ -164,44 +164,71 @@ def _chart_overlap_heatmap(numbers: list, schema, output_dir: Path, charts: List
 # ============================================================
 
 def _compute_group_expected_value(reds: List[int], blues: List[int], lottery_name: str, ticket_price: int = 2) -> dict:
+    """单注期望收益 —— 走 `ev.payout.payout_eff` 这一个真源。
+
+    ★ 2026-11-02 修复（红线级）：本函数**曾经**把浮动奖级（一等/二等奖）硬编码成
+      「500 万元」，于是双色球报告打出：
+
+          单注期望奖金 5.00 元 / **返奖率 250.0%** / **评级：正值（非零和）**
+
+      而同一台机器上 `cli.py payout 双色球` 算出来是净 EV −1.22 元。两个数字互相
+      矛盾，且其中一个正面违反了「EV 恒负」这条底线。
+
+      为什么"填个大数"必然错：双色球二等奖概率 8.46e-7、单注金额量级 10^4~10^5，
+      一等 5.64e-8；把两者都按 5e6 计，光是"二等"一项就贡献 4.23 元 —— 比整张彩
+      票的真实期望奖金（约 0.8~1.0 元）还高 4 倍。浮动奖的正确口径是「该期奖池 ×
+      E[1/(1+X)]」或「当期实测单注奖金」，只有 `payout_eff` 掌握奖池/分薄/封顶。
+
+    金额未知时**不补 0**：返回 `None` 并在报告里显式写「未计入」，否则"缺数据"
+    会被读成"这部分不产生奖金"。
     """
-    计算每组号码的近似期望收益
-    基于理论概率：中奖概率 × 各奖级奖金
-    """
-    from pipeline.step1_probability import prize_probabilities_ssq, prize_probabilities_dlt
+    from ev.payout import payout_eff
 
-    if lottery_name == "双色球":
-        prize_data = prize_probabilities_ssq()
-    else:
-        prize_data = prize_probabilities_dlt()
+    tk = {"红球": list(reds or []), "蓝球": list(blues or [])}
+    try:
+        r = payout_eff(lottery_name, tk)
+    except Exception as e:                                  # noqa: BLE001
+        return {
+            "ticket_price": ticket_price, "expected_return": None,
+            "expected_prize": None, "return_rate": "—",
+            "grade": f"无法计算（{e}）", "issue": None,
+            "notes": [f"payout_eff 调用失败：{e}"],
+        }
 
-    # 简化：用整体期望值，实际期望 = 总组合/每注组合
-    ev_per_ticket = -ticket_price
-    expected_prize = 0
-    for level in prize_data["levels"]:
-        if level.get("is_floating"):
-            amount = 5_000_000 if lottery_name == "双色球" else 5_000_000
-        else:
-            amount = level.get("fixed_amount", 0)
-        ev = amount * level["probability"]
-        expected_prize += ev
+    if r.get("error"):
+        return {
+            "ticket_price": ticket_price, "expected_return": None,
+            "expected_prize": None, "return_rate": "—",
+            "grade": f"无法计算（{r['error']}）", "issue": None,
+            "notes": [str(r["error"])],
+        }
 
-    ev = expected_prize - ticket_price
+    prize = r.get("实得期望")
+    if prize is None:
+        return {
+            "ticket_price": ticket_price, "expected_return": None,
+            "expected_prize": None, "return_rate": "—",
+            "grade": "无法计算（金额未知）", "issue": r.get("期号"),
+            "notes": list(r.get("备注") or []),
+        }
 
-    # 等级评估
+    ev = float(prize) - ticket_price
+    # ★ 正期望只可能是口径坏了，绝不能写成「非零和」当成利好报出去。
     if ev > 0:
-        grade = "正值（非零和）"
-    elif ev > -1:
-        grade = "轻度负值（期望损失 < 50%）"
+        grade = "口径异常：算得正期望，与彩票返奖结构矛盾，请复核奖池/奖级数据"
+    elif ev > -ticket_price * 0.5:
+        grade = "负值（期望损失 < 50%）"
     else:
-        grade = "严重负值（期望损失 > 50%）"
+        grade = "负值（期望损失 ≥ 50%）"
 
     return {
         "ticket_price": ticket_price,
         "expected_return": round(ev, 4),
-        "expected_prize": round(expected_prize, 4),
-        "return_rate": f"{expected_prize / ticket_price * 100:.1f}%",
+        "expected_prize": round(float(prize), 4),
+        "return_rate": f"{float(prize) / ticket_price * 100:.1f}%",
         "grade": grade,
+        "issue": r.get("期号"),
+        "notes": list(r.get("备注") or []),
     }
 
 
@@ -266,7 +293,11 @@ def generate_prediction_report(result: dict, output_dir: Path) -> str:
         lines.append(f"| {i} | {strat} | {conf} | {zone_cell} | {hot} | {miss} | {dist} |")
 
     # ============================================================
-    # 收益期望分析（仅双色球/大乐透有奖级表）
+    # 收益期望分析
+    # ★ 2026-11-02：本段仍是双/大的**简化**算法（只按奖级表算，不看号码）。
+    #   七乐彩/快乐8 的奖级表与金额链在 ev.profit（含限赔/浮动），不接这里；
+    #   但**不能什么都不说** —— 报告里少一节会被读成"该彩种没有 EV 信息"。
+    #   所以给一行指针，把读者带到真源上。
     # ============================================================
     if lottery in ("双色球", "大乐透") and numbers:
         ev_info = _compute_group_expected_value(
@@ -274,16 +305,40 @@ def generate_prediction_report(result: dict, output_dir: Path) -> str:
             numbers[0].get("号码", {}).get("蓝球", []),
             lottery,
         )
+        _prize = ev_info.get("expected_prize")
+        _nz = lambda v, tail="": ("—" if v is None else f"{v}{tail}")   # noqa: E731
         lines.extend([
             f"",
             f"## 期望收益分析",
             f"",
+            f"- **口径**: `ev.payout.payout_eff`（浮动奖按该期奖池/当期实测单注奖金，"
+            f"固定奖按规则表）；号码无关。",
+            f"- **期号**: {ev_info.get('issue') or '—'}",
             f"- **单注成本**: {ev_info['ticket_price']} 元",
-            f"- **单注期望奖金**: {ev_info['expected_prize']} 元",
-            f"- **单注期望收益**: {ev_info['expected_return']} 元",
+            f"- **单注期望奖金**: {_nz(_prize, ' 元')}",
+            f"- **单注期望收益**: {_nz(ev_info.get('expected_return'), ' 元')}",
             f"- **返奖率**: {ev_info['return_rate']}",
             f"- **评级**: {ev_info['grade']}",
-            f"- **说明**: 彩票是负期望值游戏，不同号码组合的期望收益相同。",
+        ])
+        for _n in (ev_info.get("notes") or [])[:4]:
+            if _n and str(_n).strip() not in ("口径完整",):
+                lines.append(f"- **备注**: {_n}")
+        lines.extend([
+            f"- **说明**: 以上是**该期**口径的 EV（含该期奖池与分薄），不代表长期期望；"
+            f"长期 EV 为负，且与选号无关。",
+            f"",
+        ])
+    elif lottery in ("七乐彩", "快乐8"):
+        lines.extend([
+            f"",
+            f"## 期望收益分析",
+            f"",
+            f"- **口径**: 本彩种的奖级与金额（含限赔/封顶、浮动档按期公布）由 "
+            f"`ev.profit` 统一给出，不适用上表的简化算法。",
+            f"- **怎么算**: `python cli.py payout {lottery} --nums "
+            f"{','.join(str(i) for i in range(1, (8 if lottery == '七乐彩' else 11)))}"
+            f"{' --play 选十' if lottery == '快乐8' else ''}`",
+            f"- **判据**: `Σ p × 当期实测单注奖金 − 2`，逐奖级列出；与选号无关。",
             f"",
         ])
 

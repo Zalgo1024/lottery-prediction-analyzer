@@ -92,18 +92,27 @@ def check_files() -> dict:
                      "状态": "OK" if ok else err})
         if not ok:
             bad.append(f.name)
-    return {"通过": not bad, "明细": rows, "损坏文件": bad}
+    # ★ 已注册但一个文件都没有的彩种必须**点名**：文件缺席不进表，
+    #   读者会把「表里没有」读成「它也没问题」。缺数据不是通过。
+    seen = {r["文件"].split("_")[0] for r in rows}
+    uncovered = [lot for lot in LOTTERY_CONFIG if lot not in seen]
+    return {"通过": not bad, "明细": rows, "损坏文件": bad, "未覆盖彩种": uncovered}
 
 
 # ---------------------------------------------------------------- B
 def check_lookahead(days: int) -> dict:
     since = (date.today() - timedelta(days=days)).isoformat()
     out, total = {}, Counter()
+    skipped: dict[str, str] = {}
     for lot in LOTTERY_CONFIG:
         rows, _err = _load(Path(FEEDBACK_DIR) / f"{lot}_feedback_history.json")
         if rows is None:
+            skipped[lot] = "无反馈文件（尚无生产记录）"
             continue
         sel = [r for r in rows if str(r.get("开奖日期") or "") >= since]
+        if not sel:
+            skipped[lot] = f"最近 {days} 天无记录"
+            continue
         bad1, bad2 = [], []
         batch_times = defaultdict(set)
         n_by_batch, scale = Counter(), {}
@@ -138,22 +147,25 @@ def check_lookahead(days: int) -> dict:
         total["J3"] += len(bad3)
         total["n"] += len(sel)
     return {"通过": not (total["J1"] or total["J2"] or total["J3"]),
-            "合计": dict(total), "明细": out}
+            "合计": dict(total), "明细": out, "未参与": skipped}
 
 
 # ---------------------------------------------------------------- C
 def check_hitrate(days: int) -> dict:
     since = (date.today() - timedelta(days=days)).isoformat()
     out, flagged = {}, []
+    skipped: dict[str, str] = {}
     for lot in LOTTERY_CONFIG:
         rows, _err = _load(Path(FEEDBACK_DIR) / f"{lot}_feedback_history.json")
         if rows is None:
+            skipped[lot] = "无反馈文件（尚无生产记录）"
             continue
         sel = [r for r in rows
                if str(r.get("开奖日期") or "") >= since
                and bool(r.get("valid_prediction", True))
                and r.get("记录类型", "预测") == "预测"]
         if not sel:
+            skipped[lot] = f"最近 {days} 天无有效预测记录"
             continue
         k = sum(1 for r in sel
                 if r.get("中奖等级") and str(r["中奖等级"]) not in ("未中", ""))
@@ -178,7 +190,7 @@ def check_hitrate(days: int) -> dict:
         out[lot] = item
         if z is not None and abs(z) > Z_LIMIT:
             flagged.append(lot)
-    return {"通过": not flagged, "超阈值彩种": flagged, "明细": out}
+    return {"通过": not flagged, "超阈值彩种": flagged, "明细": out, "未参与": skipped}
 
 
 # ---------------------------------------------------------------- 渲染
@@ -193,6 +205,9 @@ def render(rep: dict, days: int) -> str:
     for r in a["明细"]:
         L.append(f"| {r['文件']} | {r['字节']:,} | {r['记录数']} | {r['状态']} |")
     L += ["", f"**结论：{'通过' if a['通过'] else '存在损坏 —— ' + '、'.join(a['损坏文件'])}**", ""]
+    if a.get("未覆盖彩种"):
+        L += [f"> ⚠️ **未覆盖（不是通过）**：{'、'.join(a['未覆盖彩种'])} "
+              f"——已注册但一个 pending/feedback 文件都没有，本项对它们无从判断。", ""]
 
     b = rep["前视判据"]
     L += ["## B. 前视判据（出号时刻 vs 开奖时刻）", "",
@@ -206,6 +221,10 @@ def render(rep: dict, days: int) -> str:
     L += ["", f"合计 {t.get('n', 0)} 条：J1={t.get('J1', 0)}　J2={t.get('J2', 0)}　"
               f"J3={t.get('J3', 0)}", "",
           f"**结论：{'通过（无一例开奖后出号）' if b['通过'] else '存在违例'}**", ""]
+    if b.get("未参与"):
+        L += ["> ⚠️ **未参与（不是通过）**：" +
+              "；".join(f"{k}（{v}）" for k, v in b["未参与"].items()) +
+              " —— 这几项对它们没有样本，不能据此认为无前视偏差。", ""]
 
     c = rep["命中率指纹"]
     L += ["## C. 命中率指纹（反向验证）", "",
@@ -217,6 +236,10 @@ def render(rep: dict, days: int) -> str:
         L.append(f"| {lot} | {r['样本']} | {r['中奖']} | {r['实测率']:.2%} | "
                  f"{thr} | {zz} | {r['判定']} |")
     L += ["", f"**结论：{'通过' if c['通过'] else '超阈值 —— ' + '、'.join(c['超阈值彩种'])}**", ""]
+    if c.get("未参与"):
+        L += ["> ⚠️ **未参与（不是通过）**：" +
+              "；".join(f"{k}（{v}）" for k, v in c["未参与"].items()) +
+              " —— 无样本即无法做命中率指纹比对。", ""]
 
     ok = a["通过"] and b["通过"] and c["通过"]
     L += ["---", "", f"## 总判定：{'✅ 全部通过' if ok else '❌ 存在不通过项'}", ""]

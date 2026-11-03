@@ -113,7 +113,11 @@ def kill_child():
     try:
         subprocess.run(
             ["taskkill", "/PID", str(pid), "/T", "/F"],
-            capture_output=True, text=True, timeout=10,
+            # ★ errors="replace"：Windows 上 taskkill 按本地代码页（中文系统 cp936）输出，
+            #   按 utf-8 解码会在 reader 线程里抛 UnicodeDecodeError（日志里那串
+            #   "Exception in thread Thread-2 (_readerthread)" 就是它）。热重启时会
+            #   每次刷一段假异常，真出问题时反而盖住有用信息。
+            capture_output=True, text=True, errors="replace", timeout=10,
         )
         log(f"已终止 Flask 子进程树 PID={pid}")
     except Exception:

@@ -192,8 +192,10 @@ def lottery_report(name: str, kmax: int = 5, B: int = 200) -> dict:
 
 
 def run_all(kmax: int = 5, B: int = 150) -> list:
-    """6 彩种批量摘要（最快出对外结论）"""
-    names = ["双色球", "大乐透", "排列5", "福彩3D", "排列3", "七星彩"]
+    """全彩种批量摘要（清单跟 config 注册表同源，避免手写漏项）"""
+    from config import LOTTERY_CONFIG
+
+    names = list(LOTTERY_CONFIG)
     return [lottery_report(nm, kmax=kmax, B=B) for nm in names]
 
 

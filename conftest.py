@@ -16,6 +16,9 @@ import pytest
 
 _TARGETS = (
     ("data.push_notify", "STORE_PATH", "push_notify.json"),
+    # 整组推送的跨进程锁（2026-11-03）。不隔离的话，用例会在真实 config/ 下
+    # 建出 `.push_group.lock`，还可能被别的进程正持着 ⇒ 测试随机卡到超时。
+    ("data.push_notify", "GROUP_LOCK_PATH", ".push_group"),
     # 跨进程节流状态文件（2026-10-24 新增）。不加这一条，用例会把真实
     # config/.push_pace.json 写成"刚刚发过"，让**下一次真实推送白等 3.2 秒**；
     # 反过来，真实文件里的旧时间戳也会让用例莫名其妙变慢。
@@ -67,7 +70,7 @@ _TARGETS = (
 #   与「文件缺失时 sanitize 兜底」的生效值完全一致，避免改变任何既有断言的期望值。
 #   要验「缺失即不安全」的用例请显式传 `path=`（见 tests/test_ticket_size_sentinel.py）。
 _TEST_TICKET_DYNAMIC = {
-    "双色球": 100, "大乐透": 100, "七星彩": 100,
+    "双色球": 100, "大乐透": 100, "七星彩": 100, "七乐彩": 100, "快乐8": 100,
     "排列5": 5, "福彩3D": 5, "排列3": 5,
 }
 
@@ -86,8 +89,13 @@ def _seed_ticket_size_store():
             "fixed": dict(_TEST_TICKET_DYNAMIC),
             "dynamic": dict(_TEST_TICKET_DYNAMIC),
             "current": dict(_TEST_TICKET_DYNAMIC),
-            "limits": {"双色球": 500, "大乐透": 400, "排列5": 100,
-                       "福彩3D": 200, "排列3": 200, "七星彩": 300},
+            # ★ 上限必须与 `data/ticket_size.py::DEFAULT_LIMITS` 同口径：2026-11-02
+            #   起统一 500。这里曾是「逐彩种 500/400/100/200/200/300/500/100」的镜像，
+            #   于是代码改了上限、测试还在用旧刻度 —— 断言读到的是这份种子而不是新默认，
+            #   表现为「明明改了却还有测试说 400」（本轮实踩）。
+            "limits": {"双色球": 500, "大乐透": 500, "排列5": 500,
+                       "福彩3D": 500, "排列3": 500, "七星彩": 500,
+                       "七乐彩": 500, "快乐8": 500},
             "锁定": True,
         }, ensure_ascii=False), encoding="utf-8")
     except OSError:

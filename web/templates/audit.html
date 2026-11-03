@@ -144,6 +144,19 @@ async function loadEv(lot) {
     const r = await fetch(`/api/audit/ev/${encodeURIComponent(lot)}`);
     const d = await r.json();
     if (d.error) {
+      // ★「不适用」不是故障：七乐彩/快乐8 的 EV 口径在 ev.profit，
+      //   本页的限号/撞号修正只对数字型有意义。用 info 卡说清楚并给出
+      //   真正能看的命令，不要落进 alert-warning（红框 = 加载失败，会误导）。
+      if (d["不适用"]) {
+        el.innerHTML = `
+          <div class="alert alert-info">本卡片不适用：${esc(d.error)}</div>
+          ${d["口径"] ? `<div class="audit-note-item">口径：${esc(d["口径"])}</div>` : ""}
+          ${d["怎么看"] ? `<div class="audit-note">怎么看：<code>${esc(d["怎么看"])}</code></div>` : ""}
+          <div class="audit-note">单注期望收益的当期值见 <a href="/ev">EV 页</a>（口径与这里不同，别混着比）。</div>
+        `;
+        EXPL.onCardRendered("ev", el, {__notApplicable: true});
+        return;
+      }
       // 双/大：显示 Rollover
       const r2 = await fetch(`/api/audit/rollover/${encodeURIComponent(lot)}`);
       const d2 = await r2.json();

@@ -55,6 +55,26 @@ def _record_pending(params: Optional[dict]) -> bool:
     return params.get("mode") != "lowcrowd"
 
 
+def _renumber_for_regenerate(lottery_name: str, target_issue, existing,
+                             record_pending: bool) -> int:
+    """滑轨变化导致「重出」时，新批该用的重出批号（0 = 不另起一批）。
+
+    ★ 只有两个条件同时成立才另起一批：
+      ① 本期**已有**生产批（没有 ⇒ 这就是首次出号，批号 0）；
+      ② 本次要真正落库（试算 `record_pending=False` 不推高批号 ——
+         否则用户试算几次就把批号推到 5，「第 1 批」这个名字就没了）。
+
+    ★ 为什么流水线也要另起一批（2026-11-02）：原来这里是**覆盖**上一批
+      （同 (期号,档位,域) 去重）。对用户而言那是「改完注数，之前那批号就没了」，
+      而那一批可能已经看过甚至买过。覆盖 = 静默丢台账，与项目的留证纪律冲突。
+      现在改成另起一批，代价是同一期可能有多批票 —— 这是如实记录。
+    """
+    if not existing or not record_pending:
+        return 0
+    from data.feedback import next_renumber
+    return next_renumber(lottery_name, target_issue)
+
+
 def groups_invariant(lottery_names: Optional[list] = None) -> dict:
     """「出号数量（滑轨）== 下一期 pending 组数」一致性体检。
 
@@ -959,15 +979,22 @@ def run_predict_task(task_id: str, lottery_name: str, params: dict):
     """异步执行预测"""
     from prediction.engine import predict
     from prediction.reporter import save_prediction_record
+    from data.feedback import renumber_scope
 
     update_task(task_id, progress=10, message=f"加载 {lottery_name} 数据...")
-    result = predict(
-        lottery_name=lottery_name,
-        groups=resolve_groups(lottery_name, params.get("groups")),
-        mode=params.get("mode", "fresh"),
-        # 验证/试算出号：必须只算不落库，避免用任意 groups 覆盖生产 pending
-        record_pending=_record_pending(params),
-    )
+    # ★ 重出批号：`params["renumber"] > 0` 时，本批 pending 会带上该批号，
+    #   与旧批共存（旧批不被 `_upsert_pending` 覆盖），开奖后两批都结算。
+    #   为什么走作用域而不是给 predict 加参数：写 pending 的是 predict 内部的
+    #   4 条返回分支，这个需求和「怎么选号」无关，不该污染出号函数签名。
+    _rn = int(params.get("renumber") or 0)
+    with renumber_scope(_rn):
+        result = predict(
+            lottery_name=lottery_name,
+            groups=resolve_groups(lottery_name, params.get("groups")),
+            mode=params.get("mode", "fresh"),
+            # 验证/试算出号：必须只算不落库，避免用任意 groups 覆盖生产 pending
+            record_pending=_record_pending(params),
+        )
 
     update_task(task_id, progress=50, message="生成报告和图表...")
     path = save_prediction_record(result)
@@ -981,6 +1008,9 @@ def run_predict_task(task_id: str, lottery_name: str, params: dict):
         "numbers": result["预测号码"],
         "hit_rate": result.get("历史命中率(近50期)", 0),
         "record_dir": str(path),
+        "重出批号": _rn,
+        # 停发（预算闸门 0 注）不算成功出号，必须让调用方看见
+        "停发": result.get("停发"),
     }
 
 
@@ -1192,30 +1222,40 @@ def run_auto_pipeline_core(lottery_name: str, params: dict, task_id: Optional[st
             _slide_groups = resolve_groups(lottery_name)
             if int(groups_eff) != int(_slide_groups):
                 msg = (f"⚠️ {lottery_name} 显式出号注数 {groups_eff} ≠ 看板滑轨 {_slide_groups}："
-                       f"本次生成会覆盖下一期生产 pending；仅验证请传 record_pending=false")
+                       f"本次生成会为下一期另起一批（旧批保留）；仅验证请传 record_pending=false")
                 logger.warning(msg)
                 steps.append(f"注数 {groups_eff} ≠ 滑轨 {_slide_groups}（显式指定）")
         # ★ 只看**生产批**：研究批是 200 注且后写，若被当成「已有预测」复用，
         #   整期生产台账会被静默跳过（滑轨恰好 200 时尤其危险）。
         existing = latest_production_pending(load_pending(lottery_name), target_issue=target_issue)
         # ★ 2026-10-11：出号数量 = 最终注数 → 已有预测的组数须与当前出号数量**一致**
-        #   才复用；不一致（用户改了滑轨 / 历史 pending 口径不同）则按新数量重新生成，
-        #   覆盖旧 pending（同 (目标期号,档位,台账域) 去重，不叠加）。
+        #   才复用；不一致（用户改了滑轨 / 历史 pending 口径不同）则按新数量重新生成。
+        # ★ 2026-11-02（用户需求「重新出号」）：不一致时**不再覆盖**上一批，而是另起
+        #   一批（带「重出批号」）。原因：覆盖等于把「那一期已经出过的号」从台账里
+        #   抹掉 —— 用户已经看过/可能已经买过的号码查不到了，开奖后也没法参与结算。
+        #   代价是同一期可能有多批票，这是**如实记录**，不是重复出号 bug；
+        #   展示/推送取最新一批（`latest_production_pending`），旧批各自结算。
         if existing and len(existing.get("预测号码") or []) == groups_eff:
             predictions = (existing.get("预测号码") or [])
             pred_info = f"复用下一期 {target_issue} 已有预测 {len(predictions)}组"
             steps.append(f"跳过预测(下期{target_issue}已预测)")
         else:
+            from data.feedback import renumber_scope
+            _rn = _renumber_for_regenerate(lottery_name, target_issue, existing,
+                                           _record_pending(params))
             if existing:
                 steps.append(f"重新生成(下期{target_issue}已有预测"
-                             f"{len(existing.get('预测号码') or [])}组 ≠ 出号数量{groups_eff})")
-            pred = predict(
-                lottery_name=lottery_name,
-                groups=groups_eff,
-                mode=params.get("mode", "fresh"),
-                # 试算/验证可显式 record_pending=False（不写生产 pending）
-                record_pending=_record_pending(params),
-            )
+                             f"{len(existing.get('预测号码') or [])}组 ≠ 出号数量{groups_eff})"
+                             + (f"：另起第 {_rn} 批，旧批 "
+                                f"{len(existing.get('预测号码') or [])} 注保留" if _rn else ""))
+            with renumber_scope(_rn):
+                pred = predict(
+                    lottery_name=lottery_name,
+                    groups=groups_eff,
+                    mode=params.get("mode", "fresh"),
+                    # 试算/验证可显式 record_pending=False（不写生产 pending）
+                    record_pending=_record_pending(params),
+                )
             path = save_prediction_record(pred)
             record_dir = str(path)
             predictions = pred.get("预测号码") or []
@@ -1530,13 +1570,24 @@ def build_pending_with_weights(lottery_name: str, domain: Optional[str] = None) 
       的低拥挤组合，混进来会让「待开奖注数」翻倍）。传 "研究" 可单独查看研究批。
       research_total 始终回传研究批条数，供页面提示「另有 N 条研究批」。
     """
-    from data.feedback import DOMAIN_PROD, DOMAIN_RESEARCH, _domain_of, load_pending
+    from data.feedback import (DOMAIN_PROD, DOMAIN_RESEARCH, _domain_of,
+                               _recency_key, load_pending)
     from prediction.optimizer import get_strategy_weights
 
     want = domain if domain in (DOMAIN_PROD, DOMAIN_RESEARCH) else DOMAIN_PROD
     _all = load_pending(lottery_name)
     research_total = sum(1 for r in _all if _domain_of(r) == DOMAIN_RESEARCH)
     pending = [r for r in _all if _domain_of(r) == want]
+    # ★ 新号优先（2026-11-02「重新出号」）：同一期可以并存多批（首出 + 第 N 次重出），
+    #   pending 的落盘顺序是**追加**（旧在前），直接照原序渲染就会把旧号摆在最上面，
+    #   与用户「新出的号码优先采用」相反。这里统一按记录时间倒序，并给每期最新一批
+    #   打 `最新批次` 标记，前端不必自己猜。
+    pending.sort(key=_recency_key, reverse=True)
+    _seen_issue = set()
+    for _r in pending:
+        _iss = str(_r.get("目标期号") or "")
+        _r["最新批次"] = _iss not in _seen_issue
+        _seen_issue.add(_iss)
     weights = get_strategy_weights(lottery_name)
     if not weights:
         weights = {"高频策略": 0.25, "遗漏值策略": 0.25, "区间均衡策略": 0.25, "ML策略": 0.25}

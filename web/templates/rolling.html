@@ -63,7 +63,7 @@
     <p style="font-size:13px;color:var(--gray)">与常驻循环同一实现：随机抽 N 个历史期作目标，严格只用目标期之前的数据预测，每个锚点都带同形态随机基线</p>
     <div class="form-group">
       <label>彩票类型</label>
-      <select id="at-lottery"><option>双色球</option><option>大乐透</option><option>排列5</option><option>福彩3D</option><option>排列3</option><option>七星彩</option></select>
+      <select id="at-lottery">{% for lot in lotteries %}<option>{{ lot }}</option>{% endfor %}</select>
     </div>
     <div class="form-row">
       <div class="form-group">

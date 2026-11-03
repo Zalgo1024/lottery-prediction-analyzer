@@ -1,6 +1,18 @@
 /* Web 前端交互脚本 */
 
 // ===== 工具函数 =====
+
+// 彩种清单：唯一真源是后端注入的 window.WB_LOTTERIES（见 templates/base.html）。
+// ★ 2026-11-02：此前本文件有 6 处硬编码「双色球/大乐透/排列5/福彩3D/排列3/七星彩」，
+//   新增彩种（七乐彩、快乐8）后页面上选不到它们；更糟的是 tsIdx() 给未登记彩种
+//   返回 99，票数面板里改了注数也**保存不上**（值被静默丢弃）。改为统一读这份清单，
+//   后端加彩种前端自动跟随。fallback 只兜「直接打开 js 文件」的极端情况。
+function wbLotteries() {
+    const v = (typeof window !== 'undefined' && Array.isArray(window.WB_LOTTERIES))
+        ? window.WB_LOTTERIES : [];
+    return v.length ? v : ['双色球', '大乐透', '排列5', '福彩3D', '排列3', '七星彩'];
+}
+
 async function api(url, opts = {}) {
     try {
         const resp = await fetch(url, {
@@ -367,20 +379,24 @@ async function loadDataStatus() {
     // 保留以下空块以便未来需要时扩展
 
     // 按发行机构展示同部门其他彩种（福彩中心 / 体彩中心），不区分玩法类型
+    // ★ 体彩这一组必须手写（配置里没有「发行机构」字段），福彩组则**反推**：
+    //   凡不在体彩名单里的都是福彩 —— 这样新增福彩彩种（七乐彩、快乐8）自动出现，
+    //   不会再出现「后端已接入、看板上找不到这张卡」。
+    const TICAI = ['大乐透', '七星彩', '排列3', '排列5'];
     const dependents = {
         'ssq-dependents': {
             title: '福彩中心其他彩种',
             accent: '#e74c3c',
             bg: '#fff5f5',
             border: '#ffcccc',
-            lots: ['福彩3D'],
+            lots: wbLotteries().filter(l => l !== '双色球' && !TICAI.includes(l)),
         },
         'dlt-dependents': {
             title: '体彩中心其他彩种',
             accent: '#3498db',
             bg: '#f0f9ff',
             border: '#b3e0ff',
-            lots: ['七星彩', '排列3', '排列5'],
+            lots: TICAI.filter(l => l !== '大乐透'),
         },
     };
     for (const [containerId, cfg] of Object.entries(dependents)) {
@@ -713,13 +729,9 @@ async function loadAutomationStatus() {
 
     const byLottery = data.last_run_by_lottery || {};
     const mainLotteries = ['双色球', '大乐透'];
-    const allLotteries = ['双色球', '大乐透', '排列5', '福彩3D', '排列3', '七星彩'];
-    const dependentMap = {
-        '福彩3D': '双色球',
-        '七星彩': '大乐透',
-        '排列3': '大乐透',
-        '排列5': '大乐透',
-    };
+    const allLotteries = wbLotteries();
+    // （原 dependentMap 只声明未使用，且硬编码 4 个数字型彩种；
+    //   已删 —— 依赖关系改由上面的 dependents 列表按发行机构反推。）
 
     // 看板顶部「今日简报」主动通知
     _renderAutoBrief(data);
@@ -955,6 +967,33 @@ function tsRender(d) {
     const applyBtn = $('ts-apply-btn');
     if (applyBtn) applyBtn.style.display = isDyn ? '' : 'none';
 
+    // ===== 预算闸门读数（只读）=====
+    // 为什么放这里：闸门是已启用的**硬约束**，但界面上原先没有出口 —— 用户只能翻
+    // `config/budget_aggregate.json` 才知道额度，而额度用尽时的表现是「某天起忽然
+    // 不出号」，滑轨值却照样显示得好好的。这类「看起来正常、实际已停发」是本项目
+    // 最怕的失真，所以把读数摆到卡片上，用完时直接变红说出「会停发」。
+    // ★ 只显示，不参与任何计算；后端说不可用（未启用/读坏了）就整行隐藏，不猜。
+    const budEl = $('ts-budget');
+    if (budEl) {
+        const b = d['预算'] || {};
+        if (!b['可用']) {
+            budEl.style.display = 'none';
+            budEl.textContent = '';
+        } else {
+            const money = v => '¥' + Number(v || 0).toLocaleString('zh-CN', {maximumFractionDigits: 0});
+            const total = Number(b['月度总额'] || 0);
+            const left = Number(b['剩余'] || 0);
+            budEl.style.display = '';
+            budEl.style.color = b['已用尽'] ? '#c62828'
+                : (total > 0 && left < total * 0.2 ? '#e65100' : 'var(--gray)');
+            budEl.textContent =
+                `本月（${b['月份'] || '—'}）预算：已投 ${money(b['已投'])} / 额度 ${money(total)}` +
+                `，剩余 ${money(left)}（单期上限 ${money(b['单期上限'])}）` +
+                (b['已用尽'] ? ' —— 额度已用尽，本期会停发（不出号）' : '') +
+                '。上限 500 只放开可拖范围，实际花费看这里。';
+        }
+    }
+
     // ★ 锁定开关：勾上后动态策略不再自动改注数（用户调好的值不被后台改回去）
     const lockBox = $('ts-lock');
     if (lockBox) lockBox.checked = !!d['锁定'];
@@ -984,45 +1023,122 @@ function tsRender(d) {
               <span style="font-size:11px;color:var(--gray)">${it['数字型'] ? '数字型' : '乐透型'} · 上限${it['上限']}</span>
             </div>
             <div style="display:flex;align-items:center;gap:8px;margin-top:6px">
-              <input type="range" id="ts-range-${tsIdx(it.lottery)}" min="${it['下限']}" max="${it['上限']}" value="${val}"
+              <input type="range" data-role="range" data-lottery="${escSched(it.lottery)}" min="${it['下限']}" max="${it['上限']}" value="${val}"
                      style="flex:1" oninput="tsOnInput('${escSched(it.lottery)}', this.value)">
-              <input type="number" id="ts-num-${tsIdx(it.lottery)}" min="${it['下限']}" max="${it['上限']}" value="${val}"
+              <input type="number" data-role="num" data-lottery="${escSched(it.lottery)}" min="${it['下限']}" max="${it['上限']}" value="${val}"
                      style="width:64px;padding:2px 6px;border:1px solid #ddd;border-radius:5px"
                      oninput="tsOnInput('${escSched(it.lottery)}', this.value)">
             </div>
-            <div style="font-size:11px;color:var(--gray);margin-top:4px">当前生效 <b id="ts-cur-${tsIdx(it.lottery)}">${cur}</b> 注${isDyn ? '（动态策略维护）' : ''}</div>
+            <div style="font-size:11px;color:var(--gray);margin-top:4px">当前生效 <b data-role="cur" data-lottery="${escSched(it.lottery)}">${cur}</b> 注${isDyn ? '（动态策略维护）' : ''}</div>
             ${adv}
+            <div style="margin-top:8px">
+              <button class="btn btn-sm" data-regenerate="${escSched(it.lottery)}"
+                      onclick="tsRegenerate('${escSched(it.lottery)}')"
+                      title="重新出一批号：旧号码保留且开奖后照常结算；当期展示/推送/组数核对优先用新号。注数用「出号数量」的当前生效值。"
+                      style="font-size:11px;padding:2px 8px">重新出号</button>
+            </div>
         </div>`;
     }
     html += '</div>';
     rows.innerHTML = html;
 }
 
-function tsIdx(lottery) {
-    // 彩种名 → 稳定下标（避免中文作 id）
-    const map = { '双色球': 0, '大乐透': 1, '排列5': 2, '福彩3D': 3, '排列3': 4, '七星彩': 5 };
-    return map[lottery] != null ? map[lottery] : 99;
+// ★ 2026-11-02 事故：原实现用「彩种在 JS 数组里的下标」做 DOM id
+//   （`ts-num-${tsIdx(lottery)}`，未登记的彩种回落 99）。两个后果同时存在：
+//     ① 两个未登记彩种撞同一个 id，拖动 A 会改到 B；
+//     ② 收集时按 id 取值必然取不到 ⇒ 提交的是**空对象** ⇒ 后端什么都不改
+//        ⇒ 页面重渲染回原值。用户看到的是「改了注数点保存，又自己变回去」，
+//        而服务端日志一切正常（它确实收到了一个合法的空 payload）。
+//   ⇒ 一律按 `data-lottery` / `data-role` 属性定位，不再有任何下标映射。
+function tsEls(lottery) {
+    const out = { range: null, num: null, cur: null };
+    document.querySelectorAll('#ts-rows [data-lottery]').forEach(el => {
+        // 用属性比较而不是拼选择器：[data-lottery="七乐彩"] 里的中文与特殊字符
+        // 在 CSS 选择器里需要转义，比较属性值则永远安全。
+        if (el.getAttribute('data-lottery') !== lottery) return;
+        const role = el.getAttribute('data-role');
+        if (role === 'range') out.range = el;
+        else if (role === 'num') out.num = el;
+        else if (role === 'cur') out.cur = el;
+    });
+    return out;
 }
 
 function tsOnInput(lottery, value) {
-    const i = tsIdx(lottery);
-    const num = $('ts-num-' + i), range = $('ts-range-' + i);
+    const el = tsEls(lottery);
     let v = parseInt(value, 10);
     if (isNaN(v)) return;
-    if (num) num.value = v;
-    if (range) range.value = v;
+    if (el.num) el.num.value = v;
+    if (el.range) el.range.value = v;
 }
 
 function tsCollectValues() {
     const out = {};
-    for (const [lot, i] of Object.entries({ '双色球': 0, '大乐透': 1, '排列5': 2, '福彩3D': 3, '排列3': 4, '七星彩': 5 })) {
-        const num = $('ts-num-' + i);
-        if (num) {
-            const v = parseInt(num.value, 10);
-            if (!isNaN(v)) out[lot] = v;
-        }
-    }
+    document.querySelectorAll('#ts-rows input[data-role="num"][data-lottery]').forEach(el => {
+        const lot = el.getAttribute('data-lottery');
+        const v = parseInt(el.value, 10);
+        if (lot && !isNaN(v)) out[lot] = v;
+    });
     return out;
+}
+
+// ===== 重新出号 =====
+// 用户需求（2026-11-02）：点了之后重新出一批号，旧号不删除、随时可查；
+// 新号在展示/推送/命中历史里优先，但旧号若中奖也要照常入账。
+// 实现分工：后端 `/api/predict/regenerate` 给新批打「重出批号」，pending
+// 去重键含该维度 ⇒ 旧批不被覆盖；结算遍历全部 pending ⇒ 两批都入历史。
+async function tsRegenerate(lottery) {
+    const ok = confirm(
+        '为「' + lottery + '」重新出一批号？\n\n' +
+        '· 旧号码不会删除，开奖后仍照常结算（中了也会记进命中历史）\n' +
+        '· 当前展示 / 推送 / 组数核对优先使用新号\n' +
+        '· 注数用「出号数量」的当前生效值');
+    if (!ok) return;
+
+    const btn = document.querySelector('[data-regenerate="' + lottery + '"]');
+    const oldTxt = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = '出号中…'; }
+    try {
+        const meta = await api('/api/predict/regenerate', {
+            method: 'POST', body: JSON.stringify({ lottery })
+        });
+        if (meta && meta.ok === false) { alert('重新出号失败：' + (meta.error || '')); return; }
+        tsMsg('正在为 ' + lottery + ' 重新出号（第 ' + meta['重出批号'] + ' 批）…');
+
+        const t0 = Date.now();
+        let result = null, err = null;
+        while (Date.now() - t0 < 300000) {
+            await new Promise(r => setTimeout(r, 1500));
+            let st;
+            try {
+                st = await api('/api/predict/status/' + encodeURIComponent(meta.task_id));
+            } catch (e) { err = String(e); break; }
+            if (st.status === 'done') { result = st.result || {}; break; }
+            if (st.status === 'error') { err = st.error || '未知错误'; break; }
+            tsMsg('正在为 ' + lottery + ' 重新出号… ' +
+                  (st.progress != null ? st.progress + '% ' : '') + (st.message || ''));
+        }
+        if (err) { alert('重新出号失败：' + err); return; }
+        if (!result) { alert('重新出号超时。号码可能已经生成，请到「命中历史 / 记录」页确认，不要反复点击。'); return; }
+
+        if (result['停发']) {
+            alert('本期停发，未出号：' + (result['停发']['原因'] || '预算闸门'));
+            return;
+        }
+        const n = (result.numbers || []).length;
+        if (!n) {
+            alert('没有生成任何号码。常见原因：目标期已开奖（马后炮出号会被拒绝），' +
+                  '或当前出号数量为 0。请先更新数据、确认期号后再试。');
+            return;
+        }
+        tsMsg('已为 ' + lottery + ' 出新号：' + n + ' 注（第 ' + meta['重出批号'] + ' 批）。' +
+              '旧批 ' + (meta['上一批注数'] || 0) + ' 注已保留，开奖后两批都会结算。');
+        await tsLoad();          // 刷新「当前生效 / 下一期建议」
+    } catch (e) {
+        alert('重新出号失败：' + e);
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = oldTxt; }
+    }
 }
 
 async function tsSetMode(mode) {
@@ -1054,6 +1170,16 @@ async function tsSetLock(locked) {
 async function tsSave() {
     const mode = (_tsState && _tsState.mode) || 'fixed';
     const vals = tsCollectValues();
+    // ★ 收集数量必须与页面上渲染的彩种数一致。原实现收集失败时返回空对象，
+    //   保存请求照发不误 ⇒ 后端「合法地什么都没改」⇒ 页面回到原值，而两端都
+    //   没有报错。这类「合法的空提交」是最难查的一种：必须在这里挡住。
+    const expect = ((_tsState && _tsState.lotteries) || []).length;
+    const got = Object.keys(vals).length;
+    if (expect && got !== expect) {
+        alert(`只读取到 ${got}/${expect} 个彩种的注数，本次未提交。\n` +
+              `请刷新页面后重试；若反复出现，说明页面渲染有彩种被漏掉（这是缺陷，请反馈）。`);
+        return;
+    }
     // ★ 只写「当前模式」那一个字段。滑轨显示的就是当前模式的值（动态模式显示动态值、
     //   固定模式显示配置值）；若两个字段一起提交，动态模式下点一次保存就会把动态值
     //   覆盖进 fixed —— fixed 是用户在固定模式下设定的意图锚点，被覆盖后永久丢失，
@@ -1063,8 +1189,9 @@ async function tsSave() {
     body[mode === 'dynamic' ? 'dynamic' : 'fixed'] = vals;
     try {
         const d = await api('/api/settings/ticket-size', { method: 'POST', body: JSON.stringify(body) });
+        if (d && d.ok === false) { alert('保存失败：' + (d.error || '服务端拒绝')); return; }
         _tsState = d; tsRender(d);
-        tsMsg('已保存');
+        tsMsg('已保存（' + got + ' 个彩种）');
     } catch (e) {
         alert('保存失败：' + e);
     }
@@ -1364,7 +1491,7 @@ function _renderAutoBrief(data) {
     if (!box) return;
     const byLottery = data.last_run_by_lottery || {};
     const mainLotteries = ['双色球', '大乐透'];
-    const allLotteries = ['双色球', '大乐透', '排列5', '福彩3D', '排列3', '七星彩'];
+    const allLotteries = wbLotteries();
     const hasAny = allLotteries.some(l => byLottery[l]);
     if (!hasAny) { box.innerHTML = ''; return; }
 
@@ -1718,7 +1845,7 @@ async function loadCompareBoth() {
     if (!box) return;
     box.innerHTML = '<div class="alert alert-info"><span class="spinner"></span> 正在加载全部彩种同轨对比...</div>';
 
-    const ALL_LOTTERIES = ['双色球', '大乐透', '排列5', '福彩3D', '排列3', '七星彩'];
+    const ALL_LOTTERIES = wbLotteries();
     try {
         const results = await Promise.all(ALL_LOTTERIES.map(l =>
             api(`/api/compare/${encodeURIComponent(l)}`).catch(e => ({ lottery: l, error: e.message || e }))
@@ -3368,7 +3495,7 @@ function _toggleAllHits(btn) {
 // 根据下拉决定要渲染的彩种列表
 function _fbLotteries() {
     const sel = $('fb-lottery').value;
-    return sel === '全部彩种' ? ['双色球', '大乐透', '排列5', '福彩3D', '排列3', '七星彩'] : [sel];
+    return sel === '全部彩种' ? wbLotteries() : [sel];
 }
 
 // 切换彩种时，控制红/蓝命中筛选（仅红蓝型）与总命中筛选（仅数字型）的显示
@@ -3573,6 +3700,16 @@ function _renderPendingList(records, groupSize, tierLabel) {
             : '<span class="tag tag-predict" style="margin-left:5px">预测</span>';
         const tierColor = _TIER_COLORS[tierLabel] || '#7f8c9b';
         const tierTag = `<span style="background:${tierColor};color:#fff;font-size:10px;padding:1px 6px;border-radius:8px;margin-left:4px">${tierLabel}档</span>`;
+        // 同一期可能并存多批（「重新出号」）：标出这是第几次重出、哪一批是最新的。
+        // 后端 records 已按记录时间倒序 ⇒ 同一期里先出现的就是新批；这里不重排，
+        // 只把批号写清楚，避免两批看起来像「重复数据」。
+        const _rn = Number(p.重出批号 || 0);
+        const rnTag = _rn > 0
+            ? `<span style="background:#6c5ce7;color:#fff;font-size:10px;padding:1px 6px;border-radius:8px;margin-left:4px" title="同一期出过多批号码（旧批未删除，开奖后各自结算）">第 ${_rn} 次重出</span>`
+            : '';
+        const latestTag = p.最新批次
+            ? `<span style="background:#0984e3;color:#fff;font-size:10px;padding:1px 6px;border-radius:8px;margin-left:4px" title="同一期有多批时，展示与推送优先使用这一批">最新</span>`
+            : '';
         const targetIssue = p.目标期号 ? `第 ${p.目标期号} 期 · ` : '';
         const bundles = _bundleIntoGroups(p.预测号码 || [], groupSize);
         const groupsHtml = bundles.map((g, gi) => {
@@ -3601,7 +3738,7 @@ function _renderPendingList(records, groupSize, tierLabel) {
             ? '<div style="font-size:12px;color:var(--gray);margin-top:6px">无预测号码</div>'
             : '';
         htmlStr += `<div class="card" style="margin:5px 0;padding:10px">
-          <div style="font-size:13px;font-weight:700">${targetIssue}目标开奖 ${p.预测日期 || '未知'}${tierTag}</div>
+          <div style="font-size:13px;font-weight:700">${targetIssue}目标开奖 ${p.预测日期 || '未知'}${tierTag}${rnTag}${latestTag}</div>
           <div style="font-size:11px;color:var(--gray);margin:3px 0">生成于 ${p.记录时间 ? p.记录时间.slice(0,19).replace('T',' ') : '未知'} ${srcTag}</div>
           ${p.鲁棒性说明 ? `<div style="font-size:11px;color:var(--gray);margin:2px 0">${p.鲁棒性说明}</div>` : ''}
           ${p.压缩 && p.压缩.压缩前注数 !== p.压缩.压缩后注数 ? `<div style="font-size:11px;color:var(--gray);margin:2px 0">质量压缩：出号 ${p.压缩.压缩前注数} 注 → 登记 ${p.压缩.压缩后注数} 注（低质量淘汰 ${p.压缩.质量淘汰} · 重复 ${p.压缩.重复淘汰} · 高重叠 ${p.压缩.重叠淘汰}）；只省成本，单注中奖概率不变</div>` : ''}
@@ -4181,7 +4318,7 @@ async function loadEv() {
         limit = parseInt(rawLimit.slice(1), 10) || 50;
     }
     const isAll = lottery.includes('全部彩种');
-    const ALL_LOTTERIES = ['双色球', '大乐透', '排列5', '福彩3D', '排列3', '七星彩'];
+    const ALL_LOTTERIES = wbLotteries();
     const targets = isAll ? ALL_LOTTERIES : [lottery];
 
     // 1. 当前期建议（双彩种并行）
@@ -4236,7 +4373,11 @@ async function loadEv() {
     // 4. 统计文案
     const statParts = dataResults.filter(d => !d.error && d.stats && d.stats.有效期数)
         .map(d => `<strong>${d.lottery}</strong>：平均 ${d.stats.平均期望} · 正期望 ${d.stats.正期望期数}/${d.stats.有效期数} 期 (${d.stats.正期望占比}%)`);
-    html('ev-stats', statParts.length ? statParts.join(' · ') : '暂无统计数据');
+    // ★ 显式宣告「不适用」：没有逐期一等奖奖金的彩种（七乐彩/快乐8），
+    //   空表格必须说明原因，否则会被读成「这个彩种没有数据」。
+    const naParts = dataResults.filter(d => d && d.不适用)
+        .map(d => `<strong>${d.lottery}</strong>：${d.不适用}`);
+    html('ev-stats', [...statParts, ...naParts].length ? [...statParts, ...naParts].join('<br>') : '暂无统计数据');
 
     // 5. 画交互曲线
     const seriesList = dataResults.filter(d => !d.error && d.periods && d.periods.length)

@@ -57,10 +57,20 @@ def measure_gap(lottery: str, *, tracks: Optional[Sequence[str]] = None,
     """
     digital = lottery in DIGITAL_LOTTERIES
     if not digital and lottery not in LOTTO_LOTTERIES:
+        # ★ 必须写清「为什么不行」，不能只说「不在适用清单内」：
+        #   NOT_APPLICABLE 里已经逐条写好了原因（缺哪三列 / 口径为什么不成立），
+        #   不引用的话，读的人会以为名字打错或漏接，于是反复来问、
+        #   甚至去改装载代码硬塞进来（common.py 的注释就是为了这件事）。
+        from ev.mechanism.common import NOT_APPLICABLE
+
+        why = NOT_APPLICABLE.get(lottery) or (
+            f"{lottery} 既不在乐透型 {LOTTO_LOTTERIES}，"
+            f"也不在数字型 {DIGITAL_LOTTERIES} 的适用清单内")
         return {"lottery": lottery, "applicable": False,
                 "status": "not-applicable",
-                "note": (f"{lottery} 既不在乐透型 {LOTTO_LOTTERIES}，"
-                         f"也不在数字型 {DIGITAL_LOTTERIES} 的适用清单内")}
+                # 同时给「未测量」标记：不适用 ≠ 已测且无缝隙
+                "未测量": True,
+                "note": why}
     tr = tuple(tracks) if tracks else (TRACKS_DIGITAL if digital else TRACKS_LOTTO)
     default_tracks = (digital and set(tr) == set(TRACKS_DIGITAL)) or \
                      ((not digital) and set(tr) == set(TRACKS_LOTTO))

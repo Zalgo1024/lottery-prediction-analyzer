@@ -53,22 +53,28 @@ def _median_from_counts(counts: Dict[int, int]) -> Optional[float]:
 
 def _pair_distance(a: Dict[str, List[int]], b: Dict[str, List[int]],
                    redblue: bool) -> int:
-    """两条开奖（或预测 vs 开奖）之间的距离 D。"""
-    if redblue:
-        d = 0
-        for name, choose in (("红球", a.get("红球", [])), ("蓝球", a.get("蓝球", []))):
-            other = b.get(name, [])
-            inter = len(set(map(int, choose)) & set(map(int, other)))
-            d += len(choose) - inter
-        return d
-    n = 0
+    """两条开奖（或预测 vs 开奖）之间的距离 D。
+
+    统一公式：`D = Σ_分区 (票面该区个数 − 与对方该区的交集个数)`。
+
+    ★ 为什么统一（2026-11-02）：旧实现分两支 —— 红蓝球走集合交集，
+      「数字型」走 `vals[0] != other[0]`（**只看每个分区的第 1 个号**）。
+      对每区 1 号的数字型（3D/排3/排5/七星彩）两种写法逐值相等；
+      但七乐彩每区 7 个号、快乐8 每区 10 个号，只看首号会得出
+      「基线中位距离 1.0、基线近距离率 100%」这种荒谬读数
+      （快乐8 开奖 20 个号与票面 10 个号几乎必然在 1 个号上相邻）。
+      统一后数字型自动退化为「逐位是否相同」，行为不变。
+
+    跳过空分区：票面没有的区（如七乐彩的 draw_only 特别号）不参与扣分。
+    """
+    d = 0
     for name, vals in a.items():
-        other = b.get(name, [])
+        other = b.get(name) or []
         if not vals or not other:
             continue
-        if int(vals[0]) != int(other[0]):
-            n += 1
-    return n
+        inter = len(set(map(int, vals)) & set(map(int, other)))
+        d += len(vals) - inter
+    return d
 
 
 def distance_stats(lottery: str, mc_trials: int = 5000,
@@ -84,6 +90,10 @@ def distance_stats(lottery: str, mc_trials: int = 5000,
     redblue = is_redblue(lottery)
     schema = get_schema(lottery)
     choose = schema.total_choose
+    # 是否存在「一区多号」（七乐彩 7 个基本号、快乐8 10 个票面号）——
+    # 这决定距离是不是逐位比较，决定卡片上的类型标签怎么读。
+    multi_zone = any(((z.choose or 0) > 1 or (z.draw_count or 0) > 1)
+                     for z in schema.zones)
 
     history = load_feedback_history(lottery)
     records = history if isinstance(history, list) else history.get("records", [])
@@ -99,6 +109,11 @@ def distance_stats(lottery: str, mc_trials: int = 5000,
     # ---- 基线：真实开奖随机配对 ----
     draws = [d.zone_numbers for d in load_lottery(lottery).records
              if getattr(d, "zone_numbers", None)]
+    # ★ draw_only 区（七乐彩特别号）只出现在开奖、票面没有 ⇒ 必须从基线里剔除。
+    #   否则基线最大距离是 8，而票面观测最大只有 7，两条分布不在同一量纲上。
+    _drop = {z.name for z in schema.zones if getattr(z, "draw_only", False)}
+    if _drop:
+        draws = [{k: v for k, v in d.items() if k not in _drop} for d in draws]
     base: Counter = Counter()
     rng = np.random.default_rng(seed)
     if len(draws) >= 2:
@@ -144,7 +159,8 @@ def distance_stats(lottery: str, mc_trials: int = 5000,
 
     return {
         "彩种": lottery,
-        "类型": "红蓝球" if redblue else "按位数字型",
+        "类型": ("红蓝球" if redblue else
+                 "无序多号分区" if multi_zone else "按位数字型"),
         "总可中位数": choose,
         "样本数": n_obs,
         "观测分布": {str(k): v for k, v in sorted(obs.items())},

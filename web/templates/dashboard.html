@@ -56,6 +56,9 @@
     <span id="ts-policy" style="font-size:12px;color:var(--gray)"></span>
   </div>
   <div id="ts-rows"></div>
+  <!-- 预算闸门只读读数：闸门是硬约束，但此前界面上没有任何出口，
+       额度用尽时表现为「某天起忽然不出号」，而滑轨照样显示正常。 -->
+  <div id="ts-budget" style="font-size:11px;color:var(--gray);margin-top:8px"></div>
   <div style="margin-top:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
     <label style="font-size:12px;display:inline-flex;align-items:center;gap:5px;cursor:pointer"
            title="锁定后，动态策略不会在开奖结算时自动改动注数。你设多少就是多少。">
@@ -77,8 +80,7 @@
   <p style="font-size:13px;color:var(--gray)">一键完成：抓取最新开奖 → 评估上期预测 → 更新策略权重 → 生成下一期预测</p>
   <div style="margin-top:8px">
     <select id="auto-lottery" style="padding:5px 10px;border:1px solid #ddd;border-radius:5px">
-      <option>双色球</option><option>大乐透</option><option>排列5</option><option>福彩3D</option><option>排列3</option><option>七星彩</option>
-    </select>
+      {% for lot in lotteries %}<option>{{ lot }}</option>{% endfor %}</select>
     <select id="auto-mode" style="padding:5px 10px;border:1px solid #ddd;border-radius:5px">
       <option value="fresh">预测模式: 即时统计</option>
       <option value="rule">预测模式: 规则优选</option>
@@ -164,8 +166,7 @@
   <h3><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.5" fill="currentColor"/></svg>最近预测 vs 实际开奖</h3>
   <div style="margin-bottom:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
     <select id="compare-lottery" style="padding:5px 10px;border:1px solid #ddd;border-radius:5px">
-      <option>双色球</option><option>大乐透</option><option>排列5</option><option>福彩3D</option><option>排列3</option><option>七星彩</option>
-    </select>
+      {% for lot in lotteries %}<option>{{ lot }}</option>{% endfor %}</select>
     <button class="btn btn-info btn-sm" onclick="loadCompare(document.getElementById('compare-lottery').value)">加载对比</button>
     <button class="btn btn-default btn-sm" onclick="loadCompareBothInline()">双色球 + 大乐透 同轨显示</button>
     <a href="/compare" class="btn btn-default btn-sm">全屏对比页 →</a>

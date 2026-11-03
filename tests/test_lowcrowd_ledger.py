@@ -87,9 +87,15 @@ def test_domain_derivation_and_backward_compat():
 def test_pending_key_separates_domains():
     prod = {"目标期号": 1, "策略": "高频策略"}
     res = {"目标期号": 1, "策略": "低拥挤策略"}
-    assert _pending_key(prod) == (1, TIER_GENERAL, DOMAIN_PROD)
-    assert _pending_key(res) == (1, TIER_GENERAL, DOMAIN_RESEARCH)
+    # 第 4 维是「重出批号」（2026-11-02 重新出号）：首出缺省归一化为 0，
+    # 不是新开一维 —— 老记录没这个字段也必须与显式 0 判等，否则同一批会被拆成两条。
+    assert _pending_key(prod) == (1, TIER_GENERAL, DOMAIN_PROD, 0)
+    assert _pending_key(res) == (1, TIER_GENERAL, DOMAIN_RESEARCH, 0)
     assert _pending_key(prod) != _pending_key(res)
+    # 重出批号不同 ⇒ 同期待开奖的两批并存（旧批不许被新批覆盖）
+    assert _pending_key(prod) != _pending_key(dict(prod, **{"重出批号": 1}))
+    assert _pending_key(dict(prod, **{"重出批号": 1})) == (1, TIER_GENERAL, DOMAIN_PROD, 1)
+    assert _pending_key({"目标期号": 1, "重出批号": 2}) == (1, TIER_GENERAL, DOMAIN_PROD, 2)
 
 
 # ---------------------------------------------------------------- ② 共存 / 替换

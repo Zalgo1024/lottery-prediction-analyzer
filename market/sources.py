@@ -73,40 +73,114 @@ REGIONS = [
     "江苏", "浙江", "安徽", "福建", "江西", "山东", "河南", "湖北", "湖南",
     "广东", "广西", "海南", "重庆", "四川", "贵州", "云南", "西藏", "陕西",
     "甘肃", "青海", "宁夏", "新疆", "台湾", "香港", "澳门",
+    # ★计划单列市：福彩原文里「深圳」与「广东」**并排列出**（广东 2 注 + 深圳 1 注 = 3 注），
+    #   即广东口径**不含**深圳。若不认深圳，这些注会整条丢失（实测双色球 356 期、
+    #   七乐彩 15 期、快乐8 12 期原文含深圳，是「分省合计<官方一等奖」的主因）。
+    #   ★注意：财政部《分省销量》的「广东」**含**深圳 ⇒ 做「头奖/销量」比值时
+    #   深圳没有分母，界面必须显示「—」，不能当 0。
+    "深圳",
 ]
 
-# 长名优先，避免「内蒙古」被「内蒙」截断这类问题
-_REGION_ALT = "|".join(sorted(REGIONS, key=len, reverse=True))
-
-# 「内蒙古7注」「上海 1 注」「共9注」(共 不在省名表里，天然排除)
-_REGION_RE = re.compile(r"(%s)\s*(\d+)\s*注" % _REGION_ALT)
-
-# 「共9注」「共0注」——头奖总注数
-_TOTAL_RE = re.compile(r"共\s*(\d+)\s*注")
-
-# 别名归一：源里偶见「内蒙」「广西壮族」等写法
+# 别名归一：源里偶见「内蒙」「广西壮族」等写法（★必须在 _REGION_ALT 之前定义，
+#   因为「内蒙」这类短名要能被正则直接匹配到，否则「内蒙(基本1注)」整省丢掉）
 _ALIAS = {
     "内蒙": "内蒙古",
     "广西壮族": "广西", "宁夏回族": "宁夏", "新疆维吾尔": "新疆",
     "西藏自治区": "西藏",
 }
 
+# 长名优先，避免「内蒙古」被「内蒙」截断这类问题；同时把别名也纳入可匹配集合
+_REGION_ALT = "|".join(sorted(set(REGIONS) | set(_ALIAS), key=len, reverse=True))
+
+# 「内蒙古7注」「上海 1 注」「共9注」(共 不在省名表里，天然排除)
+_REGION_RE = re.compile(r"(%s)\s*(\d+)\s*注" % _REGION_ALT)
+
+# ★大乐透/中彩网详情格式：「辽宁(基本1注)、湖北(基本3注 追加1注)、湖南(基本1注)」
+#   —— 省名后跟括号，括号内「基本N注」+ 可选「追加M注」。
+#   ★★「追加」不是另一种票，而是对同一注加 1 元手续费后提高一/二等奖金，
+#      所以 湖北(基本3注 追加1注) = 湖北中出 3 注一等奖（其中 1 注是追加票），
+#      **不是 4 注**。按 4 计数会让分省合计=7 而奖级表一等奖=6，凭空多出一注。
+#   ★不能复用 _REGION_RE：它只认「省名N注」，遇到括号格式整段返回空，
+#   会让大乐透分省数据全丢。
+#   ★★括号有**全角/半角**两种：2014 年前后是「上海（基本1 注）」（全角括号 + 「1 注」
+#      中间还有空格），2018 年后是「辽宁(基本1注)」。只认半角 ⇒ 整期解析成空，
+#      而且因为写不进 prize_region，`only_missing` 每轮都会把它当缺口再抓一遍
+#      （实测 38 期「抓到了原文但没出行」，永久重抓）。下面三个正则都同时认全角半角。
+_PAREN_REGION_RE = re.compile(r"(%s)\s*[\(（]([^)）]*)[\)）]" % _REGION_ALT)
+_PAREN_BASIC_RE = re.compile(r"基本\s*(\d+)\s*注")
+_PAREN_ANY_RE = re.compile(r"(\d+)\s*注")
+
+# ★原文被**截断**时末尾那个省的右括号会缺（实测 dlt 16098：
+#   「内蒙(基本1注)、吉林(基本1注)、浙江(基本2注 追加2注」——浙江少 2 注）。
+#   只用「右括号可有可无」会吞掉下一省的文本，所以单独做**串尾**兜底。
+_TAIL_PAREN_RE = re.compile(r"(%s)\s*[\(（]([^)）]*)$" % _REGION_ALT)
+
+# 非地域口径的中奖（没有省份可归）：福彩「积分换彩」= 用积分兑换的票中奖。
+# ★官方一等奖总数**包含**它们 ⇒ 一致性校验不能把它当「偏少」。
+NON_REGION_BUCKETS = ("积分换彩",)
+_BUCKET_RE = re.compile(r"(%s)\s*(\d+)\s*注" % "|".join(NON_REGION_BUCKETS))
+
+# 「共9注」「共0注」——头奖总注数
+_TOTAL_RE = re.compile(r"共\s*(\d+)\s*注")
+
 
 def parse_region_text(text: str) -> list[tuple[str, int]]:
     """把「内蒙古7注，上海1注，安徽1注，共9注。」解析成 [('内蒙古',7),('上海',1),('安徽',1)]。
 
+    同时兼容中彩网大乐透的括号格式「辽宁(基本1注)、湖北(基本3注 追加1注)」——
+    取括号内「基本N注」为该省头奖注数。★「追加M注」是同一注的加价投注，
+    不是额外的注，**不并入**（否则分省合计会多出追加那些注，与奖级表对不上）。
+
     容错：全角/半角逗号、空格、无「共」结尾、多行。解析不出来就返回空列表——
     绝不猜测，宁可这一期没有地区行。
+
+    ★★必须**先压掉所有空白**：老期原文里有「甘 肃(基本1注)」「浙 江(基本1注)」
+      「追加 1注」这种排版空格 —— 不压掉就会整省漏计（实测 2018~2019 有 132 期
+      分省合计比官方一等奖少 1~2 注，全是这类空格/「内蒙」缩写导致）。
+    ★★「其中…」之后全是**前面总数的子集细分**，必须截掉，否则重复计数：
+      「其中复式投注为：…」「其中复式或胆拖投注为：…」「其中一等奖特别奖为：…」（派奖期）。
+      实测双色球 176 期、七乐彩 21 期分省合计虚高（2016132 分省 51 vs 官方 37）。
     """
     if not text:
         return []
-    s = str(text).replace("\u3000", " ").strip()
+    s = re.sub(r"[\s\u3000]+", "", str(text))
+    # 子集段截断（见上）；「其中」不可能是省名的一部分
+    s = s.split("其中", 1)[0]
     out: list[tuple[str, int]] = []
-    for m in _REGION_RE.finditer(s):
+
+    # 1) 括号格式（大乐透）：省名(...) → 取「基本N注」；无「基本」标签时退回首个「N注」
+    for m in _PAREN_REGION_RE.finditer(s):
         region = _ALIAS.get(m.group(1), m.group(1))
-        n = int(m.group(2))
+        inner = m.group(2)
+        mb = _PAREN_BASIC_RE.search(inner)
+        if mb:
+            n = int(mb.group(1))
+        else:
+            ma = _PAREN_ANY_RE.search(inner)
+            n = int(ma.group(1)) if ma else 0
         if n > 0:
             out.append((region, n))
+
+    # 1b) 原文末尾被截断：最后一个省只有左括号（见 _TAIL_PAREN_RE 注释）
+    if "(" in s or "（" in s:
+        mt = _TAIL_PAREN_RE.search(s)
+        if mt:
+            region = _ALIAS.get(mt.group(1), mt.group(1))
+            if region not in {r for r, _ in out}:
+                inner = mt.group(2)
+                mb = _PAREN_BASIC_RE.search(inner) or _PAREN_ANY_RE.search(inner)
+                n = int(mb.group(1)) if mb else 0
+                if n > 0:
+                    out.append((region, n))
+
+    # 2) 无括号格式（福彩 cwl / 中彩网双色球）：省名N注
+    if not out:
+        for m in _REGION_RE.finditer(s):
+            region = _ALIAS.get(m.group(1), m.group(1))
+            n = int(m.group(2))
+            if n > 0:
+                out.append((region, n))
+
     # 同一省重复出现（如「广东3注，广东1注」）合并
     if out:
         merged: dict[str, int] = {}
@@ -117,11 +191,28 @@ def parse_region_text(text: str) -> list[tuple[str, int]]:
 
 
 def parse_total_from_text(text: str) -> int | None:
-    """取「共N注」；没有则返回 None（不要用地区和代替，两者可能不等）。"""
+    """取「共N注」；没有则返回 None（不要用地区和代替，两者可能不等）。
+
+    括号格式（大乐透）没有「共N注」结尾，此时返回 None——
+    头奖总注数应由各地区注数求和或奖级注数另行补足。
+    """
     if not text:
         return None
     m = _TOTAL_RE.search(str(text))
     return int(m.group(1)) if m else None
+
+
+def parse_non_region_buckets(text: str) -> list[tuple[str, int]]:
+    """取「非地域口径」的中奖注数，如「积分换彩1注」= 用积分兑换的票中奖，没有省份。
+
+    ★为什么不写进 prize_region：没有省可归，硬塞一个假地区等于伪造。
+    ★为什么校验要认它：官方一等奖总数**包含**这些注 ⇒ 不认就会每轮报「偏少」
+      （实测 qlc 2020033 分省 1 + 积分换彩 1 = 官方 2）。
+    """
+    if not text:
+        return []
+    s = re.sub(r"[\s\u3000]+", "", str(text))
+    return [(m.group(1), int(m.group(2))) for m in _BUCKET_RE.finditer(s)]
 
 
 # ------------------------------------------------------------------ 通用工具
@@ -470,6 +561,64 @@ def _zhcw_normalize(code: str, x: dict):
         first_winners=None, first_region_raw=None,
     )
     return draw_row, prize_rows, []
+
+
+# ------------------------------------------------------------------ 中彩网：详情页头奖分省
+
+# ★中彩网列表接口（10001001）的 winnerDetails 只有奖级注数、没有地区；
+#   头奖分省藏在「详情页接口」里：kjxq 页面用 avalon.js 模板 {{j1zjqk}} 占位，
+#   由 transactionType=10001002 的 JSONP 接口返回 firstPrizeAddress 字段填充。
+#   该字段只对乐透型（双色球/七乐彩/快乐8/大乐透）有意义，
+#   数字型（3D/排3/排5/七星彩）返回空串/None —— 数字型本就没有「头奖」概念。
+ZHCW_DETAIL_BASE = ("https://jc.zhcw.com/port/client_json.php"
+                    "?transactionType=10001002&lotteryId=%s&issue=%s&tt=0.1")
+
+# lotteryId 与列表接口（10001001）用的是同一套 czid 映射
+ZHCW_DETAIL_ID = {
+    "ssq": 1, "sd": 2, "qlc": 3, "kl8": 6,
+    "dlt": 281, "pl3": 283, "pl5": 284, "qxc": 282,
+}
+
+
+def fetch_zhcw_region(code: str, issue: str) -> tuple[str | None, list[tuple[str, int]]]:
+    """抓中彩网详情页接口的头奖分省。
+
+    返回 (first_region_raw, region_rows)，其中 region_rows 是 [('辽宁', 1), ...]。
+    - 源头没分省（数字型 / 该期无人中头奖 / 接口无此字段）→ 返回 (None, [])。
+    - 绝不猜测：firstPrizeAddress 为空时直接返回空，不伪造「共0注」。
+
+    ★★请求本身失败（网络/限流/断连）必须**抛异常**，不能返回 (None, [])：
+      两者在调用方眼里长得一模一样，会把「抓失败」记成「无人中」。
+      2026-11-01 实踩：中彩网在约 1600 次请求后开始 `RemoteDisconnected`，
+      旧代码静默返回空 ⇒ 统计口径里全算成 empty，看着像「数据本来就没有」。
+    
+    格式实测（2026-11-01）：
+      大乐透  「辽宁(基本1注)、湖北(基本3注 追加1注)、湖南(基本1注)、重庆(基本1注)。」
+      双色球  「江苏1注，山东2注，广东1注，广西2注，四川1注，西藏1注，共8注。」
+      七乐彩  「河南1注，陕西1注，共2注。」
+    """
+    lid = ZHCW_DETAIL_ID.get(code)
+    if lid is None:
+        return None, []
+    # ★失败就让它抛出去（见 docstring）：绝不把「抓不到」伪装成「没有」
+    raw = _get(ZHCW_DETAIL_BASE % (lid, issue), referer=ZHCW_REFERER, timeout=40,
+               as_json=False)
+    # JSONP：callback({...})；直接用 json.loads 可能失败，剥掉 callback 外壳
+    txt = raw.decode("utf-8", "replace").strip() if isinstance(raw, bytes) else str(raw).strip()
+    m = re.search(r"\{.*\}", txt, re.S)
+    if not m:
+        return None, []
+    try:
+        d = json.loads(m.group(0))
+    except json.JSONDecodeError:
+        return None, []
+    if d.get("resCode") != "000000":
+        return None, []
+    fpa = (d.get("firstPrizeAddress") or "").strip()
+    if not fpa:
+        return None, []
+    region_rows = [(r, n) for r, n in parse_region_text(fpa)]
+    return fpa, region_rows
 
 
 # ------------------------------------------------------------------ 财政部

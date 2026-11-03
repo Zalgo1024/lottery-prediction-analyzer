@@ -112,6 +112,38 @@ LOTTERY_CONFIG = {
         # 单注奖金模型（仅建模最高「精确全中(7位)」档，一等奖浮动封顶500万）
         "payout": {"cost": 2, "exact_match": 5000000},
     },
+    # ===== 七乐彩（2026-11-01 接入）=====
+    # 7 个基本号（1-30）+ 1 个特别号（1-30，从剩余 23 个摇出；只开不选）。
+    # 特别号用 draw_only + draw=1：draw_count=1（开奖记录里有它）、ticket_count=0（票面不含）。
+    "七乐彩": {
+        "name_en": "qlc",
+        "draw_days": [0, 2, 4],  # 周一/周三/周五（weekday(): 一=0…日=6）
+        "zones": [
+            {"name": "基本号", "min": 1, "max": 30, "choose": 7,
+             "repeatable": False, "ordered": False},
+            {"name": "特别号", "min": 1, "max": 30, "choose": 0, "draw": 1,
+             "draw_only": True},
+        ],
+        "payout": {"cost": 2},
+    },
+    # ===== 快乐8（2026-11-02 接入）=====
+    # ★ 与既有 6 彩种的几何根本不同：**开奖摇 20 个（1-80），票面按玩法选 1~10 个**。
+    #   `draw: 20` 是开奖数，`choose: 10` 是「选十」（默认玩法）的票面数；
+    #   其余玩法的票面数走 `plays`（见 data/schema.LotterySchema.picks_for）。
+    # 10 种玩法没有拆成 10 个彩种：pending/账本/预算/停发联锁/推送全部以「彩种」为键，
+    #   拆开会把注数、额度、台账、health() 一起乘 10。
+    "快乐8": {
+        "name_en": "kl8",
+        "draw_days": [0, 1, 2, 3, 4, 5, 6],   # 每日开奖
+        "zones": [
+            {"name": "基本号", "min": 1, "max": 80, "choose": 10, "draw": 20,
+             "repeatable": False, "ordered": False},
+        ],
+        "plays": {"选一": 1, "选二": 2, "选三": 3, "选四": 4, "选五": 5,
+                  "选六": 6, "选七": 7, "选八": 8, "选九": 9, "选十": 10},
+        "default_play": "选十",
+        "payout": {"cost": 2},
+    },
 }
 
 DEFAULT_TICKET_PRICE = 2.0
@@ -264,9 +296,15 @@ AUTO_GROUPS = 100
 #   但**不是**预测能力变化（每注 EV 仍为负）。
 DIGITAL_GROUPS = 5            # 福彩3D / 排列3 / 排列5
 LOTTERY_STYLE_GROUPS = 100    # 双色球 / 大乐透 / 七星彩
+# 快乐8：**日开**（30 期/月），沿用 500 的乐透型兜底会让月度投入乘 30。
+# 与 数字型 同取 5 的理由不是「它像数字型」，而是「日开彩种每期注数必须压到个位数」：
+#   5 注 × 30 期 × 2 元 = 300 元/月；若 100 注则是 6000 元/月（= 排列5 的 30 期口径上限）。
+KL8_GROUPS = 5
 GROUPS_BY_LOTTERY = {
     "福彩3D": DIGITAL_GROUPS, "排列3": DIGITAL_GROUPS, "排列5": DIGITAL_GROUPS,
-    "双色球": LOTTERY_STYLE_GROUPS, "大乐透": LOTTERY_STYLE_GROUPS, "七星彩": LOTTERY_STYLE_GROUPS,
+    "双色球": LOTTERY_STYLE_GROUPS, "大乐透": LOTTERY_STYLE_GROUPS,
+    "七星彩": LOTTERY_STYLE_GROUPS, "七乐彩": LOTTERY_STYLE_GROUPS,
+    "快乐8": KL8_GROUPS,
 }
 
 # 低重叠剪枝（ev/coverage.prune_predicted_sets）：

@@ -18,7 +18,8 @@ from typing import Any, Dict, List, Optional
 from data.audit import thresholds as TH
 from data.audit import CONCLUSION_DISCIPLINE
 
-LOTS = ("双色球", "大乐透", "排列5", "福彩3D", "排列3", "七星彩")
+LOTS = ("双色球", "大乐透", "排列5", "福彩3D", "排列3", "七星彩",
+        "七乐彩", "快乐8")
 
 
 def _num(x: Any) -> float:

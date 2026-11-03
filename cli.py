@@ -14,6 +14,45 @@ from logs.logger import setup_logger, set_module_level
 
 logger = setup_logger("cli")
 
+# ============================================================
+# 研究轨命令对「七乐彩 / 快乐8」的显式拒绝
+# ============================================================
+# ★ 为什么不用 argparse choices 直接挡：`invalid choice` 只说"不支持"，不说"为什么"、
+#   也不说该用哪个命令 —— 用户会以为整个彩种是坏的。这里放进来再解释清楚。
+# ★ 注意区分两种「没有」：
+#   - 快乐8 / 七乐彩 的**每注 EV 在当期是常数**（与选号无关）⇒ 需要按 EV 排序的策略
+#     天然没有排序键，那是「不适用」；
+#   - 奖级达标 / rulebook 那一类只是**本仓没实现**，不代表它们不可能，措辞必须区分开。
+_UNSUPPORTED_RESEARCH = {
+    "ev": (
+        "net_ev 的排序键来自 `ev.rulebook.PAYOUT_TABLE`（只覆盖 6 个彩种）。"
+        "更要紧的是：这两个彩种的单注 EV 在当前规则下与选号无关，本就没有可排序的量。"
+        "要看 EV 请用 `payout`（按当期实测单注奖金逐奖级列出）。"
+    ),
+    "profit": (
+        "盈利门槛策略筛的是「净 EV 更高的票」。这两个彩种的净 EV 与号码无关"
+        "（见 `ev/selection.py::_CONSTANT_EV`），筛出来的只能是噪声 ⇒ 不实现。"
+    ),
+    "prize-tier": (
+        "奖级达标引擎依赖 `ev.rulebook` 的奖级表，尚未覆盖这两个彩种 —— "
+        "这是**本仓未实现**，不代表该目标不可达成。"
+    ),
+}
+
+_UNSUPPORTED_LOTS = ("七乐彩", "快乐8")
+
+
+def _explain_unsupported(cmd: str, lottery: str) -> bool:
+    """命令不支持该彩种时打印原因并返回 True（调用方直接 return）。"""
+    if lottery not in _UNSUPPORTED_LOTS or cmd not in _UNSUPPORTED_RESEARCH:
+        return False
+    print(f"=== {lottery} · `{cmd}` 不适用于本彩种 ===")
+    print(_UNSUPPORTED_RESEARCH[cmd])
+    print(f"  可用替代: python cli.py payout {lottery} "
+          f"--nums {','.join(str(i) for i in range(1, 8 if lottery == '七乐彩' else 11))}"
+          f"{' --play 选十' if lottery == '快乐8' else ''}")
+    return True
+
 
 def main():
     # GBK 控制台/重定向兜底：CLI 输出含 ℹ️✅⚠️ 等非 GBK 字符时
@@ -390,7 +429,7 @@ def main():
         "ev",
         help="EV计算（任务1.2）：名义EV/限号EV/限号暴露概率，冷门号TOP",
     )
-    ev_parser.add_argument("lottery", choices=["排列5", "福彩3D", "排列3", "七星彩", "双色球", "大乐透"],
+    ev_parser.add_argument("lottery", choices=["排列5", "福彩3D", "排列3", "七星彩", "双色球", "大乐透", "七乐彩", "快乐8"],
                            help="彩票类型")
     ev_parser.add_argument("--ticket", default=None, help="直选号码，如 123（3D类）/ 12345（排列5）/ 1234567（七星彩）")
     ev_parser.add_argument("--issue", default=None, help="期号（默认最新一期）")
@@ -408,7 +447,7 @@ def main():
     )
     profit_parser.add_argument(
         "lottery", nargs="?", default="双色球",
-        choices=["双色球", "大乐透", "七星彩", "排列3", "排列5", "福彩3D"])
+        choices=["双色球", "大乐透", "七星彩", "排列3", "排列5", "福彩3D", "七乐彩", "快乐8"])
     profit_parser.add_argument("--issue", default=None, help="目标期号（默认自动取下一期）")
     profit_parser.add_argument("--groups", type=int, default=20, help="出号注数（默认 20）")
     profit_parser.add_argument("--scenario", action="store_true", help="同时输出情景倍数扫描")
@@ -435,7 +474,7 @@ def main():
     )
     tier_parser.add_argument(
         "lottery", nargs="?", default="双色球",
-        choices=["双色球", "大乐透", "七星彩", "排列3", "排列5", "福彩3D"])
+        choices=["双色球", "大乐透", "七星彩", "排列3", "排列5", "福彩3D", "七乐彩", "快乐8"])
     tier_parser.add_argument("--issue", default=None, help="目标期号（默认自动取下一期）")
     tier_parser.add_argument("--target", default="四等",
                              help="达标线：奖级（四等/五等/六等…）或金额（10 / 10元）")
@@ -466,12 +505,19 @@ def main():
         "payout",
         help="实得奖金统一口径（NetPayout WP0）：各奖级概率×实得单注+净EV",
     )
-    payout_parser.add_argument("lottery", choices=["排列5", "福彩3D", "排列3", "七星彩", "双色球", "大乐透"],
+    payout_parser.add_argument("lottery",
+                               choices=["排列5", "福彩3D", "排列3", "七星彩",
+                                        "双色球", "大乐透", "七乐彩", "快乐8"],
                                help="彩票类型")
     payout_parser.add_argument("--ticket", default=None,
                                help="数字型号码：123（3D类）/ 12345（排列5）/ 1234567（七星彩）")
     payout_parser.add_argument("--red", default=None, help="乐透型红球（前区），逗号分隔，如 1,2,3,4,5,6")
     payout_parser.add_argument("--blue", default=None, help="乐透型蓝球（后区），逗号分隔，如 7")
+    payout_parser.add_argument("--nums", default=None,
+                               help="分区型号码（七乐彩 7 个基本号 / 快乐8 按玩法 1~10 个），"
+                                    "逗号分隔，如 1,2,3,4,5,6,7")
+    payout_parser.add_argument("--play", default=None,
+                               help="快乐8 玩法（选一~选十）；缺省由 --nums 的个数反解")
     payout_parser.add_argument("--issue", default=None, help="期号（默认最新一期）")
 
     # ----- select（NetPayout WP2：按实得奖金选号）-----
@@ -479,7 +525,7 @@ def main():
         "select",
         help="按实得奖金选号（NetPayout WP2）：候选池→净EV排序→低重叠贪心",
     )
-    sel_parser.add_argument("lottery", choices=["排列5", "福彩3D", "排列3", "七星彩", "双色球", "大乐透"],
+    sel_parser.add_argument("lottery", choices=["排列5", "福彩3D", "排列3", "七星彩", "双色球", "大乐透", "七乐彩", "快乐8"],
                             help="彩票类型")
     sel_parser.add_argument("--groups", type=int, default=5, help="出号组数（默认 5）")
     sel_parser.add_argument("--pool", type=int, default=20000, help="随机候选池大小（默认 20000）")
@@ -838,13 +884,19 @@ def _cmd_gap(args):
     """
     import json as _json
     from ev import gap as _gap
-    from ev.mechanism.common import ALL_LOTTERIES
+    from ev.mechanism.common import ALL_LOTTERIES, NOT_APPLICABLE
 
     known = tuple(ALL_LOTTERIES)
     if args.lottery == "all":
         lots = list(known)
     elif args.lottery in known:
         lots = [args.lottery]
+    elif args.lottery in NOT_APPLICABLE:
+        # ★ 「不适用」与「名字打错 / 还没接」必须分开报，否则会被当成漏接来"修"
+        print(f"「{args.lottery}」已接入生产，但**本条研究轨不适用**：")
+        print(f"  {NOT_APPLICABLE[args.lottery]}")
+        print(f"本轨可选：{', '.join(known)} 或 all")
+        return
     else:
         print(f"「{args.lottery}」不在适用清单内；可选：{', '.join(known)} 或 all")
         return
@@ -876,7 +928,8 @@ def _cmd_auto(args):
     """自动流水线：抓取 → 评估 → 异常检测 → 预测 → 期望 →（可选）重训"""
     from data.fetcher import update_lottery_data
     from data.feedback import (evaluate_pending_predictions, load_pending,
-                               latest_production_pending, _next_issue)
+                               latest_production_pending, _next_issue,
+                               renumber_scope)
     from data.loader import load_lottery
     from prediction.engine import predict
     from prediction.reporter import save_prediction_record
@@ -1060,13 +1113,29 @@ def _cmd_auto(args):
                 print(f"[4/6] 生成下一期预测 (mode={args.mode}, groups={groups_eff})...")
                 if args.no_record:
                     print("[4/6] --no-record：仅试算，不写生产 pending")
+                # ★ 2026-11-02（用户需求「重新出号」）：组数不一致而重生成时**不覆盖**上一批，
+                #   而是另起一批。CLI 也是「出号」—— 若这里按覆盖写盘，用户刚在命令行出过的
+                #   号就查不到了，而 Web 侧已经在另起批次 ⇒ 两条路径的台账语义不一致。
+                #   只在**真要落盘**时递增：试算（--no-record）不该把用户的批号推高。
+                _rn = 0
+                if existing and not args.no_record:
+                    try:
+                        from data.feedback import next_renumber
+                        _rn = next_renumber(name, target_issue)
+                    except Exception as _e:                      # noqa: BLE001
+                        print(f"  ⚠️ 重出批号解析失败，按首出批写入：{_e}")
+                        _rn = 0
+                    if _rn:
+                        print(f"  另起第 {_rn} 批（旧批 {len(existing.get('预测号码') or [])} 注保留，"
+                              f"开奖后各自结算）")
                 try:
-                    pred = predict(
-                        lottery_name=name,
-                        groups=groups_eff,
-                        mode=args.mode,
-                        record_pending=not args.no_record,
-                    )
+                    with renumber_scope(_rn):
+                        pred = predict(
+                            lottery_name=name,
+                            groups=groups_eff,
+                            mode=args.mode,
+                            record_pending=not args.no_record,
+                        )
                     path = save_prediction_record(pred)
                     predictions = (pred.get('预测号码') or [])[:groups_eff]
                     fresh_prediction = True
@@ -1798,8 +1867,9 @@ def _cmd_changepoint(args):
     """P2-2：单变点扫描（自动找号码/数据口径突变点，供 rolling 切窗参考）"""
     from credibility.changepoint import OUT_JSON, change_point_scan
 
+    # 纯数据口径扫描：不依赖 EV/奖级表，凡有历史数据的彩种都该扫到
     names = [args.lottery] if args.lottery \
-        else ["双色球", "大乐透", "排列5", "福彩3D", "排列3", "七星彩"]
+        else ["双色球", "大乐透", "排列5", "福彩3D", "排列3", "七星彩", "七乐彩", "快乐8"]
     for nm in names:
         rep = change_point_scan(nm, B=args.perm, min_seg=args.min_seg,
                                 v_gate=args.v_gate, write_json=not args.no_write)
@@ -2178,6 +2248,8 @@ def _extreme_demo_nums(model, name):
 
 def _cmd_ev(args):
     """EV 计算：名义EV / 限号EV / 冷门TOP"""
+    if _explain_unsupported("ev", args.lottery):
+        return
     from ev.engine import net_ev, scan_issues
 
     def _show(r):
@@ -2253,6 +2325,8 @@ def _cmd_ev(args):
 
 def _cmd_profit(args):
     """盈利门槛策略（研究）：判决 + 四指标 + 可选情景扫描/影子台账。"""
+    if _explain_unsupported("profit", args.lottery or "双色球"):
+        return
     import json as _json
 
     from ev.profit import ledger, payouts as P, solvers
@@ -2303,6 +2377,8 @@ def _cmd_profit(args):
 
 def _cmd_prize_tier(args):
     """奖级达标策略（研究）：单期选号 / 三臂对照回测 / 倍投分配对照 / 影子台账。"""
+    if _explain_unsupported("prize-tier", args.lottery or "双色球"):
+        return
     import json as _json
 
     from ev import tier_ledger as TL
@@ -2372,6 +2448,18 @@ def _cmd_payout(args):
         ticket = {"红球": [int(x) for x in args.red.split(",")],
                   "蓝球": [int(x) for x in args.blue.split(",")]}
         shown = f"红球{args.red} 蓝球{args.blue}"
+    elif args.lottery in ("七乐彩", "快乐8"):
+        # 分区型：号码是 1~30 / 1~80 的**两位数**，不能用 --ticket 的逐位数字串
+        # （"101112..." 会被拆成单个数字，1 与 11 分不清）。
+        if not args.nums:
+            n = 7 if args.lottery == "七乐彩" else 10
+            print(f"{args.lottery}请用 --nums 指定 {n} 个号（逗号分隔，如 "
+                  f"{','.join(str(i) for i in range(1, n + 1))}）")
+            return
+        picked = [int(x) for x in args.nums.split(",") if x.strip()]
+        ticket = {"号码": {"基本号": picked,
+                          **({"特别号": []} if args.lottery == "七乐彩" else {})}}
+        shown = " ".join(f"{n:02d}" for n in picked)
     else:
         if not args.ticket:
             print("数字型请用 --ticket 12345 指定号码")
@@ -2379,12 +2467,13 @@ def _cmd_payout(args):
         ticket = args.ticket
         shown = args.ticket
 
-    r = payout_eff(args.lottery, ticket, issue=args.issue)
+    r = payout_eff(args.lottery, ticket, issue=args.issue, play=args.play)
     if "error" in r:
         print(f"错误: {r['error']}")
         return
 
-    print(f"=== {r['彩种']} 期{r['期号']} 号码 {shown} ===")
+    play_tag = f" [{r['玩法']}]" if r.get("玩法") else ""
+    print(f"=== {r['彩种']}{play_tag} 期{r['期号']} 号码 {shown} ===")
     print(f"{'奖级':<6}{'概率':>14}{'1/概率':>14}{'名义单注':>14}{'实得单注':>14}  来源")
     for row in r["奖级明细"]:
         p = row["概率"]

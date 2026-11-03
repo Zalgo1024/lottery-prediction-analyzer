@@ -136,9 +136,12 @@ def test_grade_rank_names_single_source():
     """一~九等升序；数字型奖级不入表；与规则表并集一致。"""
     names = grade_rank_names()
     assert names == ("一等", "二等", "三等", "四等", "五等", "六等", "七等", "八等", "九等")
-    # 与规则表实际出现的奖级一致（不含数字型）
-    from ev.profit.rules import SUPPORTED, _RULES
-    live = {g for lot in SUPPORTED for r in _RULES[lot] for g in r.grades if g.endswith("等")}
+    # 与规则表实际出现的奖级一致（不含数字型）。
+    # ★ _RULES 键为 (彩种, 玩法) 元组（快乐8 多玩法），直接遍历 items，
+    #   不要拿 SUPPORTED（彩种名）去做 _RULES[彩种名] 索引。
+    from ev.profit.rules import _RULES
+    live = {g for (_lot, _play), rs in _RULES.items()
+            for r in rs for g in r.grades if g.endswith("等")}
     assert set(names) == live
     assert "直选" not in names and "组选3" not in names
 

@@ -6,8 +6,7 @@
 
 <div style="margin:15px 0;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
   <select id="rec-lottery" style="padding:8px 15px;border:1px solid #ddd;border-radius:5px;font-size:14px">
-    <option>双色球</option><option>大乐透</option><option>排列5</option><option>福彩3D</option><option>排列3</option><option>七星彩</option>
-  </select>
+    {% for lot in lotteries %}<option>{{ lot }}</option>{% endfor %}</select>
   <select id="rec-strategy" onchange="loadRecords(document.getElementById('rec-lottery').value)" style="padding:8px 15px;border:1px solid #ddd;border-radius:5px;font-size:14px" title="只看某一个策略的战绩行（前端筛选，不改后端口径）">
     <option value="全部" selected>全部策略</option>
     <option value="高频策略">高频策略</option>

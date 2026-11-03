@@ -35,7 +35,7 @@ bp = Blueprint("audit", __name__)
 # 彩种分组
 _DIGITAL = ["排列5", "福彩3D", "排列3", "七星彩"]
 _LOTTERY_STYLE = ["双色球", "大乐透"]
-_ALL = ["双色球", "大乐透", "排列5", "福彩3D", "排列3", "七星彩"]
+_ALL = ["双色球", "大乐透", "排列5", "福彩3D", "排列3", "七星彩", "七乐彩", "快乐8"]
 
 
 @bp.route("/audit")
@@ -65,6 +65,28 @@ def api_ev(lottery):
     from ev.sampler import sample_tickets
 
     if lottery not in _DIGITAL:
+        # ★ 这里原先对所有非数字型都回「用 rollover 看」—— 对双/大是对的，
+        #   但七乐彩/快乐8 **没有奖池滚存**，指过去是空页面。
+        #   它们的口径在 ev.profit（逐奖级、按规则表 + 当期实测单注奖金）。
+        if lottery in ("七乐彩", "快乐8"):
+            from ev.profit.rules import rules_for
+
+            n_grades = len(rules_for(lottery).grades)
+            return jsonify({
+                # ★ 「不适用」是给前端看的类型标记：不适用 ≠ 加载失败。
+                #   没有这个标记时前端只能落进 alert-warning，一张正常的
+                #   「本页不适用」卡片被渲染成红色的故障样式。
+                "不适用": True,
+                "error": f"{lottery} 的 EV 口径在 ev.profit（按当期实测单注奖金逐奖级算），"
+                         f"不走 net_ev；本页的「限号/撞号修正」只对数字型有意义",
+                "怎么看": f"python cli.py payout {lottery} --nums "
+                          + ",".join(str(i) for i in range(1, 8 if lottery == "七乐彩" else 11))
+                          + (" --play 选十" if lottery == "快乐8" else ""),
+                # ★ 档数按规则表现算，别写死：七乐彩 7 档、快乐8 选十 7 档（全玩法 39 档）。
+                "口径": f"单注 EV 与选号无关；{lottery} 共 {n_grades} 档"
+                        + ("（选十玩法；全玩法 39 档）" if lottery == "快乐8" else "")
+                        + "，全部按「名义值 + 限赔/封顶」结算",
+            })
         return jsonify({"error": f"{lottery} 为彩票式（双/大），用 /api/audit/rollover 查看 Rollover-EV"})
 
     # 名义EV 表（各玩法）
@@ -110,6 +132,13 @@ def api_rollover(lottery):
     """双/大 Rollover-EV（参与信号）"""
     from ev.rollover import rollover_ev, rollover_history
     if lottery not in _LOTTERY_STYLE:
+        # 七乐彩/快乐8 没有奖池滚存 ⇒ 指到 rollover 是空页面，直接给真实入口。
+        if lottery in ("七乐彩", "快乐8"):
+            return jsonify({
+                "error": f"{lottery} 无奖池滚存（Rollover）概念",
+                "怎么看": f"python cli.py payout {lottery}",
+                "口径": "单注 EV 按期列出（含限赔/封顶后的实测单注奖金）",
+            })
         return jsonify({"error": f"{lottery} 非彩票式，无 Rollover 概念（用 /api/audit/ev）"})
     cur = rollover_ev(lottery)
     hist = rollover_history(lottery, n=10)

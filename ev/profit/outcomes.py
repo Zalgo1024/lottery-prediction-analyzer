@@ -38,6 +38,12 @@ def outer_universe(lottery: str) -> np.ndarray:
     结果按固定顺序缓存（同一彩种只枚举一次）。
     """
     r = rules_for(lottery)
+    # ★ 快乐8 是 hypergeom 模型：C(80,10)=1.65e12，枚举会直接把机器拖死。
+    #   宁可在这里显式失败，也不要让 lru_cache 去建一张 16 亿行的矩阵。
+    if r.model != "binary_cell":
+        raise NotImplementedError(
+            f"{lottery} 是 {r.model} 模型（开奖摇出数 ≠ 票面数），不可枚举；"
+            "请用 ev/payout 的概率函数，不要枚举结局")
     lo, hi = r.outer_range
     w = r.outer_width
     if r.outer_choose:

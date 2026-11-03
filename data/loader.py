@@ -237,7 +237,17 @@ def load_lottery(lottery_name: str) -> LotteryData:
         _lottery_cache[lottery_name] = (_mtime, result)
         return result
 
-    # 新彩种：泛型分区驱动（号码1..N 按序映射到各 Zone）
+    # 新彩种：泛型分区驱动（号码1..N 按各 Zone 的 draw_count 顺序累计映射）
+    #
+    # ★ 2026-11-01 改造原因：原实现每个 zone 只读**一个** `号码{k}` 单值列，
+    #   而七乐彩要 7 个基本号 + 1 个特别号、快乐8 要 20 个开奖号。
+    #   改为按 `zone.draw_count` 累计列偏移；既有 6 彩种的 draw_count 恒为 1
+    #   （`Zone.draw is None ⇒ draw_count == choose`），循环退化成原来的
+    #   "号码1..号码N"，行为逐字节不变（有 golden 测试锁死）。
+    #
+    # ★ 为什么不顺带填 总投注额/奖池奖金：`ev/payout._record_settled()` 用
+    #   「总投注额 > 0」判定该期是否已结算。给 4 个数字型补上这一列会改变
+    #   它们的"已结算"判定，属于与本次接入无关的行为变更 —— 不做。
     from data.schema import get_schema
     schema = get_schema(lottery_name)
     records = []
@@ -246,12 +256,26 @@ def load_lottery(lottery_name: str) -> LotteryData:
         if 期号 is None:
             continue
         zone_numbers = {}
-        for k, zone in enumerate(schema.zones):
-            v = _parse_int(row.get(f"号码{k + 1}"))
-            if v is None:
+        offset = 0
+        for zone in schema.zones:
+            n = zone.draw_count
+            vals = []
+            for i in range(1, n + 1):
+                v = _parse_int(row.get(f"号码{offset + i}"))
+                if v is not None:
+                    vals.append(v)
+            if not vals and n == 1:
                 v = _parse_int(row.get(zone.name))  # 兼容按区名直接成列
-            if v is not None:
-                zone_numbers[zone.name] = [v]
+                if v is not None:
+                    vals = [v]
+            if vals and len(vals) != n:
+                # 不阻断加载，但必须留痕：少几个号会让命中数静默偏低，
+                # 而"命中偏低"与"这期真的没中"在下游长得一模一样。
+                logger.warning(
+                    f"{lottery_name} {期号} {zone.name} 应有 {n} 个号，实读 {len(vals)} 个")
+            if vals:
+                zone_numbers[zone.name] = vals
+            offset += n
         record = DrawRecord(
             期号=期号,
             开奖日期=parse_draw_date(row.get("开奖日期", "")),

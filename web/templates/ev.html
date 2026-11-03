@@ -6,12 +6,7 @@
 <div style="margin:15px 0;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
   <select id="ev-lottery" style="padding:8px 15px;border:1px solid #ddd;border-radius:5px;font-size:14px">
     <option value="全部彩种">全部彩种</option>
-    <option>双色球</option>
-    <option>大乐透</option>
-    <option>排列5</option>
-    <option>福彩3D</option>
-    <option>排列3</option>
-    <option>七星彩</option>
+    {% for lot in lotteries %}<option>{{ lot }}</option>{% endfor %}
   </select>
   <select id="ev-limit" style="padding:8px 15px;border:1px solid #ddd;border-radius:5px;font-size:14px">
     <option value="d120">近 120 天</option>

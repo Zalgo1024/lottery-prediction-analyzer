@@ -113,6 +113,27 @@ def mechanism_status_card(lottery: str) -> Dict[str, Any]:
     from ev.mechanism.gap_select import tilt_state        # noqa: PLC0415
     from ev.mechanism.narrative import NO_SIGNAL_CAVEAT   # noqa: PLC0415
 
+    # ★ 「不适用」必须先于「未测量」判断（2026-11-02）：
+    #   七乐彩/快乐8 不在 A/B 轨的适用范围内（原因见 common.NOT_APPLICABLE），
+    #   `cli.py gap` 会直接拒绝 —— 此时再提示"运行 cli.py gap 后本卡片即有数据"
+    #   是**空头承诺**，用户跑完还是这张卡。
+    try:
+        from ev.mechanism.common import NOT_APPLICABLE   # noqa: PLC0415
+        _na_reason = NOT_APPLICABLE.get(lottery)
+    except Exception:                                     # noqa: BLE001
+        _na_reason = None
+    if _na_reason:
+        return {
+            "彩种": lottery,
+            "未测量": True,
+            "不适用": True,
+            "状态": "不适用",
+            "提示": "本彩种不在 A/B 轨的适用范围内，`cli.py gap` 会拒绝执行，跑了也不会有数据。",
+            "原因": _na_reason,
+            "诚实说明": ("「不适用」≠「无缝隙」也≠「已证明公平」——是这套测量框架的"
+                         "前提（一等奖注数/二等奖注数/总投注额三列）在本彩种上不成立。"),
+        }
+
     snap = mechanism_snapshot(lottery)
     if snap is None:
         return {

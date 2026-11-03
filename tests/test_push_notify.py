@@ -8,6 +8,7 @@ import io
 import json
 import struct
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -425,7 +426,13 @@ class WecomPipelineTests(unittest.TestCase):
         pn._reset_pace()
 
     def test_end_to_end_wecom(self):
-        """端到端（图片模式）：1 条分隔头 + 3 张图，且顺序为 开奖→出号→结算。"""
+        """端到端（图片模式）：1 条组头 + 3 张图，顺序为 **开奖 → 中奖 → 号码**。
+
+        ★ 2026-11-03 用户要求改成 开奖 → 中奖 → 号码（原为 开奖 → 号码 → 中奖）。
+          `types` 里三类图都是 "image"，分不出先后 ⇒ 必须给三个渲染器打戳，
+          否则这条测试对顺序**完全没有约束力**（改前它就存在，却查不出顺序错）。
+        """
+        import base64 as _b64
         with _TmpStore():
             pn.save_config({"provider": "wecom", "token": "k1", "enabled": True,
                             "推送间隔秒": 0,
@@ -436,7 +443,13 @@ class WecomPipelineTests(unittest.TestCase):
                 bodies.append(json.loads(req.data.decode("utf-8")))
                 return _fake_urlopen({"errcode": 0, "errmsg": "ok"})(req, timeout)
 
-            with patch.object(pn.urllib.request, "urlopen", _capture):
+            with patch.object(pn.urllib.request, "urlopen", _capture), \
+                 patch.object(pi, "render_draw_image",
+                              lambda *a, **k: b"\x89PNG\r\n\x1a\nDRAW"), \
+                 patch.object(pi, "render_wins_image",
+                              lambda *a, **k: b"\x89PNG\r\n\x1a\nWIN"), \
+                 patch.object(pi, "render_tickets_image",
+                              lambda *a, **k: b"\x89PNG\r\n\x1a\nNUM"):
                 r = pn.push_pipeline_result(
                     "双色球",
                     predictions=[{"号码": {"红球": [1, 2, 3, 4, 5, 6], "蓝球": [7]}}],
@@ -451,26 +464,27 @@ class WecomPipelineTests(unittest.TestCase):
         self.assertTrue(r["ok"])
 
         types = [b.get("msgtype") for b in bodies]
-        # ① 分隔头（唯一文本）→ ② 开奖图 → ③ 出号图 → ④ 结算图
         self.assertEqual(types, ["markdown", "image", "image", "image"])
+
+        # ---- 顺序硬断言：开奖 → 中奖 → 号码 ----
+        stamps = [_b64.b64decode(b["image"]["base64"])[8:].decode()
+                  for b in bodies if b.get("msgtype") == "image"]
+        self.assertEqual(stamps, ["DRAW", "WIN", "NUM"],
+                         f"图片顺序不是 开奖→中奖→号码：{stamps}")
 
         texts = [b["markdown"]["content"] for b in bodies if b.get("msgtype") == "markdown"]
         self.assertEqual(len(texts), 1)
         joined = "\n".join(texts)
-        self.assertIn("━━━ 双色球 ━━━", joined)     # 彩种分隔头
-        self.assertIn("本期出号", joined)           # 出号注数
-        self.assertIn("1 注", joined)
-        self.assertIn("六等奖", joined)             # 结算摘要
-        self.assertIn("100.64.0.5", joined)         # 看板深链
-        self.assertIn("请勿用于投注决策", joined)    # 诚实条件
-        self.assertIn("本次 3 张图", joined)         # 张数清单
-
-        # 每张图都是合法 PNG（base64 解码后校验魔数）
-        import base64 as _b64
-        for b in bodies:
-            if b.get("msgtype") != "image":
-                continue
-            self.assertTrue(_b64.b64decode(b["image"]["base64"]).startswith(b"\x89PNG"))
+        # ---- 组头：一行标签，且**不带** `# ` 一级标题 ----
+        first = joined.split("\n")[0]
+        self.assertEqual(first, "（双色球）彩票号码 / 中奖情况")
+        self.assertFalse(joined.startswith("# "), "组头不该用 # 一级标题（会在企微折行）")
+        # ---- 正文只剩 看板链接 + 诚实条件 ----
+        self.assertIn("100.64.0.5", joined)          # 看板深链
+        self.assertIn("请勿用于投注决策", joined)     # 诚实条件（单一真源）
+        self.assertIn("未检出偏离", pn.FOOTER_CONDITION)
+        for gone in ("本次 3 张图", "本期出号", "本期结算", "最新开奖"):
+            self.assertNotIn(gone, joined, f"组头里还残留「{gone}」，没有压成一行标签")
 
     def test_image_payload_has_base64_and_md5(self):
         with _TmpStore():
@@ -871,10 +885,15 @@ class DegradeTests(unittest.TestCase):
 
 
 class DividerTests(unittest.TestCase):
-    """彩种分隔头（2026-10-24）：一个彩种**唯一**的一条文本。
+    """彩种**组头**（2026-11-03 改版）：一个彩种唯一的一条文本。
 
-    「以彩票分类用文字做间隔」就是靠 `━━━ 双色球 ━━━` 这行；
-    原来分散在「出号短文字 / 结算短文字」里的信息全部并入这里。
+    改版前是 `━━━ 双色球 ━━━` + 6~7 行统计（张数清单 / 注数 / 结算摘要 / 开奖号码 /
+    链接 / 声明）。用户要求压成「一行标签 + 图」，所以正文只剩：
+      ① 组头标签（`（双色球）彩票号码 / 中奖情况`）；
+      ② 诚实声明 `FOOTER_CONDITION`（**一字不动**：它的前提与「未检出偏离 ≠ 证明
+         开奖公平」是单一真源，不许因为「想短一点」而弱化）；
+      ③ 看板链接。
+    删掉的是**图里能看到**的东西（期号 / 注数 / 张数 / 开奖号码），不是诚实口径。
     """
 
     @staticmethod
@@ -888,23 +907,38 @@ class DividerTests(unittest.TestCase):
             pred_info="目标期号 26122",
             size_note="出号数量：动态滑轨，当前生效 200 注",
             board_url="http://100.64.0.5:5000",
-            n_draw=1, n_num_pages=4, n_win_pages=1)
+            n_draw=1, n_num_pages=4, n_win_pages=1,
+            header="（双色球）彩票号码 / 中奖情况")
         base.update(kw)
         return pn.build_divider_message("双色球", **base)
 
     def test_title_is_lottery_divider(self):
+        """`_divider_title` 仍保留：整条降级为纯文本 / 看板「测试推送」还在用它。"""
         self.assertEqual(pn._divider_title("双色球"), "━━━ 双色球 ━━━")
 
-    def test_body_has_counts_pages_and_link(self):
+    def test_group_header_labels(self):
+        """标签必须按**实际有哪几类图**来写 —— 不能永远写「号码 / 中奖情况」。"""
+        h = pn._group_header
+        self.assertEqual(h("双色球", has_nums=True, has_settle=True),
+                         "（双色球）彩票号码 / 中奖情况")
+        self.assertEqual(h("双色球", has_nums=True, has_settle=False), "（双色球）彩票号码")
+        self.assertEqual(h("双色球", has_nums=False, has_settle=True), "（双色球）中奖情况")
+        self.assertEqual(h("双色球", has_nums=False, has_settle=False, has_draw=True),
+                         "（双色球）开奖结果")
+        for args in (dict(has_nums=True, has_settle=True), dict(has_nums=False, has_settle=True)):
+            self.assertNotIn("\n", h("双色球", **args))
+
+    def test_body_is_only_disclaimer_and_link(self):
+        """正文只剩「声明 + 链接」：统计项必须全部消失（它们在图里）。"""
         title, body = self._mk()
-        self.assertEqual(title, "━━━ 双色球 ━━━")
-        self.assertIn("本次 6 张图", body)
-        self.assertIn("开奖结果 1 张 → 本期出号 4 张 → 开奖结算 1 张", body)
-        self.assertIn("本期出号 **1 注**", body)
-        self.assertIn("出号数量：动态滑轨，当前生效 200 注", body)
-        self.assertIn("本期结算 **3 条**：六等奖×2、五等奖×1", body)
-        self.assertIn("02 07 20 24 26 30 + 02", body)
+        self.assertEqual(title, "（双色球）彩票号码 / 中奖情况")
+        self.assertIn(pn.FOOTER_CONDITION, body)
         self.assertIn("100.64.0.5", body)
+        for gone in ("本次 6 张图", "本期出号", "本期结算", "最新开奖",
+                     "02 07 20 24 26 30", "目标开奖"):
+            self.assertNotIn(gone, body, f"组头里还残留「{gone}」，没压成一行标签")
+        # 正文行数：声明 + 空行 + 链接（约 3 段），绝不再是 6~7 行
+        self.assertLessEqual(len([l for l in body.splitlines() if l.strip()]), 3)
 
     def test_footer_carries_premise(self):
         _title, body = self._mk()
@@ -918,19 +952,30 @@ class DividerTests(unittest.TestCase):
             self.assertNotIn(w, body)
 
     def test_none_when_no_image_planned(self):
+        """三类图全无 ⇒ 不发空头（这条判定依赖仍保留的 `segs` 计算）。"""
         title, body = pn.build_divider_message(
             "双色球", predictions=[{"号码": {}}],
             n_draw=0, n_num_pages=0, n_win_pages=0)
         self.assertIsNone(title)
         self.assertIsNone(body)
 
-    def test_digital_draw_line_present(self):
-        _title, body = pn.build_divider_message(
+    def test_digital_lottery_still_has_header(self):
+        """数字型彩种（无红蓝球）也要能出组头 —— 原用例断言的是「开奖行不丢」，
+        那行已按用户要求从正文移除，现在改为锁住「不会因为没红球而返回 None」。"""
+        title, body = pn.build_divider_message(
             "排列3", predictions=[{"号码": {"第1位": [1]}}],
             draw_numbers={"期号": "26282", "日期": "2026-10-23", "红球": [], "蓝球": [],
                           "号码": {"第1位": [6], "第2位": [4], "第3位": [7]}},
-            n_draw=1, n_num_pages=1, n_win_pages=0)
-        self.assertIn("6 4 7", body)
+            n_draw=1, n_num_pages=1, n_win_pages=0,
+            header="（排列3）彩票号码")
+        self.assertEqual(title, "（排列3）彩票号码")
+        self.assertIn(pn.FOOTER_CONDITION, body)
+
+    def test_header_has_no_h1_marker(self):
+        """组头不加 `#`：企微的 H1 会把一行标签折成两三行。其它入口保持原样。"""
+        self.assertFalse(pn._wecom_render("T", "b", heading=False).startswith("# "))
+        self.assertTrue(pn._wecom_render("T", "b", heading=False).startswith("T\n"))
+        self.assertTrue(pn._wecom_render("T", "b").startswith("# "))
 
 
 class DrawImageTests(unittest.TestCase):
@@ -1255,6 +1300,219 @@ class LotteryNameTests(unittest.TestCase):
         self.assertIn("直选", payload["hit_summary"])
         self.assertEqual(payload["hit_records"][0]["prize"], "直选")
         self.assertEqual(payload["hit_records"][0]["match"], "命中3位")
+
+
+def _hold_file_lock(path_str: str, secs: float) -> None:
+    """（保留：供需要在本进程内持锁的用例复用。）"""
+    from data.file_lock import file_lock as _fl
+    with _fl(Path(path_str), timeout=5):
+        time.sleep(secs)
+
+
+# 子进程脚本：尝试拿锁，并打印「等了多久」。
+# ★ 为什么让**父进程先持锁**：反过来（子进程先持）要等子进程启动就绪才能测，
+#   而「子进程已持锁」这个信号本身就有竞态 —— 本轮实踩：子进程打印 locked 后
+#   父进程仍是 0.00s 拿到锁（信号到达与真正持锁之间还有窗口，导致假失败）。
+#   父先持锁 ⇒ 子进程只可能在父释放后才拿到，等待时长可精确断言，无竞态。
+# ★ 为什么用 `subprocess -c` 而不是 multiprocessing：spawn 下目标函数要能被
+#   pickle 成 `tests.test_push_notify.xxx` 再由子进程 import，而子进程没有 pytest
+#   环境，实测子进程直接死掉 ⇒ 用例变假通过。
+_LOCK_CHILD = r"""
+import sys, time
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from data.file_lock import file_lock
+t0 = time.time()
+with file_lock(Path(sys.argv[2]), timeout=30):
+    sys.stdout.write("waited=%.3f\n" % (time.time() - t0))
+    sys.stdout.flush()
+"""
+
+
+class GroupLockTests(unittest.TestCase):
+    """整组消息互斥（2026-11-03）。
+
+    背景（用户报障「在企业微信推送里并没有严格按照顺序推送」）：
+    编排者 `push_lottery_images` 是「组头 → 一张张图」，每条都是独立的
+    `send`/`send_image`，中间只有 3.2s 节流 —— **节流只管间隔，管不住谁插进来**。
+    而调度器「立即运行全部」/ worker 事件触发 / 启动自愈 / 计划任务会同时向
+    同一个 webhook 推送，于是 A 组的头与图片被 B 组消息拆开。
+
+    修法是 `_group_spin_lock`：**线程锁 + 跨进程文件锁**两层（Windows 上同一进程
+    第二个线程打开同一锁文件会 PermissionError，只靠文件锁等于没锁）。
+    """
+
+    LOT_A, LOT_B = "双色球", "大乐透"
+
+    @staticmethod
+    def _cfg():
+        return pn.sanitize({"provider": "wecom", "token": "k1", "enabled": True,
+                            "推送间隔秒": 0, "组锁超时秒": 60})
+
+    def _payload(self, tag: str):
+        """给每个彩种造一份带戳的最小 payload（渲染器会被 patch 掉）。"""
+        return dict(
+            predictions=[{"号码": {"红球": [1, 2, 3, 4, 5, 6], "蓝球": [7]}}],
+            eval_result={"new_feedback_count": 1},
+            hit_summary="命中 六等奖×1",
+            hit_records=[{"issue": "2026104", "prize": "六等奖", "valid": True,
+                          "num": "01 02 03 04 05 06 + 07", "match": "红中2 蓝中1"}],
+            draw_numbers={"期号": "2026104", "红球": [1, 2, 3, 4, 5, 6], "蓝球": [7]},
+        )
+
+    def test_two_groups_never_interleave(self):
+        """两个线程同时推不同彩种：结果必须是 A*A*…B*B*，一条都不许交错。
+
+        ★ 不 flaky 的四个要点：
+          ① 不真渲染（patch 三个 render_*），否则 matplotlib 让时序不可控；
+          ② 不真发网（patch send/send_image），只往共享列表追加事件；
+          ③ 假发送里 sleep(20ms)，把「无锁时的竞争窗口」放大到必然命中；
+          ④ 用 Barrier 同步起跑，避免「线程 A 先跑完 B 才启动」的假通过。
+        """
+        import threading as _th
+        events = []
+        ev_lock = _th.Lock()
+        barrier = _th.Barrier(2, timeout=10)
+
+        def _png(tag: str) -> bytes:
+            return b"\x89PNG\r\n\x1a\n" + tag.encode()
+
+        def _fake_send(title, content, cfg=None, *, heading=True):
+            with ev_lock:
+                events.append(f"{title.split('）')[0].lstrip('（')}:text")
+            time.sleep(0.02)
+            return {"ok": True, "detail": "ok"}
+
+        def _fake_send_image(png, cfg):
+            lot = png.split(b"\n")[-1].decode()      # 假图的末尾就是彩种名
+            with ev_lock:
+                events.append(f"{lot}:image")
+            time.sleep(0.02)
+            return {"ok": True, "detail": "ok"}
+
+        # ★ 渲染器必须在**线程外**一次性 patch：两个线程各自 patch 同一批模块属性时，
+        #   先退出的线程会把后进者的 patch 还原成原始渲染器（真跑 matplotlib），
+        #   既慢又会把「彩种戳」打错 —— 上一版就因此得到 3 段假结果。
+        def _render_draw(draw=None, *a, **k):
+            return _png(k.get("lottery") or "?")
+
+        def _render_by_title(rows=None, *a, **k):
+            return _png(str(k.get("title") or "?").split(" · ")[0])
+
+        def _run(lot):
+            barrier.wait()
+            pn.push_lottery_images(lot, cfg=self._cfg(), **self._payload(lot))
+
+        with patch.object(pn, "send", _fake_send), \
+             patch.object(pn, "send_image", _fake_send_image), \
+             patch.object(pi, "render_draw_image", _render_draw), \
+             patch.object(pi, "render_wins_image", _render_by_title), \
+             patch.object(pi, "render_tickets_image", _render_by_title):
+            ts = [_th.Thread(target=_run, args=(lot,)) for lot in (self.LOT_A, self.LOT_B)]
+            for t in ts:
+                t.start()
+            for t in ts:
+                t.join(timeout=60)
+
+        # 拆成「连续同彩种」的段
+        segs = []
+        for ev in events:
+            lot = ev.split(":")[0]
+            if not segs or segs[-1] != lot:
+                segs.append(lot)
+        self.assertEqual(len(events), 8, f"消息条数不对（应 2 组 × 4 条）：{events}")
+        self.assertEqual(len(segs), 2, f"两组消息交错了：{events}")
+        self.assertEqual(sorted(segs), sorted([self.LOT_A, self.LOT_B]))
+
+    def test_file_lock_blocks_second_process(self):
+        """跨进程那一层必须真的生效（Windows 走 `msvcrt`，Linux 走 `fcntl`）。
+
+        ★ 线程锁管不到跨进程（Flask 服务 + 计划任务各起一个 `cli.py auto`
+          会同时推）。这条让**父进程先持锁**，再用真子进程去抢，
+          断言子进程确实等了一段时间才拿到 —— 无竞态、可重复。
+        """
+        import subprocess
+        import sys
+
+        repo_root = Path(__file__).resolve().parents[1]
+        hold = 1.2
+        with pn._group_spin_lock("跨进程测试", timeout=5) as state:
+            self.assertEqual(state, "ok")
+            proc = subprocess.Popen(
+                [sys.executable, "-c", _LOCK_CHILD,
+                 str(repo_root), str(pn.GROUP_LOCK_PATH)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                encoding="utf-8", errors="replace")
+            time.sleep(hold)          # 父进程这段时间一直持锁
+        try:
+            out = proc.stdout.readline().strip()
+            proc.wait(timeout=30)
+            self.assertTrue(out.startswith("waited="),
+                            f"子进程没输出等待时长（stderr：{proc.stderr.read()[:300]}）")
+            waited = float(out.split("=", 1)[1])
+            self.assertGreaterEqual(
+                waited, hold * 0.5,
+                f"子进程只等了 {waited:.2f}s ⇒ 跨进程锁没起作用（父进程持锁 {hold}s）")
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+
+
+class PartialFailureTests(unittest.TestCase):
+    """`_summarize`：丢消息不许报成功（2026-11-03）。"""
+
+    def test_all_success(self):
+        ok, detail = pn._summarize([{"ok": True}, {"ok": True}])
+        self.assertTrue(ok)
+
+    def test_partial_failure_is_not_success(self):
+        """21 条里丢了 20 条也算「成功」是旧实现 `any(ok)` 的坑，这里必须判失败。"""
+        ok, detail = pn._summarize([{"ok": True, "detail": "ok"},
+                                    {"ok": False, "detail": "errcode=45009"},
+                                    {"ok": True, "detail": "ok"}])
+        self.assertFalse(ok)
+        self.assertIn("部分失败 2/3", detail)
+        self.assertIn("45009", detail)
+
+    def test_all_failure_detail(self):
+        ok, detail = pn._summarize([{"ok": False, "detail": "超时"},
+                                    {"ok": False, "detail": "errcode=1"}])
+        self.assertFalse(ok)
+        self.assertIn("全部失败 0/2", detail)
+
+    def test_pipeline_reports_partial_failure(self):
+        """端到端：第 2 张图失败 ⇒ `push_pipeline_result` 的 ok 必须是 False。"""
+        calls = {"n": 0}
+
+        def _fake_image(png, cfg):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                return {"ok": False, "detail": "errcode=45009"}
+            return {"ok": True, "detail": "ok"}
+
+        with _TmpStore():
+            pn.save_config({"provider": "wecom", "token": "k1", "enabled": True,
+                            "推送间隔秒": 0})
+            with patch.object(pn, "send", lambda *a, **k: {"ok": True, "detail": "ok"}), \
+                 patch.object(pn, "send_image", _fake_image), \
+                 patch.object(pi, "render_draw_image",
+                              lambda *a, **k: b"\x89PNG\r\n\x1a\nDRAW"), \
+                 patch.object(pi, "render_wins_image",
+                              lambda *a, **k: b"\x89PNG\r\n\x1a\nWIN"), \
+                 patch.object(pi, "render_tickets_image",
+                              lambda *a, **k: b"\x89PNG\r\n\x1a\nNUM"):
+                r = pn.push_pipeline_result(
+                    "双色球",
+                    predictions=[{"号码": {"红球": [1, 2, 3, 4, 5, 6], "蓝球": [7]}}],
+                    eval_result={"new_feedback_count": 1},
+                    hit_summary="命中 六等奖×1",
+                    hit_records=[{"issue": "2026104", "prize": "六等奖", "valid": True,
+                                  "num": "01 02 03 04 05 06 + 07", "match": "红中2 蓝中1"}],
+                    draw_numbers={"期号": "2026104", "红球": [1, 2, 3, 4, 5, 6],
+                                  "蓝球": [7]})
+        self.assertIsNotNone(r)
+        self.assertFalse(r["ok"], "丢了一张图却报了成功")
+        self.assertIn("部分失败", r["detail"])
 
 
 if __name__ == "__main__":

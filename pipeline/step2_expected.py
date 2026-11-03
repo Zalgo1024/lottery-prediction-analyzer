@@ -13,6 +13,71 @@ from pipeline.step1_probability import get_prize_data
 logger = logging.getLogger(__name__)
 
 
+def _is_placeholder_table(levels: List[dict]) -> bool:
+    """step1 的奖级表是否只是「精确全中」占位符（= 该彩种未被 step1 覆盖）。"""
+    return (len(levels) == 1
+            and str((levels[0] or {}).get("prize_name") or "") == "精确全中")
+
+
+def _expected_via_profit(lottery_name: str, ticket_price: float) -> dict:
+    """用 `ev.profit` 的规则表算期望（七乐彩 7 档 / 快乐8 按玩法 39 档）。
+
+    ★ 2026-11-02 修复：step1 的 `get_prize_data` 只覆盖 4 个数字型 + 双/大。
+      对七乐彩/快乐8 它返回**单档占位**「精确全中，金额 0」，于是统计页与看板
+      建议打出「单注期望收益 **−2.0** 元 / 各奖级期望明细：精确全中 0 元」——
+      这不是"这两个彩种期望特别差"，而是把「模型不覆盖」画成了
+      「只有一个奖级、而且不派奖」。金额未知的档一律**排除出求和并单独列出**，
+      不得当 0（当 0 会偏低，按上限虚报会偏高）。
+    """
+    from ev.payout import grade_probabilities
+    from ev.profit.rules import rules_for
+
+    rules = rules_for(lottery_name)
+    probs = grade_probabilities(lottery_name)
+
+    breakdown: List[dict] = []
+    unknown: List[str] = []
+    gained = 0.0
+    for grade, p in probs.items():
+        rule = rules.grades.get(grade)
+        if rule is None:
+            amt = None
+        elif rule.kind == "fixed":
+            amt = float(rule.fixed) if rule.fixed is not None else None
+        else:
+            amt = float(rule.nominal) if rule.nominal is not None else None
+        if amt is None:
+            unknown.append(grade)
+        else:
+            gained += amt * p
+        breakdown.append({
+            "prize": grade,
+            "amount": amt,
+            "probability": p,
+            "expected_value": None if amt is None else round(amt * p, 8),
+        })
+
+    total_ev = gained - ticket_price
+    conclusion = (f"名义期望 {total_ev:.4f} 元/注（按规则表名义单注金额，未扣税）；"
+                  f"长期为负，且与选号无关。")
+    out = {
+        "lottery_name": lottery_name,
+        "ticket_price": ticket_price,
+        "单注期望收益": round(total_ev, 6),
+        "各奖级期望明细": breakdown,
+        "口径": f"ev.profit 规则表 {rules.rule_version}（名义金额，实际派奖含限赔/封顶）",
+        "结论": conclusion,
+    }
+    if lottery_name == "快乐8":
+        # 快乐8 的奖级表随玩法变（选一~选十），这里按默认玩法算，必须说明。
+        out["玩法"] = "选十（默认；选一~选九的档位与返奖率不同，见 cli.py payout --play）"
+    if unknown:
+        out["金额未知档"] = unknown
+        out["结论"] = conclusion + (
+            f"另有 {len(unknown)} 档名义金额未知（{'、'.join(unknown)}），未计入求和 ⇒ 该数值偏低。")
+    return out
+
+
 def expected_value(lottery_name: str) -> dict:
     """
     单注彩票期望收益 E(X) = Σ(奖金 × 概率)
@@ -21,10 +86,16 @@ def expected_value(lottery_name: str) -> dict:
     data = get_prize_data(lottery_name)
     payout = LOTTERY_CONFIG[lottery_name].get("payout", {}) or {}
     ticket_price = payout.get("cost", 2)
+    levels = data.get("levels") or []
+
+    # ★ 未被 step1 覆盖的彩种：改走 ev.profit 真源，不要拿占位档算出一个假 EV。
+    if _is_placeholder_table(levels):
+        return _expected_via_profit(lottery_name, float(ticket_price))
+
     total_ev = -ticket_price  # 先扣本金
     breakdown = []
 
-    for level in data["levels"]:
+    for level in levels:
         if level.get("is_floating"):
             # 浮动奖用历史均值估算
             amount = _estimate_floating_prize(lottery_name, level["prize_name"])

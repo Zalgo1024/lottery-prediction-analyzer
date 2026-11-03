@@ -3,9 +3,10 @@
 设计（2026-09-16 建立；2026-09-17 增企业微信群机器人；2026-09-18 升级为**图片推送**；
 2026-10-24 改为「按彩种分组：一条分隔头 + 一组图」）：
   - 自动流水线每跑完一个彩种，把「今晚开奖 + 本期出号 + 上期结算」推出去；
-  - **每个彩种一组**：① 一条纯文本分隔头（`━━━ 双色球 ━━━`，正文含期号 / 张数清单 /
-    出号注数 / 结算摘要 / 开奖号码 / 看板链接 / 诚实条件）→ ② 开奖图 1 张 →
-    ③ 本期出号图 N 张（全量，`PAGE_TICKETS` 注/页）→ ④ 开奖结算图 M 张。
+  - **每个彩种一组**：① 一条纯文本组头（`（双色球）彩票号码 / 中奖情况`，正文只留
+    诚实条件与看板链接）→ ② 开奖图 1 张 → ③ 开奖结算图 M 张 → ④ 本期出号图 N 张
+    （全量，`PAGE_TICKETS` 注/页）。
+    ★ 2026-11-03 用户要求：图片顺序改为 **开奖 → 中奖 → 号码**，组头压成一行标签。
     三类内容各自成图且**图内有分区条**，不再把号码、开奖、中奖全堆在一条消息里；
   - 图片为主（`data/push_image.py` 渲染 PNG）：号码与中奖**全部展示、不截断**
     —— 企业微信 markdown 单条只有 4096 字节，号码一多必被砍；图片没有这个限制；
@@ -19,6 +20,12 @@
   - **自动节流**：企微每个机器人 20 条/分钟。`_pace()` 管进程内相邻间隔，
     `_pace_global()` 把上次发送时间落到 `config/.push_pace.json` 管**跨进程**
     （`scripts/auto_scheduled.ps1` 每个彩种一个 `cli.py auto` 进程，进程内状态会被重置）。
+  - ★★ **整组互斥**（2026-11-03）：节流只管「两条之间隔多久」，**管不住「谁插进来」** ——
+    调度器「立即运行全部」/ worker 事件触发 / 启动自愈 / 计划任务可能同时向同一个
+    webhook 推送，A 彩种的组头与图片会被 B 彩种的消息拆开（用户报障「没有严格按照
+    顺序推送」）。故 `push_lottery_images` 用 `_group_spin_lock()` 把「组头 + 全部图」
+    圈成一个原子段：**线程锁 + 跨进程文件锁**两层（Windows 下同一进程第二个线程
+    打开同一锁文件会直接 PermissionError，见 `data/shadow.py` 的实测记录）。
 
 渠道差异：
   - 企业微信群机器人**只能单向推送**（webhook 无回执通道），因此在群里无法
@@ -35,6 +42,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import json
 import logging
@@ -49,7 +57,36 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
+from data.file_lock import file_lock
+
 logger = logging.getLogger(__name__)
+
+
+def _ensure_logger() -> logging.Logger:
+    """把本模块挂到 `logs/logger` 的具名 handler 上 —— 否则 INFO 全部丢弃。
+
+    ★ 为什么必须补（2026-11-03 实查）：本模块原来是裸 `logging.getLogger(__name__)`，
+      而 `logs/logger.py::setup_logger` **只给具名 logger 挂 handler、从不配置 root**
+      （全仓无 `basicConfig`）。于是 `logger.info("微信推送 … 共 N 条")` 全部丢弃，
+      只剩 `logging.lastResort` 把 WARNING 打到 stderr。后果是：真实发送顺序与
+      企微 errcode **没有任何日志可查** —— 用户报「顺序乱了」时无法证伪也无法验收。
+      补齐后每组会打印 `[PUSH] 组=… 序号=i/n 类型=… 段=…`，顺序问题变成可判定事实。
+
+    ★ 只在真跑推送时调用（不在 import 期建 handler）：否则测试会凭空多出文件写入。
+    ★ 名字必须是 `__name__`（即 `data.push_notify`）—— 写成 `"push_notify"` 会是
+      **另一个 logger 对象**，本模块的日志照样进不去。
+    """
+    global logger
+    if getattr(logger, "handlers", None):
+        return logger
+    try:
+        from logs.logger import setup_logger
+        logger = setup_logger(__name__)
+    except Exception:                                     # noqa: BLE001
+        # 日志初始化失败绝不阻断推送：挂个 NullHandler 让「有 handler」成立
+        logger.addHandler(logging.NullHandler())
+    return logger
+
 
 _BASE_DIR = Path(__file__).resolve().parent.parent
 CONFIG_DIR = _BASE_DIR / "config"
@@ -57,6 +94,16 @@ STORE_PATH = CONFIG_DIR / "push_notify.json"
 # 跨进程节流状态（`scripts/auto_scheduled.ps1` 每个彩种起一个进程，
 #   进程内的 `_LAST_SEND_TS` 在进程边界会被重置 ⇒ 必须落盘共享）
 PACE_PATH = CONFIG_DIR / ".push_pace.json"
+
+# ★ 整组消息的互斥（2026-11-03）。`file_lock` 会在目标路径后追加 `.lock`，
+#   所以最终锁文件是 `config/.push_group.lock`（`config/*` 已在 .gitignore 里）。
+#   为什么不按彩种分锁：用户要的是「A 组连在一起」，按彩种分锁 A、B 两组照样交错。
+GROUP_LOCK_PATH = CONFIG_DIR / ".push_group"
+# ★ 必须配一把线程锁：Windows 上**同一进程的第二个线程** `open(lock_file, "a+")`
+#   会直接 PermissionError（`data/file_lock.py` 的 open 在 try 之外），
+#   于是 file_lock 在「同进程多线程」场景下等于没锁。这与 `data/shadow.py`
+#   的实测结论一致，那里也是「线程锁 + 文件锁」两层。
+_GROUP_THREAD_LOCK = threading.Lock()
 
 PROVIDER_OFF = "off"
 PROVIDER_WECOM = "wecom"
@@ -68,6 +115,12 @@ WECOM_WEBHOOK_BASE = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key="
 WECOM_MAX_BYTES = 4096            # 企业微信群机器人 markdown 单条上限（UTF-8 字节）
 WECOM_MAX_IMAGE_BYTES = 2 * 1024 * 1024   # 图片消息 base64 前的原始图片上限
 WECOM_MAX_PER_MIN = 20            # 每个机器人 20 条/分钟（节流依据）
+# 由 WECOM_MAX_PER_MIN 反算的最小安全间隔（3.0s）。`推送间隔秒` 小于它就会超速，
+# 而企微超速是**静默丢消息**（errcode=45009），所以这里给出告警依据。
+_MIN_INTERVAL = 60.0 / WECOM_MAX_PER_MIN
+# 节流单次最长等待。有组锁后正常情况下 wait ≤ interval(3.2s)；一旦远超，
+# 说明时钟跳变或 `.push_pace.json` 被外部写坏，需要告警而不是静默长睡。
+PACE_MAX_WAIT = 120.0
 
 FALLBACK_MAX_SHOW = 60            # 图片失败回退文本时，最多展示多少注号码
 SETTLE_TEXT_MAX = 20              # 结算短文字最多列多少条（图片里另有全量）
@@ -83,6 +136,8 @@ DEFAULTS = {
     "每日上限": 0,                 # 0 = 不限制
     "推送间隔秒": 3.2,             # 企微节流最小间隔（20 条/分钟）
     "看板地址": "",
+    "组级互斥": True,              # 关掉即回滚到「无锁发送」（顺序可能错，但绝不丢消息）
+    "组锁超时秒": 420.0,           # 拿不到锁就降级为无锁发送并告警
 }
 
 
@@ -138,6 +193,14 @@ def sanitize(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     except (TypeError, ValueError):
         pace = DEFAULTS["推送间隔秒"]
     pace = max(0.0, min(60.0, pace))
+    # 组锁超时：60~1800 秒。上限 1800 只是防手误写成天文数字；
+    # ★ 实际不要超过 ~450：组锁等待发生在流水线内部（任务状态回写之前），
+    #   而 `web/scheduler.py` 的自动触发只等 600 秒，等太久会被调度器判成超时。
+    try:
+        lock_timeout = float(payload.get("组锁超时秒", DEFAULTS["组锁超时秒"]))
+    except (TypeError, ValueError):
+        lock_timeout = DEFAULTS["组锁超时秒"]
+    lock_timeout = max(60.0, min(1800.0, lock_timeout))
     stats = payload.get("stats")
     cfg = {
         "provider": provider,
@@ -149,6 +212,8 @@ def sanitize(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         "每日上限": limit,
         "推送间隔秒": pace,
         "看板地址": str(payload.get("看板地址") or DEFAULTS["看板地址"]).strip()[:200],
+        "组级互斥": bool(payload.get("组级互斥", DEFAULTS["组级互斥"])),
+        "组锁超时秒": lock_timeout,
         "stats": stats if isinstance(stats, dict) else {},
     }
     return cfg
@@ -246,6 +311,12 @@ def _pace_global(cfg: Dict[str, Any]) -> None:
     做法：`config/.push_pace.json` 存上次发送的 wall-clock 时间。**先占位再睡**：
     写入 `max(now, last+interval)` 后按差值 sleep，这样并发方读到的是"已被预约"的
     时间点，不会两个进程一起发。异常一律**放行**——限流绝不能阻断推送。
+
+    ★ 2026-11-03：读-算-写原来**不加锁**，两个线程/进程同时读到同一个 `last`
+      会算出同一个 `wait`、写入同一个预约点 ⇒ 同时发出两条，节流被击穿（企微 45009
+      静默丢消息）。现在用 `file_lock(PACE_PATH)` 把「读 → 算 → 写」包成原子段，
+      `sleep` 放在锁外（绝不持锁睡）。
+    ★ 锁顺序全局唯一：**组锁 → pace 锁**；本函数从不反向去拿组锁 ⇒ 无环、无死锁。
     """
     try:
         interval = float(cfg.get("推送间隔秒", DEFAULTS["推送间隔秒"]) or 0)
@@ -253,20 +324,92 @@ def _pace_global(cfg: Dict[str, Any]) -> None:
         interval = DEFAULTS["推送间隔秒"]
     if interval <= 0:
         return
+    # 间隔低于企微安全下界 ⇒ 超速会静默丢消息，必须让人看见（不阻断）
+    if interval < _MIN_INTERVAL:
+        logger.warning(
+            f"「推送间隔秒」{interval:g}s < {_MIN_INTERVAL:.1f}s，"
+            f"将超过企微 {WECOM_MAX_PER_MIN} 条/分钟（超速是**静默丢消息**）")
     try:
-        last = 0.0
-        try:
-            raw = json.loads(PACE_PATH.read_text(encoding="utf-8"))
-            last = float((raw or {}).get("ts") or 0)
-        except (OSError, ValueError, TypeError, AttributeError):
+        wait = 0.0
+        with file_lock(PACE_PATH, timeout=2.0):
             last = 0.0
-        now = time.time()
-        wait = last + interval - now
-        _atomic_write_json(PACE_PATH, {"ts": max(now, last + interval)})
+            try:
+                raw = json.loads(PACE_PATH.read_text(encoding="utf-8"))
+                last = float((raw or {}).get("ts") or 0)
+            except (OSError, ValueError, TypeError, AttributeError):
+                last = 0.0
+            now = time.time()
+            wait = last + interval - now
+            _atomic_write_json(PACE_PATH, {"ts": max(now, last + interval)})
         if wait > 0:
-            time.sleep(min(wait, 60.0))      # 上限防系统时钟跳变导致长睡
+            if wait > PACE_MAX_WAIT:
+                # 有组锁后正常不会超过 interval；超过说明时钟跳变或状态文件被写坏
+                logger.warning(
+                    f"节流等待 {wait:.1f}s 被截断为 {PACE_MAX_WAIT:.0f}s"
+                    "（系统时钟跳变或 .push_pace.json 被外部改写？）")
+            time.sleep(min(wait, PACE_MAX_WAIT))
     except Exception:  # pragma: no cover - 节流本身绝不阻断发送
         pass
+
+
+# ------------------------------------------------------------
+# 整组消息互斥（一个彩种 = 一条组头 + 若干图，必须连在一起）
+# ------------------------------------------------------------
+@contextlib.contextmanager
+def _group_spin_lock(label: str, *, timeout: float = 420.0):
+    """一个彩种整组消息的互斥：**线程锁 + 跨进程文件锁**两层。**永不抛出**。
+
+    yield 的字符串说明这次到底拿到没拿到锁：
+      `"ok"`              —— 两层都拿到，整组不会被打断；
+      `"degraded-thread"` —— 同进程线程锁超时（有人在推别的彩种），降级为无锁；
+      `"degraded-file"`   —— 跨进程文件锁超时/打开失败，降级为无锁；
+      `"disabled"`        —— 配置里关掉了组级互斥。
+
+    ★ 为什么两层都要（不是保险，是必需）：
+      - `file_lock` 的 `open(lock_file, "a+")` 写在 try 之外（`data/file_lock.py:55`），
+        Windows 上**同一进程的第二个线程**会直接 `PermissionError` —— 只靠文件锁时，
+        同进程多线程（调度器一次起 8 个线程推 8 个彩种）根本没有排队效果。
+        `data/shadow.py:82-87` 记着同一条实测结论。
+      - 而线程锁只管本进程，跨进程（Flask + 计划任务各起一个 `cli.py auto`）
+        必须靠文件锁。
+    ★ 拿不到锁时**不丢消息**：降级为无锁发送 + warning + 结果里带锁状态。
+      宁可顺序错，也不让用户收不到通知；但也不许静默 —— 降级必须留痕。
+    """
+    t0 = time.time()
+    got_thread = False
+    try:
+        got_thread = _GROUP_THREAD_LOCK.acquire(timeout=max(0.0, timeout))
+    except Exception:                                     # noqa: BLE001
+        got_thread = False
+    if not got_thread:
+        logger.warning(f"[PUSH] 组={label} 组锁降级：线程锁 {timeout:.0f}s 未获取到，"
+                       "本次改为无锁发送（顺序可能被打断）")
+        yield "degraded-thread"
+        return
+    try:
+        remain = max(1.0, timeout - (time.time() - t0))
+        try:
+            with file_lock(GROUP_LOCK_PATH, timeout=remain):
+                yield "ok"
+        except (TimeoutError, OSError) as e:
+            # ★ 必须显式捕 OSError：Windows 上 PermissionError 会从 file_lock 的
+            #   open() 直接冒出来，不捕就会把整组推送打挂。
+            logger.warning(f"[PUSH] 组={label} 组锁降级：文件锁失败（{e}），"
+                           "本次改为无锁发送（顺序可能被打断）")
+            yield "degraded-file"
+    finally:
+        try:
+            _GROUP_THREAD_LOCK.release()
+        except Exception:                                 # noqa: BLE001
+            pass
+
+
+def _group_lock_cfg(cfg: Dict[str, Any]) -> float:
+    """组锁超时（秒），来自配置并已 sanitize 夹取；异常时回落默认。"""
+    try:
+        return float(cfg.get("组锁超时秒", DEFAULTS["组锁超时秒"]))
+    except (TypeError, ValueError):
+        return float(DEFAULTS["组锁超时秒"])
 
 
 # ------------------------------------------------------------
@@ -290,11 +433,15 @@ def _truncate_bytes(text: str, limit: int) -> str:
     return raw[:room].decode("utf-8", "ignore") + suffix
 
 
-def _wecom_render(title: str, body: str) -> str:
+def _wecom_render(title: str, body: str, *, heading: bool = True) -> str:
     """把标准 Markdown 适配成企业微信群机器人的写法。
 
     企业微信 markdown 不渲染 `-` / `1.` 列表（会原样显示成符号），
     故无序项改用 `·`；群机器人无独立 title 字段，标题并入正文首行。
+
+    ★ `heading=False`：不加 `# ` 前缀。企微里 `#` 是**一级标题**，字号明显更大且
+      强制另起段落，一行二十来字就会折成两行 —— 与「组头压成一行」的目标相反。
+      彩种分组的视觉分隔已由 `（双色球）` 这个标签本身承担，不需要 H1 装饰。
     """
     out = []
     for raw in body.split("\n"):
@@ -304,13 +451,21 @@ def _wecom_render(title: str, body: str) -> str:
             out.append("　" * (len(indent) // 2) + "· " + s[2:])
         else:
             out.append(raw)
-    return _truncate_bytes(f"# {title}\n" + "\n".join(out), WECOM_MAX_BYTES)
+    prefix = (f"# {title}\n" if heading else f"{title}\n") if title else ""
+    return _truncate_bytes(prefix + "\n".join(out), WECOM_MAX_BYTES)
 
 
 # ------------------------------------------------------------
 # 渠道发送（内部吞异常，绝不抛出）
 # ------------------------------------------------------------
-def send(title: str, content: str, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def send(title: str, content: str, cfg: Optional[Dict[str, Any]] = None,
+         *, heading: bool = True) -> Dict[str, Any]:
+    """发一条 markdown。`heading=False` 时不加 `# `（见 `_wecom_render`）。
+
+    ★ `heading` 必须 keyword-only：`web/routes/settings.py` 的「测试推送」
+      是以位置参数调 `send(title, body, cfg)` 的。
+    """
+    _ensure_logger()
     cfg = cfg if cfg is not None else sanitize(load_config())
     provider, token = cfg.get("provider"), cfg.get("token")
     if not effective_ready(cfg):
@@ -321,7 +476,7 @@ def send(title: str, content: str, cfg: Optional[Dict[str, Any]] = None) -> Dict
             _pace_global(cfg)
             body = json.dumps({
                 "msgtype": "markdown",
-                "markdown": {"content": _wecom_render(title, content)},
+                "markdown": {"content": _wecom_render(title, content, heading=heading)},
             }).encode("utf-8")
             req = urllib.request.Request(
                 _wecom_webhook_url(token), data=body, method="POST",
@@ -431,13 +586,22 @@ def format_ticket_line(t: Dict[str, Any]) -> str:
                 digits.append(str(v[0]))
         return " ".join(digits) if digits else "?"
 
-    # 乐透型：红球… + 蓝球…
+    # 乐透型（双/大）：红球… + 蓝球…
     red = zones.get("红球") or []
     blue = zones.get("蓝球") or []
-    line = " ".join(f"{int(n):02d}" for n in red)
-    if blue:
-        line += " + " + " ".join(f"{int(n):02d}" for n in blue)
-    return line or "?"
+    if red or blue:
+        line = " ".join(f"{int(n):02d}" for n in red)
+        if blue:
+            line += " + " + " ".join(f"{int(n):02d}" for n in blue)
+        return line or "?"
+
+    # 其余分区型票面（七乐彩/快乐8）：按原顺序拼，空分区（如七乐彩特别号）自然跳过
+    # 七乐彩票面只选基本号 7 个，特别号票面不含 ⇒ 只显示基本号。
+    parts = []
+    for k, v in zones.items():
+        if isinstance(v, list) and v:
+            parts.append(" ".join(f"{int(n):02d}" for n in v))
+    return " + ".join(parts) if parts else "?"
 
 
 def _zone_sort_key(k: Any) -> int:
@@ -780,9 +944,41 @@ PUSH_MAX_MSGS = 12        # 单次软预算：超了只告警，**绝不砍内�
 
 
 def _divider_title(lottery: str) -> str:
-    """彩种分隔头：`━━━ 双色球 ━━━`——「以彩票分类做文字间隔」的载体。"""
+    """彩种分隔头：`━━━ 双色球 ━━━`——「以彩票分类做文字间隔」的载体。
+
+    ★ 2026-11-03 起**只用于**「整条降级为纯文本」与看板「测试推送」这两种场景。
+      正常推送的组头改用 `_group_header()`（一行标签，见下）——用户要的是
+      `（双色球）彩票号码 / 中奖情况` 这种一眼能认出彩种的写法，而不是带一堆
+      统计数字的段落。
+    """
     bar = DIVIDER_CHAR * 3
     return f"{bar} {lottery} {bar}"
+
+
+def _group_header(lottery: str, *, has_nums: bool, has_settle: bool,
+                  has_draw: bool = False) -> str:
+    """正常推送的**组头**：一行标签，只说「这是哪个彩种、这批图是什么」。
+
+    形态（用户 2026-11-03 确认）：
+        （双色球）彩票号码 / 中奖情况      ← 出号与结算都有
+        （双色球）彩票号码                ← 只有出号
+        （双色球）中奖情况                ← 只有结算
+        （双色球）开奖结果                ← 只有开奖（极少：既没出号也没结算）
+
+    ★ 为什么不带期号/注数/张数清单：那些信息图里都有（开奖图副标题有期号、
+      出号图元信息与组头有注数、结算卡有奖级与奖金）。组头塞满统计后要在手机
+      上占 5~6 行，反而把「一眼分组」的作用抵消掉。
+    ★ 「只出号」与「只结算」必须分开写：两种情况下的字面若都写成
+      「彩票号码 / 中奖情况」，用户会以为少发了一张图（silent 缺图是本项目老坑）。
+    """
+    bits = []
+    if has_nums:
+        bits.append("彩票号码")
+    if has_settle:
+        bits.append("中奖情况")
+    if not bits:
+        bits.append("开奖结果" if has_draw else "本期无内容")
+    return f"（{lottery}）" + " / ".join(bits)
 
 
 def _grade_text(r: Dict[str, Any]) -> str:
@@ -814,11 +1010,21 @@ def build_divider_message(
     n_draw: int = 0,
     n_num_pages: int = 0,
     n_win_pages: int = 0,
+    header: Optional[str] = None,
 ) -> tuple:
-    """组装彩种**分隔头**——该彩种本次唯一的一条文本。无内容返回 (None, None)。
+    """组装彩种**组头**——该彩种本次唯一的一条文本。无内容返回 (None, None)。
 
-    原先的「出号短文字」「结算短文字」两条取消，职责全部并入这里：
-    期号 / 张数清单 / 出号注数 / 结算摘要 / 开奖号码 / 看板链接 / 诚实条件。
+    2026-11-03 起正文只留三块（用户确认）：
+      ① 组头一行标签（默认 `（双色球）彩票号码 / 中奖情况`，可用 `header=` 覆盖）；
+      ② 诚实声明（`FOOTER_CONDITION`，**一字不动**：它的前提与「未检出偏离 ≠ 证明开奖公平」
+         是单一真源，不许因为「想短一点」而弱化）；
+      ③ 看板链接 + （仅机制倾斜激活时）倾斜说明。
+
+    ★ 删掉的是**能在图里看到**的东西：期号（开奖图副标题 / 出号图元信息）、
+      出号注数（出号图副标题与组头）、张数清单（数一眼就有）、开奖号码（开奖图）。
+      删不掉的是诚实口径与「机制异常必须告知」——这两类不是装饰。
+    ★ `segs` 仍要算：它承担「三类图全无 ⇒ 不发空头」的判定，删了会让上游发出
+      一条只有免责声明的空消息。
     """
     predictions = predictions or []
     hit_records = hit_records or []
@@ -827,55 +1033,22 @@ def build_divider_message(
     segs = []
     if n_draw:
         segs.append(f"开奖结果 {n_draw} 张")
+    if n_win_pages:                                  # ★ 顺序与发送顺序一致
+        segs.append(f"开奖结算 {n_win_pages} 张")
     if n_num_pages:
         segs.append(f"本期出号 {n_num_pages} 张")
-    if n_win_pages:
-        segs.append(f"开奖结算 {n_win_pages} 张")
     if not segs:
         return None, None
 
-    parts: List[str] = []
-    head = ""
-    try:
-        meta = _pending_meta_lines(lottery, predictions)
-        head = meta[0] if meta else ""
-    except Exception:                    # 元信息失败绝不影响推送
-        head = ""
-    head = head or pred_info
-    if head:
-        parts.append(f"**{head}**")
-
-    total = int(n_draw) + int(n_num_pages) + int(n_win_pages)
-    parts.append(f"本次 {total} 张图：{' → '.join(segs)}")
-
-    bullets: List[str] = []
-    if predictions:
-        s = f"· 本期出号 **{len(predictions)} 注**"
-        if size_note:
-            s += f"（{size_note}）"
-        bullets.append(s)
-    if new_cnt > 0 or hit_records:
-        tally = _grade_tally(hit_records)
-        s = f"· 本期结算 **{len(hit_records) or new_cnt} 条**"
-        if tally:
-            s += f"：{tally}"
-        elif hit_summary:
-            s += f"：{hit_summary}"
-        bullets.append(s)
-    draw_line = _fmt_draw_numbers(draw_numbers)
-    if draw_line:
-        bullets.append(f"· {draw_line}")
-    if bullets:
-        parts.append("\n".join(bullets))
-
+    parts: List[str] = [f"> {FOOTER_CONDITION}"]
     if board_url:
         parts.append(f"[打开看板 · 调出号数量 / 看全部记录]({board_url})")
 
-    parts.append(f"> {FOOTER_CONDITION}")
     tilt = _mechanism_footer_line(lottery)
     if tilt:                             # ★ 以前这行只存在于"图片失败回退"的文本里，
-        parts.append(f"> {tilt}")        #   正常推送根本发不出去；现在并入分隔头。
-    return _divider_title(lottery), "\n\n".join(parts)
+        parts.append(f"> {tilt}")        #   正常推送根本发不出去；现在并入组头。
+    title = header if header is not None else _divider_title(lottery)
+    return title, "\n\n".join(parts)
 
 
 def _draw_flat_numbers(draw: Optional[Dict[str, Any]]) -> List[int]:
@@ -990,17 +1163,24 @@ def push_lottery_images(
     board_url: str = "",
     cfg: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
-    """把一个彩种本次结果发成「一条分隔头 + 一组图」。**永不抛出**。
+    """把一个彩种本次结果发成「一条组头 + 一组图」。**永不抛出**。
 
-    消息序列（每个彩种一组）：
-      ① 分隔头（唯一文本）：`━━━ 双色球 ━━━` + 期号 / 张数 / 注数 / 结算 / 开奖 / 链接
+    消息序列（每个彩种一组，**整组原子**）：
+      ① 组头（唯一文本）：`（双色球）彩票号码 / 中奖情况` + 诚实声明 + 看板链接
       ② 今晚开奖图  —— 有开奖号码时 1 张
-      ③ 本期出号图  —— **全量**，`PAGE_TICKETS` 注/页（双色球 200 注 = 4 张）
-      ④ 开奖结算图  —— 仅本次有新结算且命中记录非空，`PAGE_WINS` 行/页
+      ③ 开奖结算图  —— 仅本次有新结算且命中记录非空，`PAGE_WINS` 行/页
+      ④ 本期出号图  —— **全量**，`PAGE_TICKETS` 注/页（双色球 200 注 = 4 张）
+
+    ★ 2026-11-03 两处变更（用户要求）：
+      · 顺序改为 **开奖 → 中奖 → 号码**（原为 开奖 → 号码 → 中奖）；
+      · ①~④ 用 `_group_spin_lock` 圈成一个原子段 —— 此前多条流水线线程
+        （「立即运行全部」/ worker / 启动自愈 / 计划任务）会同时推同一 webhook，
+        A 组的头和图片被 B 组消息拆开，用户看到的就是「没按顺序推」。
 
     `图片推送=false` 或非企微渠道 → **只发一条** markdown 文本
     （不许"逐图失败各回退一次"，否则 pushplus 会收到 4~5 条重复长文）。
-    返回每条发送的结果列表；未启用 / 无内容 → 空列表。
+    返回每条发送的结果列表（每条带 `lock` 标记说明这次有没有拿到组锁）；
+    未启用 / 无内容 → 空列表。
     """
     try:
         cfg = cfg if cfg is not None else sanitize(load_config())
@@ -1081,54 +1261,94 @@ def push_lottery_images(
                  for k, c in enumerate(win_pages, 1)],
                 f"{lottery} 结算图")
 
-        out: List[Dict[str, Any]] = []
+        # ---- ②③④ 发送整段：**原子**（一个彩种 = 一条组头 + 一组图，不许被打断）----
+        # ★ 锁只包「发送」：渲染已经在上面的锁外做完（顺序问题只发生在 send 之间，
+        #   而渲染是 CPU 密集的 matplotlib，留在锁外可减小锁持有方差）。
+        group_label = lottery
+        _ensure_logger()
+        t0 = time.time()
+        if cfg.get("组级互斥", True):
+            lock_ctx = _group_spin_lock(group_label, timeout=_group_lock_cfg(cfg))
+        else:
+            lock_ctx = contextlib.nullcontext("disabled")
 
-        # ---- ② 分隔头（本彩种唯一的一条文本，张数按**实际**渲染结果写）----
-        title, body = build_divider_message(
-            lottery, predictions=predictions, eval_result=eval_result,
-            hit_summary=hit_summary, hit_records=hit_records,
-            draw_numbers=draw_numbers, pred_info=pred_info, size_note=size_note,
-            board_url=board_url, n_draw=1 if draw_png else 0,
-            n_num_pages=len(num_pngs), n_win_pages=len(win_pngs))
-        if title:
-            out.append(send(title, body, cfg))
+        with lock_ctx as lock_state:
+            out: List[Dict[str, Any]] = []
 
-        # ---- ③ 今晚开奖 ----
-        if draw_png:
-            out.extend(_send_pngs([draw_png], cfg))
+            def _emit(kind: str, seg: str, res: Dict[str, Any], page: str = "") -> None:
+                """发一条并记账 —— 日志格式固定，用于**机械验证顺序**。
 
-        # ---- ④ 本期出号（全量 + 自动分页）----
-        if want_nums:
-            if not num_pngs:
-                # 票面图整组失败 → 行式图兜底（同样分页）
-                lines = [format_ticket_line(t) for t in predictions]
-                chunks = [lines[i:i + _pimg.PAGE_LINES]
-                          for i in range(0, len(lines), _pimg.PAGE_LINES)]
-                num_pngs = _render_set(
-                    [lambda c=c, k=k: _pimg.render_numbers_image(
-                        c, title=f"{lottery} · 本期出号",
-                        subtitle=f"共 {len(predictions)} 注", page=(k, len(chunks)))
-                     for k, c in enumerate(chunks, 1)],
-                    f"{lottery} 出号图(行式)")
-            if num_pngs:
-                out.extend(_send_pngs(num_pngs, cfg))
-            else:
+                `grep "\\[PUSH\\]" logs/<日期>.log` 后：同组 `序号` 必须 1..n 连续，
+                任何他组行夹在本组「组头」与「结束」之间 ⇒ 组锁失效。
+                """
+                out.append(res)
+                logger.info("[PUSH] 组=%s 序号=%d 类型=%s 段=%s%s ok=%s detail=%s",
+                            group_label, len(out), kind, seg,
+                            (f" 页={page}" if page else ""),
+                            res.get("ok"), str(res.get("detail") or "")[:40])
+
+            def _emit_pngs(pngs: List[bytes], seg: str) -> None:
+                for k, r in enumerate(_send_pngs(pngs, cfg), 1):
+                    _emit("image", seg, r,
+                          page=(f"{k}/{len(pngs)}" if len(pngs) > 1 else ""))
+
+            # ---- 组头（本彩种唯一的一条文本；标签按**实际有哪几类图**来写）----
+            title, body = build_divider_message(
+                lottery, predictions=predictions, eval_result=eval_result,
+                hit_summary=hit_summary, hit_records=hit_records,
+                draw_numbers=draw_numbers, pred_info=pred_info, size_note=size_note,
+                board_url=board_url, n_draw=1 if draw_png else 0,
+                n_num_pages=len(num_pngs), n_win_pages=len(win_pngs),
+                header=_group_header(lottery, has_nums=want_nums,
+                                     has_settle=bool(win_pngs or win_pages),
+                                     has_draw=bool(draw_png)))
+            if title:
+                # ★ heading=False：企微的 `#` 是一级标题，会把一行标签折成两三行
+                _emit("markdown", "组头", send(title, body, cfg, heading=False))
+
+            # ---- ③ 今晚开奖 ----
+            if draw_png:
+                _emit_pngs([draw_png], "开奖")
+
+            # ---- ④ 中奖（开奖结算）—— 用户要求排在号码之前 ----
+            if win_pngs:
+                _emit_pngs(win_pngs, "中奖")
+            elif win_pages:
                 t2, b2 = build_pipeline_message(
-                    lottery, predictions=predictions, draw_numbers=draw_numbers,
-                    pred_info=pred_info, size_note=size_note,
-                    board_url=board_url, max_show=FALLBACK_MAX_SHOW)
+                    lottery, eval_result=eval_result, hit_summary=hit_summary,
+                    hit_records=hit_records, max_show=FALLBACK_MAX_SHOW)
                 if t2:
-                    out.append(send(t2, b2, cfg))
+                    _emit("markdown", "中奖", send(t2, b2, cfg))
 
-        # ---- ⑤ 开奖结算 ----
-        if win_pngs:
-            out.extend(_send_pngs(win_pngs, cfg))
-        elif win_pages:
-            t2, b2 = build_pipeline_message(
-                lottery, eval_result=eval_result, hit_summary=hit_summary,
-                hit_records=hit_records, max_show=FALLBACK_MAX_SHOW)
-            if t2:
-                out.append(send(t2, b2, cfg))
+            # ---- ⑤ 号码（本期出号，全量 + 自动分页）----
+            if want_nums:
+                if not num_pngs:
+                    # 票面图整组失败 → 行式图兜底（同样分页）
+                    lines = [format_ticket_line(t) for t in predictions]
+                    chunks = [lines[i:i + _pimg.PAGE_LINES]
+                              for i in range(0, len(lines), _pimg.PAGE_LINES)]
+                    num_pngs = _render_set(
+                        [lambda c=c, k=k: _pimg.render_numbers_image(
+                            c, title=f"{lottery} · 本期出号",
+                            subtitle=f"共 {len(predictions)} 注", page=(k, len(chunks)))
+                         for k, c in enumerate(chunks, 1)],
+                        f"{lottery} 出号图(行式)")
+                if num_pngs:
+                    _emit_pngs(num_pngs, "号码")
+                else:
+                    t2, b2 = build_pipeline_message(
+                        lottery, predictions=predictions, draw_numbers=draw_numbers,
+                        pred_info=pred_info, size_note=size_note,
+                        board_url=board_url, max_show=FALLBACK_MAX_SHOW)
+                    if t2:
+                        _emit("markdown", "号码", send(t2, b2, cfg))
+
+            for r in out:
+                # 把「这次到底有没有拿到组锁」带进结果 ⇒ 看板/日志都能看出是否降级
+                r.setdefault("lock", lock_state)
+            logger.info("[PUSH] 组=%s 结束 已发=%d 用时=%.1fs 锁=%s 失败=%d",
+                        group_label, len(out), time.time() - t0, lock_state,
+                        sum(1 for r in out if not r.get("ok")))
 
         if len(out) > PUSH_MAX_MSGS:
             logger.warning(f"{lottery} 单次推送 {len(out)} 条 > 软预算 {PUSH_MAX_MSGS}"
@@ -1142,6 +1362,26 @@ def push_lottery_images(
 # ------------------------------------------------------------
 # 对外入口②：流水线收尾调用（所有自动化入口共用）
 # ------------------------------------------------------------
+def _summarize(results: Sequence[Dict[str, Any]]) -> tuple:
+    """把逐条发送结果汇成 (ok, detail)。**丢消息不许报成功**。
+
+    ★ 为什么不能再用 `any(r.get("ok"))`（2026-11-03）：一个彩种现在 4~21 条消息，
+      `any` 意味着「21 条只成功 1 条」也算成功 —— 用户那边少了十几张图，
+      而看板「最近推送」绿着，日志里也没有任何抱怨。这是最难发现的一类失真。
+    ★ 也不走另一个极端：`okn == 0`（全挂）与「部分失败」必须区分，
+      否则一次网络抖动会被报成「推送完全失败」，反而让人以为功能坏了。
+    """
+    n = len(results)
+    okn = sum(1 for r in results if r.get("ok"))
+    if n and okn == n:
+        return True, str(results[-1].get("detail") or "")[:80]
+    if okn == 0:
+        last = str((results[-1] or {}).get("detail") or "") if results else ""
+        return False, f"全部失败 0/{n}：{last[:60]}"
+    bad = [str(r.get("detail") or "")[:30] for r in results if not r.get("ok")][:2]
+    return False, f"部分失败 {okn}/{n}：{'；'.join(bad)}"
+
+
 def push_pipeline_result(
     lottery: str,
     *,
@@ -1181,8 +1421,7 @@ def push_pipeline_result(
             draw_numbers=draw_numbers, pred_info=pred_info, cfg=cfg)
         if not results:
             return None
-        ok = any(r.get("ok") for r in results)
-        detail = str(results[-1].get("detail", ""))
+        ok, detail = _summarize(results)
         # ★ 按**消息条数**计额度：改版后一个彩种 4~7 条，按调用次数计会严重低估
         _mark_pushed(cfg, ok, detail, count=len(results))
         logger.info(f"微信推送 {lottery}: ok={ok} 共 {len(results)} 条 ({detail[:80]})")
@@ -1217,7 +1456,11 @@ def push_health_summary(
             lines.append("- ✅ 数据完整性 / pending / 流水线快照全部通过")
         if report_path:
             lines.append(f"\n报告：{report_path}")
-        res = send("彩票助手｜项目体检", "\n".join(lines), cfg)
+        # ★ 单条消息也要抢一次组锁（短超时）：否则它会插进某个彩种的一组图中间，
+        #   用户看到的就是「双色球的图里混进一条体检」。抢不到就降级直接发 ——
+        #   这类消息本身不带分组语义，顺序错了不影响理解，但不能因为它卡住流水线。
+        with _group_spin_lock("体检", timeout=5.0):
+            res = send("彩票助手｜项目体检", "\n".join(lines), cfg)
         _mark_pushed(cfg, res.get("ok", False), res.get("detail", ""))
         logger.info(f"体检推送: ok={res.get('ok')} ({res.get('detail', '')[:80]})")
         return res
@@ -1318,7 +1561,9 @@ def push_recovery_summary(
                 if isinstance(info, dict):
                     lines.append(f"  - **{lot}**：{info.get('原组数')} → {info.get('滑轨')} 注"
                                  f"（{info.get('动作') or '重生成'}）")
-        res = send("彩票助手｜启动自检", "\n".join(lines), cfg)
+        # ★ 同 push_health_summary：单条消息抢一次短超时组锁，不抢也照发
+        with _group_spin_lock("启动自检", timeout=5.0):
+            res = send("彩票助手｜启动自检", "\n".join(lines), cfg)
         _mark_pushed(cfg, res.get("ok", False), res.get("detail", ""))
         logger.info(f"启动自检推送: ok={res.get('ok')} ({res.get('detail', '')[:80]})")
         return res
@@ -1336,7 +1581,7 @@ def push_recovery_summary(
 #   流水线）用的是「排列3 / 排列5 / 福彩3D」。名字对不上 → load_pending /
 #   load_feedback_history 按名取文件全部落空（返回 0），这 3 个彩种在全彩种简报里
 #   被**静默跳过**（既不显示号码也不显示中奖），且不报任何错。
-ALL_LOTTERIES = ["双色球", "大乐透", "排列3", "排列5", "福彩3D", "七星彩"]
+ALL_LOTTERIES = ["双色球", "大乐透", "排列3", "排列5", "福彩3D", "七星彩", "七乐彩", "快乐8"]
 
 # 常见别名 → 规范名：调用方（含人工调用）传「排列三」也能落到正确文件
 _LOTTERY_ALIASES = {
@@ -1451,7 +1696,8 @@ def push_daily_digest(max_show: int = 30, lotteries=None) -> List[Dict[str, Any]
                 out.append({"lottery": lot, "ok": False, "detail": "无出号且无中奖，跳过"})
                 continue
             res = push_lottery_images(lot, cfg=cfg, **payload)
-            out.append({"lottery": lot, "ok": any(r.get("ok") for r in res),
+            _ok, _detail = _summarize(res)
+            out.append({"lottery": lot, "ok": _ok, "detail": _detail,
                         "sent": len(res), "results": res})
         except Exception as e:
             out.append({"lottery": lot, "ok": False, "detail": str(e)[:200]})

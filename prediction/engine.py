@@ -55,13 +55,21 @@ class PredictSet:
         robustness: Optional[dict] = None,
         tier: Optional[str] = None,
     ):
+        """构造一组号码。
+
+        ★ 空分区一律丢弃：没有号码的分区不成其为票面的一部分。
+          七乐彩的「特别号」是 draw_only（choose=0）分区 —— 只出现在开奖、票面不选号，
+          若把这个恒为空的键留在 `号码` 里，报告/推送/前端都会渲染出一个永远空的分区列。
+        """
         if zones is not None:
-            self.zones = {k: sorted(v) for k, v in zones.items()}
+            # ★ 丢弃空分区（2026-11-02）：七乐彩特别号 choose=0 ⇒ 恒为空列表，
+            #   留着它就是给「不是票面的东西」在 `号码` 里占一个键。
+            self.zones = {k: sorted(v) for k, v in zones.items() if v}
         else:
             self.zones = {}
-            if reds is not None:
+            if reds:
                 self.zones["红球"] = sorted(reds)
-            if blues is not None:
+            if blues:
                 self.zones["蓝球"] = sorted(blues)
         self.reds = self.zones.get("红球", [])
         self.blues = self.zones.get("蓝球", [])
@@ -337,7 +345,14 @@ def _pad_to_groups(predicted_sets, groups, schema, *, lottery_name: str,
         feasible = True
         for z in zones_def:
             lo, hi = int(z.min), int(z.max)
-            n = max(1, int(getattr(z, "choose", 1) or 1))
+            # ★ choose=0 （draw_only，如七乐彩特别号）票面不选号 ⇒ 这里也不能选。
+            #   旧写法 `max(1, choose or 1)` 会把它提成 1，补票时产出
+            #   「基本号 7 个 + 特别号 1 个」的**八码票面** —— 七乐彩只有 7 个号，
+            #   这既是无效票，结算还会拿 8 个号去比开奖号。
+            n_raw = int(getattr(z, "choose", 1) or 0)
+            if n_raw <= 0:
+                continue
+            n = n_raw
             if getattr(z, "repeatable", False):
                 picks = [random.randint(lo, hi) for _ in range(n)]
             elif hi - lo + 1 >= n:

@@ -39,6 +39,8 @@ HIST_FILES = {
     "福彩3D": ["福彩3D历史数据.csv"],
     "排列3": ["排列3历史数据.csv"],
     "七星彩": ["七星彩历史数据.csv"],
+    "七乐彩": ["七乐彩历史数据.csv"],
+    "快乐8": ["快乐8历史数据.csv"],
 }
 
 SALES_FILES = {
@@ -288,18 +290,23 @@ def scan_lottery(name: str, today: date):
         if not cols:
             continue
         n_checked += 1
-        # 期望列数 = 各分区 choose 之和（双色球 6+1=7、大乐透 5+2=7、七星彩 7）
-        expect = sum(z["choose"] for z in zones)
+        # 期望列数 = 各分区 draw_count 之和（开奖摇出数）。
+        # ★ 既有 6 彩种 draw 恒为 None ⇒ draw_count == choose，行为与改造前逐字节相同；
+        #   七乐彩特别号 choose=0 但 draw_count=1 ⇒ 期望列数必须按 draw_count 才算对
+        #   （否则 3005 期整片报「列数 8 != 7」并跳过真实范围校验）。
+        expect = sum((z.get("draw") if z.get("draw") is not None else z["choose"])
+                     for z in zones)
         if len(cols) != expect:
             bad_num.append({"期号": r["期号"],
                             "说明": f"号码列数 {len(cols)} != 应有 {expect}"})
             continue
-        # 列→分区映射：按每个分区的 choose 数顺序切分
-        # （红球 6 列全归红球区、蓝球 1 列归蓝球区；数字型每位一个区）
+        # 列→分区映射：按每个分区的 draw_count 数顺序切分（draw_only 区也要映射，
+        # 否则七乐彩特别号那 1 列永远不会被范围校验到）。
         col_zone = []
         idx = 0
         for zone in zones:
-            for _ in range(zone["choose"]):
+            n = (zone.get("draw") if zone.get("draw") is not None else zone["choose"])
+            for _ in range(n):
                 if idx < len(cols):
                     col_zone.append((cols[idx][0], cols[idx][1], zone))
                 idx += 1

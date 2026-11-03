@@ -71,6 +71,20 @@ CREATE TABLE IF NOT EXISTS prize_region (
 );
 CREATE INDEX IF NOT EXISTS idx_pr_region ON prize_region (region, lottery);
 
+-- ---------------------------------------------------------------- 4b. 分省抓取探针
+-- ★为什么需要单独一张表：中彩网详情接口对**部分期**返回空的 firstPrizeAddress
+--   （例如大乐透 2014 年 14048~14055 就是空的，而 14056 有「上海（基本1 注）」）。
+--   这种「查过、源头没有」与「还没查过」在 prize_region 里长得一模一样（都是没有行），
+--   若不记下来，`only_missing` 每轮都会把它们当缺口重抓一遍 —— 永久重抓。
+--   ★不写进 draw.first_region_raw：那个字段是**源文**，塞标记等于把语义搞脏。
+CREATE TABLE IF NOT EXISTS region_probe (
+  lottery    TEXT NOT NULL,
+  issue      TEXT NOT NULL,
+  outcome    TEXT NOT NULL,             -- filled / empty / unparsed
+  checked_at TEXT,
+  PRIMARY KEY (lottery, issue)
+);
+
 -- ---------------------------------------------------------------- 5. 分省月销量
 CREATE TABLE IF NOT EXISTS region_sales (
   ym             TEXT NOT NULL,         -- 2026-06

@@ -265,6 +265,84 @@ def test_is_running_reflects_lock(fake_env):
     assert U.is_running() is True
 
 
+# ---------------------------------------------------------------- 排队取槽位
+#
+# ★ 2026-11-02 事故：更新槽位是**全进程唯一**的（一个 _RUNNING + 一把 .update.lock），
+#   而启动自愈会**同时**给七乐彩（zhcw）和快乐8（cwl）触发流水线。两者源不同、数据
+#   不重叠，却共用同一个槽位 ⇒ 后到的直接判 busy ⇒ _update_via_market 返回 error ⇒
+#   流水线抛「抓取失败: ...本次未抓取」⇒ 该彩种**这一轮没有任何 pending**。
+#   修法是"等"：wait_sec>0 时排队，拿到就干活，超时才照实报错。
+#   下面四条锁住「等」的边界，别再退回"一撞就失败"。
+
+def test_wait_sec_zero_keeps_fail_fast_semantics(fake_env, monkeypatch):
+    """默认 wait_sec=0：新鲜锁立刻回 busy，文案与旧版逐字一致（页面按钮不该排队）。"""
+    fake_env["lock"].write_text("99999", encoding="utf-8")
+    calls = []
+    _stub(monkeypatch, "csv", calls)
+    _no_viewer(monkeypatch)
+
+    t0 = time.time()
+    r = U.run_update(sources=["csv"], log=lambda m: None)
+    elapsed = time.time() - t0
+
+    assert r["ok"] is False and r["busy"] is True
+    assert r["error"] == "另一个更新任务正在运行，本次跳过（锁：%s）" % U.LOCK_PATH
+    assert "已等待" not in r["error"], "wait_sec=0 不该出现等待文案"
+    assert elapsed < 0.5, "wait_sec=0 竟然真的等了 %.2fs" % elapsed
+    assert calls == []
+
+
+def test_wait_sec_waits_until_lock_released(fake_env, monkeypatch):
+    """槽位被占时排队；对方做完释放后必须**继续干活**，不能把可恢复的占用当失败。"""
+    fake_env["lock"].write_text("99999", encoding="utf-8")
+
+    def _release():
+        time.sleep(0.6)
+        fake_env["lock"].unlink()
+
+    threading.Thread(target=_release, daemon=True).start()
+    calls = []
+    _stub(monkeypatch, "csv", calls)
+    _no_viewer(monkeypatch)
+
+    r = U.run_update(sources=["csv"], log=lambda m: None, wait_sec=5.0)
+
+    assert r["ok"] is True, "排队后仍失败：%s" % r.get("error")
+    assert calls == ["csv"], "排到队却没跑源"
+
+
+def test_wait_sec_times_out_honestly(fake_env, monkeypatch):
+    """对方长期占着（如全量更新 10~20 分钟）：超时就照实报错，并写明等过多久。"""
+    fake_env["lock"].write_text("99999", encoding="utf-8")
+    calls = []
+    _stub(monkeypatch, "csv", calls)
+    _no_viewer(monkeypatch)
+
+    t0 = time.time()
+    r = U.run_update(sources=["csv"], log=lambda m: None, wait_sec=1.2)
+    elapsed = time.time() - t0
+
+    assert r["ok"] is False and r["busy"] is True
+    assert "已等待" in r["error"], "超时文案必须写明等过多久：%s" % r["error"]
+    assert elapsed >= 1.1, "没等到 wait_sec 就放弃了（%.2fs）" % elapsed
+    assert calls == [], "拿不到槽位绝不能跑源"
+
+
+def test_wait_for_slot_blocks_on_in_process_flag(fake_env, monkeypatch):
+    """同进程内已有一路在跑（_RUNNING）也要等 —— 两个彩种流水线是并发线程。"""
+    monkeypatch.setattr(U, "_RUNNING", True)
+    ok, reason = U._wait_for_slot(wait_sec=0.0)
+    assert ok is False
+    assert "本进程已有更新任务在运行" in reason
+
+
+def test_wait_for_slot_acquires_when_free(fake_env, monkeypatch):
+    """空闲时必须真的拿到锁（不能只返回 True 却不落锁）。"""
+    ok, reason = U._wait_for_slot(wait_sec=0.0)
+    assert ok is True and reason == ""
+    assert fake_env["lock"].exists(), "说拿到了但没写锁文件"
+
+
 # ---------------------------------------------------------------- 读侧
 
 def test_last_update_without_records(fake_env):

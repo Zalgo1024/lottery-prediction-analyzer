@@ -5,13 +5,8 @@
 
 <div style="margin:15px 0;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
   <select id="fb-lottery" style="padding:8px 15px;border:1px solid #ddd;border-radius:5px;font-size:14px" onchange="_onFbLotteryChange()">
-    <option value="全部彩种" selected>全部彩种（全部 6 种）</option>
-    <option value="双色球">仅双色球</option>
-    <option value="大乐透">仅大乐透</option>
-    <option value="排列5">仅排列5</option>
-    <option value="福彩3D">仅福彩3D</option>
-    <option value="排列3">仅排列3</option>
-    <option value="七星彩">仅七星彩</option>
+    <option value="全部彩种" selected>全部彩种（全部 {{ lotteries|length }} 种）</option>
+    {% for lot in lotteries %}<option value="{{ lot }}">仅{{ lot }}</option>{% endfor %}
   </select>
   <select id="fb-lookback" style="padding:8px 15px;border:1px solid #ddd;border-radius:5px;font-size:14px">
     <option value="0" selected>全部历史</option>

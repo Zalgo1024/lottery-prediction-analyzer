@@ -80,10 +80,21 @@ class TestCalibration:
 
 class TestRealData:
     def test_all_zones_clean_no_alarm(self):
-        """真数据回归锚点：6 彩种 22 分区族级任意停时无告警"""
+        """真数据回归锚点：全部分区族级任意停时无告警。
+
+        ★ 分区族 M 不再写死 22：M 是 Bonferroni 的分母，写死就等于
+          「新彩种接进来后阈值还是旧的」，而新彩种又根本不在清单里 ⇒
+          两边一起静默错（报告少两行、阈值却不变）。
+        """
+        from config import LOTTERY_CONFIG
+        from data.schema import get_schema
+
         rep = run_all()
         assert rep["越阈分区"] == [], rep["族结论"]
-        assert rep["监控分区数M"] == 22
+        m_expect = sum(len(get_schema(nm).zones) for nm in LOTTERY_CONFIG)
+        assert rep["监控分区数M"] == m_expect, (
+            f"M={rep['监控分区数M']} 与注册表推导的 {m_expect} 不一致"
+            f"（分区数：{ {nm: len(get_schema(nm).zones) for nm in LOTTERY_CONFIG} }）")
 
     def test_dlt_red_elevated_diagnostic_below_alarm(self):
         """大乐透红球诊断 e-max ≈112：高于正常区(≈1-3)但低于告警线 440"""

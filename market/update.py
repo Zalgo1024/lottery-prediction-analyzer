@@ -207,8 +207,49 @@ def notify_viewer(timeout: float = 180.0):
 
 # ------------------------------------------------------------------ 主流程
 
+def _wait_for_slot(wait_sec: float = 0.0, poll: float = 1.0):
+    """尝试占住更新槽位（进程内标志 + 跨进程文件锁），最多等 wait_sec 秒。
+
+    返回 (ok, reason)。ok=False 时 reason 就是可以直接回给调用方的错误文案。
+
+    为什么需要「等」而不是「立刻失败」（2026-11-02 事故）：
+      更新槽位是**全进程唯一**的（一个 `_RUNNING` + 一把 `.update.lock`），但启动自愈
+      会**同时**为多个彩种触发流水线。七乐彩走 zhcw、快乐8 走 cwl 本是两个互不相干的
+      源，却共用同一个槽位 ⇒ 后到的那个直接判 busy，`data.fetcher._update_via_market`
+      只能返回 error ⇒ 整条流水线抛「抓取失败: ... 本次未抓取」⇒ 该彩种这一轮**没有
+      任何 pending**。2026-11-02 02:31 的日志就是这两条：
+        七乐彩 → 源=zhcw 失败（本进程已有更新任务在运行）
+        快乐8 → 源=cwl  失败（本进程已有更新任务在运行）
+      两个增量更新各十几秒，排队串行跑完即可，没有理由当成失败。
+
+    wait_sec=0 时行为与旧版完全一致（第一次判定失败就返回），供「页面按钮」这类
+    不该排队的入口使用。
+    """
+    t0 = time.time()
+    while True:
+        if not _RUNNING:
+            # 只靠 _acquire_lock 判定跨进程占用：它内部会把「超过 40 分钟的陈旧锁」当作
+            # 上次进程被杀的遗留并接管。若这里再叠一道 is_running()，陈旧锁就永远接管
+            # 不了，会把自己锁死 40 分钟（踩过这个逻辑）。
+            if _acquire_lock():
+                return True, ""
+            reason = "另一个更新任务正在运行，本次跳过（锁：%s）" % LOCK_PATH
+        else:
+            reason = "本进程已有更新任务在运行，本次跳过"
+        waited = time.time() - t0
+        if waited >= wait_sec:
+            break
+        time.sleep(min(max(poll, 0.05), max(0.05, wait_sec - waited)))
+    if wait_sec > 0:
+        # 等过就别再说是「跳过」不「跳过」的问题 —— 把等待时长写进文案，
+        # 排查时能区分「没排上队」和「排队超时」。
+        reason = "%s（已等待 %.0f 秒仍未释放）" % (reason, time.time() - t0)
+    return False, reason
+
+
 def run_update(sources=None, rebuild_cache: bool = True, log=print,
-               deadline_sec: float = None, mode: str = "incremental") -> dict:
+               deadline_sec: float = None, mode: str = "incremental",
+               wait_sec: float = 0.0) -> dict:
     """串行跑各源并汇总。返回结构化结果（不抛异常，失败体现在返回值里）。
 
     mode：
@@ -218,6 +259,9 @@ def run_update(sources=None, rebuild_cache: bool = True, log=print,
 
     deadline_sec：整次更新的总时限。超过后不再启动新源，把剩余的标为
     `skipped`（不算失败，也不算成功），避免一次网络龟速把任务拖过一小时。
+
+    wait_sec：槽位被占时最多排队等多久（默认 0 = 立刻返回 busy，保持旧行为）。
+    见 `_wait_for_slot` 里 2026-11-02 的事故说明。
     """
     global _RUNNING
 
@@ -231,15 +275,9 @@ def run_update(sources=None, rebuild_cache: bool = True, log=print,
         return {"ok": False, "error": "未知数据源: %s" % unknown,
                 "allowed": list(DEFAULT_SOURCES)}
 
-    if _RUNNING:
-        return {"ok": False, "busy": True, "error": "本进程已有更新任务在运行，本次跳过"}
-
-    # 只靠 _acquire_lock 判定跨进程占用：它内部会把「超过 40 分钟的陈旧锁」当作
-    # 上次进程被杀的遗留并接管。若这里再叠一道 is_running()，陈旧锁就永远接管不了，
-    # 会把自己锁死 40 分钟（踩过这个逻辑）。
-    if not _acquire_lock():
-        return {"ok": False, "busy": True,
-                "error": "另一个更新任务正在运行，本次跳过（锁：%s）" % LOCK_PATH}
+    slot_ok, slot_err = _wait_for_slot(wait_sec=wait_sec)
+    if not slot_ok:
+        return {"ok": False, "busy": True, "error": slot_err}
 
     _RUNNING = True
     started = datetime.now()
@@ -318,6 +356,26 @@ def run_update(sources=None, rebuild_cache: bool = True, log=print,
                     log("[%s] %s，%.1fs，%d 期" % (
                         src, "ok" if results[src]["ok"] else "失败",
                         results[src]["elapsed"], results[src]["rows"]))
+
+            # ★中彩网详情接口补头奖分省（体彩系唯一来源：体彩官方不给分省）。
+            #   轻量：每彩种最多查 20 期、只补缺口；失败绝不影响主流程。
+            #   空库 / 未建 draw 时天然 0 候选、不发请求（test_market_update 即此情形）。
+            if "zhcw" in picked and (results.get("zhcw") or {}).get("ok"):
+                try:
+                    rs = B.build_zhcw_region(con, limit_per_code=20, verbose=False,
+                                             sleep=0.1, max_consecutive_failures=5)
+                    filled = sum(v["filled_issues"] for v in rs.values())
+                    # ★被限流时不要在每日调度里硬顶：5 次失败就停（上面已传给 build）
+                    aborted = [c for c, v in rs.items() if v.get("aborted")]
+                    if aborted:
+                        log("[zhcw-region] %s 疑似限流，本次跳过" % ",".join(aborted))
+                    if filled:
+                        log("[zhcw-region] 补头奖分省 %d 期" % filled)
+                        results["zhcw_region"] = {
+                            "ok": True, "rows": 0, "elapsed": 0.0,
+                            "filled": filled, "error": None}
+                except Exception as e:      # 补分省失败不blocking主更新
+                    log("[zhcw-region] 跳过（%s）" % e)
 
             failed = [s for s, r in results.items()
                       if not r["ok"] and not r.get("skipped")]

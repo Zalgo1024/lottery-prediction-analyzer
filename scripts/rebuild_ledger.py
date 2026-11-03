@@ -28,7 +28,7 @@ if str(ROOT) not in sys.path:
 
 from data import ledger as L  # noqa: E402
 
-ALL = ["双色球", "大乐透", "排列5", "福彩3D", "排列3", "七星彩"]
+ALL = ["双色球", "大乐透", "排列5", "福彩3D", "排列3", "七星彩", "七乐彩", "快乐8"]
 
 
 def _fmt(s: dict) -> str:

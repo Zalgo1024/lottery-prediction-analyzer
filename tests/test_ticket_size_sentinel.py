@@ -21,7 +21,10 @@ import pytest
 
 from data import ticket_size as ts
 
-LOTS = ("双色球", "大乐透", "排列5", "福彩3D", "排列3", "七星彩")
+# ★ 本表必须与 config.LOTTERY_CONFIG 同步：`health()` 的「安全」判据之一是
+#   「limits 覆盖全部彩种」，漏一个彩种会让这份"健康基线"被自己判成不安全。
+LOTS = ("双色球", "大乐透", "排列5", "福彩3D", "排列3", "七星彩",
+        "七乐彩", "快乐8")
 
 
 def _payload(**over) -> dict:
@@ -32,7 +35,8 @@ def _payload(**over) -> dict:
         "dynamic": {lot: 50 for lot in LOTS},
         "current": {lot: 50 for lot in LOTS},
         "limits": {"双色球": 500, "大乐透": 400, "排列5": 100,
-                   "福彩3D": 200, "排列3": 200, "七星彩": 300},
+                   "福彩3D": 200, "排列3": 200, "七星彩": 300,
+                   "七乐彩": 500, "快乐8": 100},
         "锁定": True,
     }
     doc.update(over)

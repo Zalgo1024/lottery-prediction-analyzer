@@ -171,7 +171,13 @@ def test_grade_rows_complete():
 
 # ---------------- 错误处理 ----------------
 def test_unknown_lottery_returns_error():
-    assert "error" in payout_eff("快乐8", "12345")
+    """未接入的彩种必须显式报错，不能静默返回一个"看起来算出来了"的 EV。
+
+    ★ 2026-11-02：此处原用「快乐8」当未知彩种，它已接入生产（有 rules/概率/金额链），
+      故换成真正不存在的名字。**别把这条改成"接入彩种也能算"** —— 它守的是
+      「不认识的彩种宁可报错，也不要返回 0 或默认值」。
+    """
+    assert "error" in payout_eff("不存在的彩种", "12345")
 
 
 def test_bad_ticket_returns_error():

@@ -182,18 +182,27 @@ def data_quality_report(lottery_name: str, fdr_alpha: float = 0.05) -> Dict:
             else:
                 adj = sum(1 for a, b in zip(draws, draws[1:])
                           if a and b and (set(a) & set(b)))
-                denom = math.comb(size, zone.choose)
-                # 共享≥1号的组合数 = 总组合 - 完全不共享的组合数(comb(size-choose, choose))
-                c = max(0, denom - math.comb(size - zone.choose, zone.choose))
+                # ★ 这里比的是**两期开奖**的重叠，所以用 draw_count 而不是 choose。
+                #   七乐彩「特别号」票面 choose=0（draw_only）、开奖 draw=1：
+                #   用 choose 会得到 comb(30,0)=1 ⇒ e=0 ⇒ 效应量除零（2026-11-02 实踩，
+                #   /api/audit/quality/七乐彩 直接 500）。改用 draw_count 后
+                #   e=1/30，正好是「两期特别号相同」的真实概率。
+                w = int(zone.draw_count)
+                denom = math.comb(size, w)
+                # 共享≥1号的组合数 = 总组合 - 完全不共享的组合数(comb(size-w, w))
+                c = max(0, denom - math.comb(size - w, w)) if size >= w else 0
                 e = (c / denom) if denom > 0 else 0.0  # 相邻两期共享≥1号的期望概率
             p_hat = adj / npairs
             se = (e * (1 - e) / npairs) ** 0.5
             z = (p_hat - e) / se if se > 0 else 0.0
             p = float(2 * (1 - stats.norm.cdf(abs(z)))) if se > 0 else 1.0
+            # ★ e=0 时「相对效应量」无定义（不是 0，也不是无穷）：给 None 让界面显示「—」。
+            #   宁可显式缺失，也不要拿一个假数字充数 —— 那会被当成"效应量为零"。
+            eff = round(abs(p_hat - e) / e, 4) if e > 0 else None
             tests.append({
                 "检验": "相邻自相关", "分区": zone.name,
                 "统计量": round(z, 3), "p值": round(p, 4),
-                "效应量": round(abs(p_hat - e) / e, 4),
+                "效应量": eff,
                 "明细": f"观测相邻相同率={p_hat:.3f}, 期望={e:.3f}",
             })
 

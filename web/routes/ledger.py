@@ -30,7 +30,7 @@ from web.validators import validate_lottery
 
 bp = Blueprint("ledger", __name__)
 
-_ALL = ["双色球", "大乐透", "排列5", "福彩3D", "排列3", "七星彩"]
+_ALL = ["双色球", "大乐透", "排列5", "福彩3D", "排列3", "七星彩", "七乐彩", "快乐8"]
 
 
 def _empty_state(lottery: str) -> dict:

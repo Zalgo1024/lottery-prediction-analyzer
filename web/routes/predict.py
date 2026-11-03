@@ -46,3 +46,51 @@ def api_predict_status(task_id):
         "result": task["result"],
         "error": task["error"],
     })
+
+
+@bp.route("/api/predict/regenerate", methods=["POST"])
+@api_error_handler
+def api_predict_regenerate():
+    """重新出一批号 —— **不删除**已有号码，新批与旧批并存。
+
+    语义（2026-11-02 用户需求）：
+      · 旧的号码全部保留在 pending 里，开奖后照常结算入历史
+        （「旧号那边也有中的也要拉出来」）；
+      · 新批带「重出批号」= N，与旧批在 pending 去重键上分开，互不覆盖；
+      · 当期展示 / 推送 / 组数核对取**最新一批**（`latest_production_pending`
+        按记录时间取最大），所以「优先采用新号」是天然成立的，不需要额外开关。
+
+    ★ 不传 groups：一律走 `resolve_groups`，即用户刚在「出号数量」里保存的值。
+      否则会出现「滑轨改成 30、重出还是 5 注」这种自相矛盾。
+    ★ 不传 mode：与生产流水线一致用 fresh；研究用的 lowcrowd 是另一条台账，
+      不能借这个按钮混进生产批次。
+    """
+    from config import LOTTERY_CONFIG
+    from data.feedback import (_next_issue, latest_production_pending,
+                               load_pending, next_renumber)
+
+    data = request.get_json(silent=True) or {}
+    lottery = str(data.get("lottery") or "").strip()
+    if lottery not in LOTTERY_CONFIG:
+        return jsonify({"ok": False, "error": f"未知彩种：{lottery!r}"}), 400
+
+    issue = _next_issue(lottery)
+    prev = latest_production_pending(load_pending(lottery), target_issue=issue)
+    rn = next_renumber(lottery, issue)
+
+    task_id = start_predict(lottery, {
+        "groups": None,                 # → resolve_groups（用滑轨当前生效值）
+        "mode": "fresh",
+        "record_pending": True,
+        "renumber": rn,
+    })
+    return jsonify({
+        "ok": True,
+        "task_id": task_id,
+        "彩种": lottery,
+        "目标期号": issue,
+        "重出批号": rn,
+        "上一批注数": len((prev or {}).get("预测号码") or []),
+        "说明": ("旧批保留（开奖后照常结算）；当前展示与推送优先用新批。"
+                 if prev else "本期此前没有生产批，本次即首出。"),
+    })

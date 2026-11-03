@@ -19,6 +19,8 @@ import os
 import sys
 import tempfile
 import time
+import contextlib
+import contextvars
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -186,13 +188,71 @@ def _domain_of(record: dict) -> str:
             else DOMAIN_PROD)
 
 
+# ------------------------------------------------------------
+# 「重新出号」的重出批号作用域
+# ------------------------------------------------------------
+# 为什么用 ContextVar 而不是函数参数：真正写 pending 的是
+# `prediction.engine.predict()` 内部（它有 4 条返回分支，各自调
+# `record_pending_prediction`）。把 renumber 一路当参数传下去要改 4 处调用点
+# 加一个公开签名，而这条需求与「怎么选号」毫无关系。用作用域传值，engine 一行
+# 不用动；用 ContextVar 而不是模块全局，是因为 Web 出号跑在 daemon thread 里，
+# 全局变量会被并发请求串味。
+_RENUMBER_VAR = contextvars.ContextVar("wb_pending_renumber", default=0)
+
+
+@contextlib.contextmanager
+def renumber_scope(n: int):
+    """with 块内产生的 pending 记录都带「重出批号 = n」（n<=0 表示首次出号）。"""
+    tok = _RENUMBER_VAR.set(int(n or 0))
+    try:
+        yield
+    finally:
+        _RENUMBER_VAR.reset(tok)
+
+
+def next_renumber(lottery_name: str, target_issue: Any = None) -> int:
+    """下一次「重新出号」该用的重出批号（首次出号 = 0，第一次重出 = 1）。
+
+    ★ 只数**未开奖的生产批**：已结算的记录留在历史里，不该继续把批号推高；
+      研究批（低拥挤台账）是另一条序列，不参与生产重出编号。
+
+    ★★ 期号取不到时**不按期号过滤**（与 `latest_production_pending` 同口径）。
+      曾经写成「取不到期号就按 None 比对」⇒ 一条都对不上 ⇒ 每次都返回 1
+      ⇒ 第二次重出按 key 命中第一批 ⇒ **旧号被覆盖**，正是这个按钮要防的事。
+    ★★ 读盘异常时返回时间戳而不是 1：返回 1 会与已有的第一批撞 key，
+      同样变成覆盖。时间戳保证比任何历史批号都大，宁可变丑不要丢数据。
+    """
+    try:
+        iss = target_issue if target_issue is not None else _next_issue(lottery_name)
+        rows = [p for p in load_pending(lottery_name) if _domain_of(p) == DOMAIN_PROD]
+        if iss is not None:
+            rows = [p for p in rows if str(p.get("目标期号") or "") == str(iss)]
+        return max([int(p.get("重出批号") or 0) for p in rows] or [0]) + 1
+    except Exception as e:                                    # noqa: BLE001
+        logger.warning(f"next_renumber 读 pending 失败({lottery_name})，改用时间戳批号: {e}")
+        return max(1, int(time.time()))
+
+
 def _pending_key(record: dict) -> tuple:
-    """pending 的去重/共存键：同一期、同一档位、同一台账域各留一条。
+    """pending 的去重/共存键：同一期、同一档位、同一台账域、同一重出批号各留一条。
 
     为什么必须带台账域：生产批与研究批同为「一般」档、同一目标期号，
     只用 (期号, 档位) 会让后写的一批把另一批删掉。
+
+    ★ 为什么必须带「重出批号」（2026-11-02 用户需求「重新出号」）：
+      用户点一次重新出号，意图是**多一批可选的票**，而不是把上一批抹掉
+      （旧号可能已经买过了，中奖也得算）。若 key 里没有这一维，第二次出号
+      会按 (期号, 档位, 域) 命中同一条 ⇒ `_upsert_pending` 把旧批删掉，
+      于是「重新出号」变成了「覆盖出号」，用户再也查不到旧号。
+      归一化成 int：老记录没有该字段 ⇒ 0（首出），与显式 0 等价，
+      不会因为「缺字段 vs 写了 0」把同一批拆成两条。
     """
-    return ((record or {}).get("目标期号"), _tier_of(record), _domain_of(record))
+    r = record or {}
+    try:
+        _rn = int(r.get("重出批号") or 0)
+    except (TypeError, ValueError):
+        _rn = 0
+    return (r.get("目标期号"), _tier_of(r), _domain_of(r), _rn)
 
 
 def _recency_key(record: dict) -> str:
@@ -552,6 +612,19 @@ def record_pending_prediction(lottery_name: str, prediction: dict):
     """
     prediction["状态"] = "pending"
     prediction["记录时间"] = datetime.now().isoformat()
+    # —— 重出批号（用户点「重新出号」时由 renumber_scope 注入）——
+    # 0/缺省 = 首次出号；>0 = 同期第 N 次重出。它与 (期号, 档位, 域) 一起构成
+    # pending 的去重键，因此旧批不会被新批覆盖 —— 旧号码仍留在 pending 里等
+    # 开奖，结算时照常入账（「旧号中奖也要拉出来」）。
+    _rn = prediction.get("重出批号")
+    if _rn is None:
+        _rn = _RENUMBER_VAR.get()
+    try:
+        _rn = int(_rn or 0)
+    except (TypeError, ValueError):
+        _rn = 0
+    if _rn > 0:
+        prediction["重出批号"] = _rn
     # ★ 2026-10-30（任务 2）：预算闸门停发 ⇒ **不入 pending**。
     #   理由：pending 的语义是「待开奖核对的一批票」。写一条 0 注记录会让
     #   「滑轨 == pending 组数」的一致性判据变成 0==0 的假通过，还会让结算时
@@ -715,6 +788,10 @@ def record_pending_prediction(lottery_name: str, prediction: dict):
             注数=len(prediction.get("预测号码") or []),
             档位=_tier_of(prediction),
             台账域=_domain_of(prediction),
+            # ★ 2026-11-02：幂等键必须带「重出批号」，否则同期第 2 批会把第 1 批的
+            #   金额**覆盖**成同一行 ⇒ 两批票只记一批的钱，「本月已投」偏低
+            #   ⇒ 预算闸门比你以为的更松。这不是显示问题，是钱。
+            重出批号=_rn,
         )
     except Exception as e:                                    # noqa: BLE001
         logger.error(f"预算台账记账失败（不阻断出号，但本月额度会偏松）：{e}")
@@ -1053,6 +1130,54 @@ def _settle_pl(lottery_name: str, feedback: dict):
     """
     if "红球命中" in feedback:
         return None, "命中率", None  # 双/大：浮动奖池，无固定赔付表，回退
+    if lottery_name == "七乐彩":
+        # 票面只选 7 个基本号；特别号票面不含，j 取决于票面是否含开奖特别号。
+        issue = feedback.get("期号", "")
+        pred = feedback.get("预测号码", {}) or {}
+        actual = feedback.get("实际号码", {}) or {}
+        pred_basic = [int(x) for x in (pred.get("基本号") or [])]
+        actual_basic = [int(x) for x in (actual.get("基本号") or [])]
+        actual_special = [int(x) for x in (actual.get("特别号") or [])]
+        spec = actual_special[0] if actual_special else None
+        h = len(set(pred_basic) & set(actual_basic))
+        j = 1 if (spec is not None and spec in set(pred_basic)) else 0
+        from ev.profit.rules import grade_of_hits
+        from ev.profit.amounts import grade_amount
+        g = grade_of_hits("七乐彩", h, j)
+        if g is None:
+            return -2.0, "名义EV", None  # 未中：净亏 2 元
+        amt, _src = grade_amount("七乐彩", issue, g)
+        if amt is None:
+            return 0.0, "名义EV", g  # 金额未知：实得按 0，但记奖级
+        return round(float(amt) - 2.0, 2), "名义EV", g
+    if lottery_name == "快乐8":
+        # 票面选 N 个（玩法「选N」），开奖摇 20 个；奖级只看「命中几个」。
+        # ★ 玩法必须由票面宽度反解：号码里没存玩法，选十的票和选九的票长得一样，
+        #   宽度是唯一区分依据（1:1 由规则保证，见 rules.kl8_play_of_width）。
+        # ★ 快乐8 有「全不中」也有奖的玩法（选七~选十的「中0」），所以 hits=0
+        #   不能直接按「未中」处理，必须交给 grade_of_hits 判。
+        from ev.profit.rules import grade_of_hits, kl8_play_of_width
+        from ev.profit.amounts import grade_amount
+        issue = feedback.get("期号", "")
+        pred = feedback.get("预测号码", {}) or {}
+        actual = feedback.get("实际号码", {}) or {}
+        pred_basic = [int(x) for x in (pred.get("基本号") or [])]
+        actual_basic = [int(x) for x in (actual.get("基本号") or [])]
+        if not pred_basic or not actual_basic:
+            return -2.0, "名义EV", None      # 空期：成本照记，不猜奖级
+        try:
+            play = kl8_play_of_width(len(pred_basic))
+        except KeyError:
+            return -2.0, "名义EV", None
+        h = len(set(pred_basic) & set(actual_basic))
+        g = grade_of_hits("快乐8", h, play=play)
+        if g is None:
+            return -2.0, "名义EV", None      # 未中：净亏 2 元
+        amt, _src = grade_amount("快乐8", issue, g)
+        if amt is None:
+            # 金额未知（该期该档未公布）→ 实得按 0 计，但**保留奖级**，界面单独标注
+            return 0.0, "名义EV", g
+        return round(float(amt) - 2.0, 2), "名义EV", g
     pred_digits = _digits_from_zones(feedback.get("预测号码", {}))
     actual_digits = _digits_from_zones(feedback.get("实际号码", {}))
     issue = feedback.get("期号", "")
@@ -1260,11 +1385,16 @@ def evaluate_pending_predictions(lottery_name: str) -> dict:
         # 首位加「台账域」：生产批与研究批可能同档位、同期号、甚至同样的票面，
         # 但不该被当成重复而丢掉一条。旧记录无该字段 → 推导为「生产」，键值与以前一致。
         _dom = _domain_of(fb)
+        # 末位加「重出批号」（2026-11-02 重新出号）：两批都是**真买了两套票**，
+        # 若票面恰好重复（数字型空间小，排列3 只有 1000 种组合，200 注/批必撞），
+        # 不带这一维就会把后一批的同号票当重复丢掉 ⇒「旧号/新号那边也中的没拉出来」。
+        # 缺字段 → 0，与首出批一致；同一批内部被重复写入（8-11 那种竞态）仍是同键，照旧拦。
+        _rn = int(fb.get("重出批号") or 0)
         if "红球命中" in fb:
             return (_dom, _tier_of(fb), "RB", fb.get("期号"), fb.get("策略"),
-                    tuple(fb.get("预测红球") or []), tuple(fb.get("预测蓝球") or []))
+                    tuple(fb.get("预测红球") or []), tuple(fb.get("预测蓝球") or []), _rn)
         return (_dom, _tier_of(fb), "NUM", fb.get("期号"), fb.get("策略"),
-                json.dumps(fb.get("预测号码"), ensure_ascii=False, sort_keys=True))
+                json.dumps(fb.get("预测号码"), ensure_ascii=False, sort_keys=True), _rn)
 
     seen_keys = {_fb_key(h) for h in history}
 
@@ -1323,6 +1453,13 @@ def evaluate_pending_predictions(lottery_name: str) -> dict:
             "批次时间": pred.get("生成时间") or pred.get("记录时间") or "",
             "批次规模": len(pred_sets),
         }
+        # 重出批号（2026-11-02 重新出号）：首出批不写该字段（老记录形态不变），
+        # 重出批写 N。**必须在这里带进去**——它参与 `_fb_key` 去重，
+        # 若等 dedupe 之后再补（像 `_carry_mechanism_fields` 那样），两批的同号票
+        # 会因为键相同被判重复而丢掉一条，用户就看不到「旧号那批中的奖」。
+        _rn_batch = int(pred.get("重出批号") or 0)
+        if _rn_batch:
+            _batch_common["重出批号"] = _rn_batch
         # 出号质量压缩 KPI：批次规模是压缩后的登记口径，反馈里补记压缩前原始注数
         # （/hits 右侧徽章显示"本批 M 注（原 P 注）"用；旧记录无此键自然缺省）
         _compress_kpi = pred.get("压缩") or {}
