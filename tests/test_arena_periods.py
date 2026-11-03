@@ -24,10 +24,11 @@ def test_full_window_matches_known_size():
     2026-10-30：26124 期开奖入库 ⇒ 3520 → 3521。
     2026-11-01：26125 期开奖入库 ⇒ 3521 → 3522（★该期奖级数据尚未公布，
                 CSV 里一等奖注数/奖金仍为 0，是「号码已出、奖级待公布」的常态行）。
+    2026-11-03：26126 期开奖入库 ⇒ 3522 → 3523（★奖级待公布，同上常态）。
     ★ 此钉防的是 `build_periods` 的窗口构造回归（求交/截断/丢期），不是永久冻结期数；
       每夜 23:10 自动更新会按期撞它，bump 时必须与数据提交同进（否则 CI 红）。
     """
-    assert len(PD.build_periods("双色球")) == 3522
+    assert len(PD.build_periods("双色球")) == 3523
 
 
 def test_assert_same_periods_ok_on_equal():

@@ -88,19 +88,25 @@ def test_netev_mode_requires_issue():
         MS.select(MS.模式_净EV, lottery=LOT, K=2)
 
 
-def test_netev_mode_requires_issue():
-    """不给期号 = 允许前视：奖池/销量/分奖人数全按期取数，必须显式拒绝。"""
-    with pytest.raises(ValueError, match="issue"):
-        MS.select(MS.模式_净EV, lottery=LOT, K=2)
+def _fake_ctx(*, outer_choose=True, has_float=True):
+    """带 `.rules` 的假上下文（满足模型适用性闸所需的最小字段）。"""
+    import types
+
+    kind = "floating" if has_float else "fixed"
+    return types.SimpleNamespace(rules=types.SimpleNamespace(
+        outer_choose=outer_choose,
+        grades={"一等": types.SimpleNamespace(kind=kind)}))
 
 
 def test_netev_mode_degrades_and_says_so(monkeypatch):
-    """模型未 Go / 倾斜来源为空 ⇒ 必须标退化，不许把"排了序"说成"选得更准"。"""
+    """来源不可用 ⇒ 必须标退化，不许把"排了序"说成"选得更准"。"""
     from ev.profit import conservative_ev as CE
     from ev.profit import payouts as P
     from ev.profit import select as PS
+    from ev.profit import tilt as T
 
-    monkeypatch.setattr(P, "build_ctx", lambda *a, **k: object())
+    monkeypatch.setattr(T, "outer_tilt", lambda *a, **k: None)   # 无来源
+    monkeypatch.setattr(P, "build_ctx", lambda *a, **k: _fake_ctx())
     monkeypatch.setattr(PS, "select_profit_tickets", lambda *a, **k: {
         "票": [{"红球": [1, 2, 3, 4, 5, 6], "蓝球": [1]}],
         "元数据": {"倾斜来源": "无（模型未Go/不支持）"},
@@ -116,21 +122,169 @@ def test_netev_mode_degrades_and_says_so(monkeypatch):
     assert "不能提高中奖概率" in r["诚实边界"]
 
 
-def test_netev_mode_not_degraded_when_tilt_present(monkeypatch):
+def test_netev_mode_not_degraded_when_tilt_validated(monkeypatch):
+    """来源经 Go 门槛/CV 检验（measured_GO）⇒ 不退化。"""
+    import types
+
     from ev.profit import conservative_ev as CE
     from ev.profit import payouts as P
     from ev.profit import select as PS
+    from ev.profit import tilt as T
 
-    monkeypatch.setattr(P, "build_ctx", lambda *a, **k: object())
+    monkeypatch.setattr(T, "outer_tilt", lambda *a, **k: types.SimpleNamespace(
+        source="measured_GO", beta_asof=None))
+    monkeypatch.setattr(P, "build_ctx", lambda *a, **k: _fake_ctx())
     monkeypatch.setattr(PS, "select_profit_tickets", lambda *a, **k: {
         "票": [{"红球": [1, 2, 3, 4, 5, 6], "蓝球": [1]}],
-        "元数据": {"倾斜来源": "popularity（β as-of 2026-10-01）"},
+        "元数据": {"倾斜来源": "measured_GO"},
     })
     monkeypatch.setattr(CE, "verdict", lambda *a, **k: {"判决": "仅情景内正期望", "理由": "x"})
 
     r = MS.select(MS.模式_净EV, lottery=LOT, K=1, issue="2026126", kappa=0.5)
     assert r["退化"] is False
     assert not any("退化中性基线" in s for s in r["说明"])
+
+
+def test_netev_forced_neutral_when_source_unavailable(monkeypatch):
+    """来源不可用但请求了 κ>0 ⇒ 强制降为 0（不许让无来源主导排序）。"""
+    from ev.profit import conservative_ev as CE
+    from ev.profit import payouts as P
+    from ev.profit import select as PS
+    from ev.profit import tilt as T
+
+    captured = {}
+
+    def _sel(lottery, K, ctx, kappa=0.0, seed=0, **kw):
+        captured["kappa"] = kappa
+        return {"票": [{"红球": [1, 2, 3, 4, 5, 6], "蓝球": [1]}],
+                "元数据": {"倾斜来源": "无（模型未Go/不支持）"}}
+
+    monkeypatch.setattr(T, "outer_tilt", lambda *a, **k: None)
+    monkeypatch.setattr(P, "build_ctx", lambda *a, **k: _fake_ctx())
+    monkeypatch.setattr(PS, "select_profit_tickets", _sel)
+    monkeypatch.setattr(CE, "verdict", lambda *a, **k: {"判决": "不参与", "理由": "x"})
+
+    r = MS.select(MS.模式_净EV, lottery=LOT, K=1, issue="2026126", kappa=0.5)
+    assert captured["kappa"] == 0.0, "来源不可用时 κ 必须被强制降为 0"
+    assert any("强制降为 0" in s for s in r["说明"])
+
+
+def test_digital_lotteries_are_not_applicable(monkeypatch):
+    """数字型（可重复数字 / 无浮动奖）⇒ 净EV 模式判「不适用」：不给票、不给正期望。
+
+    ★ 这是本轮发现的既有 bug 的闸门：`grade_probabilities` 对数字型按无放回 C(n,k) 算，
+      实测排列3 直选 1/84（真实 1/1000）、七星彩一等 1/1260（真实 1/1500万）。
+      不闸住它，排列3 会给出「净EV +10.38 元/注、可进一步评估倍数分配」的假阳性。
+    """
+    from ev.profit import payouts as P
+
+    monkeypatch.setattr(P, "build_ctx",
+                        lambda *a, **k: _fake_ctx(outer_choose=False, has_float=False))
+    for lot in ("排列3", "福彩3D", "七星彩"):
+        r = MS.select(MS.模式_净EV, lottery=lot, K=2, issue="dummy")
+        assert r["判决"] == "不适用", (lot, r["判决"])
+        assert r["票"] == [] and r["注数"] == 0
+        assert r["结论首行"].startswith("不适用")
+        assert r["结构性上限能否补缺口"] is None
+        assert r["明细"]["模型适用"] is False
+        assert ("10^k" in r["结论首行"]) or ("可重复" in r["结论首行"])
+
+
+def test_kl8_not_applicable_when_ctx_unbuildable(monkeypatch):
+    """快乐8 的开奖摇出数 ≠ 票面数、不可枚举 ⇒ build_ctx 抛错时判「不适用」，不崩溃。"""
+    from ev.profit import payouts as P
+
+    def _boom(*a, **k):
+        raise NotImplementedError("快乐8 是 hypergeom 模型（开奖摇出数 ≠ 票面数），不可枚举")
+
+    monkeypatch.setattr(P, "build_ctx", _boom)
+    r = MS.select(MS.模式_净EV, lottery="快乐8", K=2, issue="2026293")
+    assert r["判决"] == "不适用"
+    assert r["票"] == [] and r["注数"] == 0
+    assert "hypergeom" in r["结论首行"]
+    assert r["明细"]["模型适用"] is False
+
+
+def test_lottery_not_applicable_when_selector_raises(monkeypatch):
+    """选择器表示不了该彩种（七乐彩 '基本号' / 快乐8 hypergeom）⇒ 判「不适用」，不崩溃。"""
+    from ev.profit import payouts as P
+    from ev.profit import select as PS
+
+    monkeypatch.setattr(P, "build_ctx", lambda *a, **k: _fake_ctx())
+
+    def _boom(*a, **k):
+        raise KeyError("基本号")
+
+    monkeypatch.setattr(PS, "select_profit_tickets", _boom)
+    r = MS.select(MS.模式_净EV, lottery="七乐彩", K=2, issue="2026127")
+    assert r["判决"] == "不适用"
+    assert r["票"] == []
+    assert "基本号" in r["结论首行"]
+    assert r["明细"]["模型适用"] is False
+
+
+def test_tilt_reliability_tiers():
+    """可靠性分级：measured_GO/walk_forward 可用；crowd_pi_v2 与空 不可用。"""
+    assert MS._tilt_reliability("measured_GO", "双色球")[0] is True
+    assert MS._tilt_reliability("walk_forward（β as-of 2026-10-01）", "大乐透")[0] is True
+    ok, tier, why = MS._tilt_reliability("crowd_pi_v2", "排列3")
+    assert ok is False and tier == "proxy_unvalidated" and "无 Go 门槛" in why
+    assert MS._tilt_reliability("无（模型未Go/不支持）", "七乐彩")[0] is False
+    assert MS._tilt_reliability("", "快乐8")[0] is False
+
+
+# ---------------------------------------------------------------- 默认结论首行
+def _verdict(**kw):
+    base = {"判决": "不参与", "理由": "x",
+            "保守净EV_元每注": -0.7, "结构性上限能否补缺口": False}
+    base.update(kw)
+    return base
+
+
+def test_conclusion_line_defaults_to_no_provable_advantage():
+    """默认结论必须是「无可证明优势」，且**首行**，依据含结构性上限。"""
+    line = MS._conclusion_line(_verdict())
+    assert line.startswith("无可证明优势"), line
+    assert "保守情景净 EV" in line
+    assert "结构性上限" in line
+    # 不能说成「已证明永远不可能」那种越界话
+    assert "不代表永远不可能" in line
+    for w in ("证伪", "证否", "不可预测", "已证明公平", "公平随机", "写死"):
+        assert w not in line
+
+
+def test_conclusion_line_upgrades_only_with_positive_and_closable():
+    a = MS._conclusion_line(_verdict(判决="仅情景内正期望", 保守净EV_元每注=0.1))
+    assert a.startswith("仅情景内正期望")
+    assert "不得据情景单点放大投入" in a
+
+    b = MS._conclusion_line(_verdict(判决="可进一步评估倍数分配", 保守净EV_元每注=0.1,
+                                     结构性上限能否补缺口=True))
+    assert b.startswith("可进一步评估倍数分配")
+    assert "须先登记新预注册块" in b          # 升级≠建议加倍
+
+
+def test_conclusion_line_is_first_key_and_flags_no_advantage(monkeypatch):
+    """`select()` 的返回里 `结论首行` 必须排第一，`无可证明优势` 与判决一致。"""
+    from ev.profit import conservative_ev as CE
+    from ev.profit import payouts as P
+    from ev.profit import select as PS
+    from ev.profit import tilt as T
+
+    monkeypatch.setattr(T, "outer_tilt", lambda *a, **k: None)
+    monkeypatch.setattr(P, "build_ctx", lambda *a, **k: _fake_ctx())
+    monkeypatch.setattr(PS, "select_profit_tickets", lambda *a, **k: {
+        "票": [{"红球": [1, 2, 3, 4, 5, 6], "蓝球": [1]}],
+        "元数据": {"倾斜来源": "无（模型未Go/不支持）"},
+    })
+    monkeypatch.setattr(CE, "verdict", lambda *a, **k: _verdict())
+
+    r = MS.select(MS.模式_净EV, lottery=LOT, K=1, issue="2026126")
+    assert list(r.keys())[0] == "结论首行", "结论必须排在返回结构第一位"
+    assert r["无可证明优势"] is True
+    assert r["结构性上限能否补缺口"] is False
+    assert r["判决"] == "不参与"
+    assert r["结论首行"].startswith("无可证明优势")
 
 
 # ---------------------------------------------------------------- 绝对值口径
