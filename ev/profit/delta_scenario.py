@@ -64,19 +64,43 @@ def after_tax(gross: float) -> float:
 
 
 def grade_probabilities(ctx: Ctx) -> Dict[str, float]:
-    """每奖级的**单注**命中概率（外层 × 内层组合数精确）。"""
+    """每奖级的**单注**命中概率。
+
+    ★ 外层分两种口径，**不能混用**（2026-11-03 修）：
+      · `outer_choose=True`（乐透型：双色球/大乐透/七乐彩/快乐8）—— **无放回组合**，
+        命中 h 个号服从超几何分布 `C(k,h)·C(n-k,k-h)/C(n,k)`；
+      · `outer_choose=False`（数字型：排列3/排列5/福彩3D/七星彩）—— **可重复数字**，
+        每一位独立以 `1/base` 命中（base=取值个数，0-9 即 10），
+        命中 h 位服从二项分布 `C(k,h)·(1/base)^h·((base-1)/base)^(k-h)`。
+      修之前统一按超几何算 ⇒ 数字型全错：排列3 直选 1/84（真实 1/1000，12 倍）、
+      排列5 1/126（真实 1/100000）、七星彩一等 1/1260（真实 1/1500万）。
+    """
     r = ctx.rules
     n_out, k_out = int(r.outer_range[1]), int(r.outer_width)
     m_in = max(j for (_h, j) in r.grade_table)
     from ev.tier_coverage import _inner_pool_size
     n_in = _inner_pool_size(r, m_in)
-    tot_out = math.comb(n_out, k_out)
     tot_in = math.comb(n_in, m_in)
+
+    if r.outer_choose:
+        tot_out = math.comb(n_out, k_out)
+
+        def p_outer(h: int) -> float:
+            return (math.comb(k_out, h) * math.comb(n_out - k_out, k_out - h)
+                    / tot_out)
+    else:
+        base = n_out - int(r.outer_range[0]) + 1        # 取值个数（0-9 ⇒ 10）
+        if base <= 1:
+            raise ValueError(f"{ctx.lottery} 数字型取值个数异常：{base}")
+
+        def p_outer(h: int) -> float:
+            return (math.comb(k_out, h) * (1.0 / base) ** h
+                    * ((base - 1) / base) ** (k_out - h))
+
     out: Dict[str, float] = {}
     for (h, j), g in r.grade_table.items():
-        p = (math.comb(k_out, h) * math.comb(n_out - k_out, k_out - h) / tot_out) * \
-            (math.comb(m_in, j) * math.comb(n_in - m_in, m_in - j) / tot_in)
-        out[g] = out.get(g, 0.0) + p
+        p_in = math.comb(m_in, j) * math.comb(n_in - m_in, m_in - j) / tot_in
+        out[g] = out.get(g, 0.0) + p_outer(h) * p_in
     return out
 
 
@@ -142,18 +166,37 @@ def structural_bound(ctx: Ctx) -> Dict[str, Any]:
     """与奖池规模无关的 δ 硬界，以及「它能否补上转正缺口」。
 
     `一等奖贡献上限 = P(一等) × 封顶税后` —— 这是 δ→1 且封顶绑定时的极值。
+
+    ★ 纯固定奖彩种（排列3/福彩3D/排列5）没有奖池、没有分奖、δ 改变不了任何东西，
+      此时「结构性上限」这个概念**不适用**，必须显式标注而不是报一个假的封顶值。
     """
+    r = ctx.rules
+    price = float(r.avg_ticket_price)
+    base = evaluate(ctx, 0.0)
+    gap = price - float(base["实得合计_元每注"])      # 转正还差多少（元/注）
+
+    has_float = any(gr.kind != "fixed" for gr in r.grades.values())
+    if not has_float:
+        return {
+            "P_一等": 0.0, "单注封顶": None, "封顶税后": 0.0,
+            "一等贡献_当前_元每注": 0.0, "一等贡献_上限_元每注": 0.0,
+            "δ可争取总量_元每注": 0.0, "δ可争取占票价比": 0.0,
+            "转正所需缺口_元每注": gap,
+            "δ上限能否补上缺口": False,
+            "不适用": "无浮动奖（纯固定奖彩种：无奖池 / 无分奖 / δ 不改变任何东西）",
+            "_含义": ("本彩种全部奖级为固定奖 ⇒ 单注 EV 与开奖次数、奖池、分摊都无关；"
+                      "转正缺口由固定奖返奖率决定，任何 δ 或奖池假设都补不上。"),
+            "基准": base,
+        }
+
     ps = grade_probabilities(ctx)
     p1 = float(ps.get("一等", 0.0))
-    price = float(ctx.rules.avg_ticket_price)
-    gr = ctx.rules.grades.get("一等")
+    gr = r.grades.get("一等")
     cap = float(gr.cap) if (gr is not None and getattr(gr, "cap", None)) else CAP_DEFAULT
 
-    base = evaluate(ctx, 0.0)
     cur = float((base["分奖级"].get("一等") or {}).get("贡献税后_元每注", 0.0))
     cap_contribution = p1 * after_tax(cap)
     gain_max = cap_contribution - cur
-    gap = price - float(base["实得合计_元每注"])      # 转正还差多少（元/注）
 
     return {
         "P_一等": p1, "单注封顶": cap, "封顶税后": after_tax(cap),

@@ -183,3 +183,101 @@ def test_scenario_report_real_issue():
     assert rep["主口径"]["情景数"] == 35
     # 旧口径的正情景不得少于主口径（它是高估）
     assert rep["旧口径"]["正情景数"] >= rep["主口径"]["正情景数"]
+
+# ---------------------------------------------------------------- ⑦ 数字型概率口径（2026-11-03 修）
+def _digit_ctx(lottery: str):
+    """数字型合成上下文：无浮动奖池、总注数 0（固定奖不看 mu）。只用 rules，不依赖真实数据。"""
+    r = rules_for(lottery)
+    return Ctx(lottery=lottery, rules=r, pool_before=None, sales_forecast=0.0,
+               total_tickets=0.0, float_pool={})
+
+
+def test_digit_type_probabilities_use_powers_not_combinations():
+    """数字型是**可重复数字 10^k**，不是无放回 C(n,k)。
+
+    ★ 2026-11-03 修：修前排列3 直选被算成 1/84（真实 1/1000，12 倍）、排列5 1/126
+      （真实 1/100000，79 倍）、七星彩一等 1/1260（真实 1/1500万）。
+    """
+    import math
+
+    assert DS.grade_probabilities(_digit_ctx("排列3"))["直选"] == pytest.approx(1.0 / 1000)
+    assert DS.grade_probabilities(_digit_ctx("福彩3D"))["直选"] == pytest.approx(1.0 / 1000)
+    assert DS.grade_probabilities(_digit_ctx("排列5"))["直选"] == pytest.approx(1.0 / 100000)
+
+    ps7 = DS.grade_probabilities(_digit_ctx("七星彩"))
+    assert ps7["一等"] == pytest.approx(1.0 / 15_000_000)
+    assert ps7["二等"] == pytest.approx(14.0 / 15_000_000)
+    _ = math  # 保留（后续若要按组合数交叉核对）
+
+
+def test_digit_type_fixed_ev_matches_hand_calc():
+    """排列3 直选固定奖 EV = (1/1000)×1040 = 1.04 元/注（返奖 52%）。"""
+    row = DS.evaluate(_digit_ctx("排列3"), 0.0)
+    assert row["实得合计_元每注"] == pytest.approx(1.04, abs=1e-12)
+    assert row["净EV_元每注"] == pytest.approx(1.04 - 2.0, abs=1e-12)
+
+
+def test_structural_bound_flags_fixed_only_as_inapplicable():
+    """纯固定奖彩种没有奖池/分奖 ⇒ 结构上限显式标「不适用」，不报假的封顶值。"""
+    b = DS.structural_bound(_digit_ctx("排列3"))
+    assert b["δ上限能否补上缺口"] is False
+    assert "不适用" in b
+    assert b["单注封顶"] is None                       # 不能报成 1000 万
+    assert b["转正所需缺口_元每注"] == pytest.approx(0.96, abs=1e-12)
+
+
+def test_lottery_type_probabilities_unchanged_after_fix():
+    """乐透型（超几何）必须逐位不变：双色球一等 = 1/(C(33,6)×16)。"""
+    import math
+
+    ps = DS.grade_probabilities(_ctx("双色球"))
+    assert ps["一等"] == pytest.approx(1.0 / (math.comb(33, 6) * 16), rel=1e-12)
+
+# ---------------------------------------------------------------- ⑦ 数字型概率口径（2026-11-03 修）
+def _digit_ctx(lottery: str):
+    """数字型合成上下文：无浮动奖池、总注数 0（固定奖不看 mu）。只用 rules，不依赖真实数据。"""
+    r = rules_for(lottery)
+    return Ctx(lottery=lottery, rules=r, pool_before=None, sales_forecast=0.0,
+               total_tickets=0.0, float_pool={})
+
+
+def test_digit_type_probabilities_use_powers_not_combinations():
+    """数字型是**可重复数字 10^k**，不是无放回 C(n,k)。
+
+    ★ 2026-11-03 修：修前排列3 直选被算成 1/84（真实 1/1000，12 倍）、排列5 1/126
+      （真实 1/100000，79 倍）、七星彩一等 1/1260（真实 1/1500万）。
+    """
+    import math
+
+    assert DS.grade_probabilities(_digit_ctx("排列3"))["直选"] == pytest.approx(1.0 / 1000)
+    assert DS.grade_probabilities(_digit_ctx("福彩3D"))["直选"] == pytest.approx(1.0 / 1000)
+    assert DS.grade_probabilities(_digit_ctx("排列5"))["直选"] == pytest.approx(1.0 / 100000)
+
+    ps7 = DS.grade_probabilities(_digit_ctx("七星彩"))
+    assert ps7["一等"] == pytest.approx(1.0 / 15_000_000)
+    assert ps7["二等"] == pytest.approx(14.0 / 15_000_000)
+    _ = math  # 保留（后续若要按组合数交叉核对）
+
+
+def test_digit_type_fixed_ev_matches_hand_calc():
+    """排列3 直选固定奖 EV = (1/1000)×1040 = 1.04 元/注（返奖 52%）。"""
+    row = DS.evaluate(_digit_ctx("排列3"), 0.0)
+    assert row["实得合计_元每注"] == pytest.approx(1.04, abs=1e-12)
+    assert row["净EV_元每注"] == pytest.approx(1.04 - 2.0, abs=1e-12)
+
+
+def test_structural_bound_flags_fixed_only_as_inapplicable():
+    """纯固定奖彩种没有奖池/分奖 ⇒ 结构上限显式标「不适用」，不报假的封顶值。"""
+    b = DS.structural_bound(_digit_ctx("排列3"))
+    assert b["δ上限能否补上缺口"] is False
+    assert "不适用" in b
+    assert b["单注封顶"] is None                       # 不能报成 1000 万
+    assert b["转正所需缺口_元每注"] == pytest.approx(0.96, abs=1e-12)
+
+
+def test_lottery_type_probabilities_unchanged_after_fix():
+    """乐透型（超几何）必须逐位不变：双色球一等 = 1/(C(33,6)×16)。"""
+    import math
+
+    ps = DS.grade_probabilities(_ctx("双色球"))
+    assert ps["一等"] == pytest.approx(1.0 / (math.comb(33, 6) * 16), rel=1e-12)

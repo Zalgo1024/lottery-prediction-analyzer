@@ -169,25 +169,32 @@ def test_netev_forced_neutral_when_source_unavailable(monkeypatch):
     assert any("强制降为 0" in s for s in r["说明"])
 
 
-def test_digital_lotteries_are_not_applicable(monkeypatch):
-    """数字型（可重复数字 / 无浮动奖）⇒ 净EV 模式判「不适用」：不给票、不给正期望。
+def test_digital_type_no_longer_short_circuits(monkeypatch):
+    """数字型概率口径修好后，不再被「不适用」闸拦住 —— 走正常净EV 判决通路。
 
-    ★ 这是本轮发现的既有 bug 的闸门：`grade_probabilities` 对数字型按无放回 C(n,k) 算，
-      实测排列3 直选 1/84（真实 1/1000）、七星彩一等 1/1260（真实 1/1500万）。
-      不闸住它，排列3 会给出「净EV +10.38 元/注、可进一步评估倍数分配」的假阳性。
+    ★ 修复前：`grade_probabilities` 按无放回 C(n,k) 算数字型，排列3 直选 1/84（真实
+      1/1000）⇒ 会给出「净EV +10.38、可进一步评估倍数分配」的假阳性。修好后数字型与
+      乐透型走同一条通路，判决由证据决定（此处 mock 成「不参与」以验证闸已撤除）。
     """
+    from ev.profit import conservative_ev as CE
     from ev.profit import payouts as P
+    from ev.profit import select as PS
+    from ev.profit import tilt as T
 
+    monkeypatch.setattr(T, "outer_tilt", lambda *a, **k: None)
     monkeypatch.setattr(P, "build_ctx",
                         lambda *a, **k: _fake_ctx(outer_choose=False, has_float=False))
-    for lot in ("排列3", "福彩3D", "七星彩"):
-        r = MS.select(MS.模式_净EV, lottery=lot, K=2, issue="dummy")
-        assert r["判决"] == "不适用", (lot, r["判决"])
-        assert r["票"] == [] and r["注数"] == 0
-        assert r["结论首行"].startswith("不适用")
-        assert r["结构性上限能否补缺口"] is None
-        assert r["明细"]["模型适用"] is False
-        assert ("10^k" in r["结论首行"]) or ("可重复" in r["结论首行"])
+    monkeypatch.setattr(PS, "select_profit_tickets", lambda *a, **k: {
+        "票": [{"第1位": [1]}] * 2, "元数据": {"倾斜来源": "无（模型未Go/不支持）"}})
+    monkeypatch.setattr(CE, "verdict", lambda *a, **k: {
+        "判决": "不参与", "理由": "x",
+        "保守净EV_元每注": -0.96, "结构性上限能否补缺口": False})
+
+    r = MS.select(MS.模式_净EV, lottery="排列3", K=2, issue="2026293")
+    assert r["判决"] == "不参与"            # 不再是 "不适用"
+    assert r["注数"] == 2
+    assert r["结论首行"].startswith("无可证明优势")
+    assert r["结构性上限能否补缺口"] is False
 
 
 def test_kl8_not_applicable_when_ctx_unbuildable(monkeypatch):
