@@ -241,6 +241,20 @@ def _rules_qxc() -> LotteryRules:
     )
 
 
+# ★ 数字型的**概率层**只建「直选」一个奖级。组选3 / 组选6 的**奖金**其实已经在
+#   `data/prize_table.FIXED_PAYOUT` 里（所以历史结算认得它们），但没有概率/格表口径
+#   ⇒ 进不了 EV（`grade_table` 只有 (位宽, 0) → 直选）。
+#   这不是遗漏，是判决无关：三种玩法在 2 元票价上的返奖率实质相同：
+#     直选  1040 元 × 1/1000 = 1.040 元 ÷ 2 = 52.0%
+#     组选3  346 元 × 3/1000 = 1.038 元 ÷ 2 = 51.9%
+#     组选6  173 元 × 6/1000 = 1.038 元 ÷ 2 = 51.9%
+#   ⇒ 「换玩法」不改变「无可证明优势（不参与）」的判决，故不为此另建两套奖级。
+#   ★ 但这句话有前提：**生产票面是直选**。若哪天改成组选，必须把 `grade_table`
+#     扩成多玩法表（概率口径也要从「10^k 可重复」改成组选的组合计数），
+#     否则 EV 会按直选赔率算组选票 —— 一个不会报错的错数。
+DIGIT_PLAY_GAP = "；★ 概率层只建模直选，组选3/组选6 未建模（返奖率同为 ~52%，不改变判决）"
+
+
 def _rules_digit(name: str, width: int) -> LotteryRules:
     return LotteryRules(
         name=name, cost=COST, outer_label="全部位数", outer_width=width,
@@ -248,7 +262,7 @@ def _rules_digit(name: str, width: int) -> LotteryRules:
         inner_size=1, inner_multiplicity={0: 1},
         grade_table={(width, 0): "直选"}, grades=_build_grades(name),
         rule_version=f"{name}-fixed", effective_from="2004-01-01",
-        source="固定赔率玩法（直选），不涉及奖池与分摊",
+        source="固定赔率玩法（直选），不涉及奖池与分摊" + DIGIT_PLAY_GAP,
         avg_ticket_price=2.0,
     )
 

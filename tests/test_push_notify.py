@@ -1515,5 +1515,43 @@ class PartialFailureTests(unittest.TestCase):
         self.assertIn("部分失败", r["detail"])
 
 
-if __name__ == "__main__":
-    unittest.main()
+def _stub_health_check(monkeypatch, tmp_path):
+    """把 `scripts/health_check.py` 的六项重活全换成空实现，只留「推不推」这段。"""
+    import scripts.health_check as hc
+
+    monkeypatch.setattr(hc, "BASE", tmp_path)
+    (tmp_path / "logs").mkdir(exist_ok=True)
+    monkeypatch.setattr(hc, "FB", tmp_path / "fb")
+    monkeypatch.setattr(hc, "LOTTERY_CONFIG", {"双色球": {}})
+    monkeypatch.setattr(hc, "scan_lottery",
+                        lambda n, t: {"彩种": n, "问题": [], "缺期明细": []})
+    monkeypatch.setattr(hc, "draw_index", lambda n: ([], {}))
+    monkeypatch.setattr(hc, "audit_history", lambda n, d, h: ([], {}))
+    monkeypatch.setattr(hc, "audit_pending", lambda n, d, p: ([], {}))
+    monkeypatch.setattr(hc, "check_pending_freshness", lambda: [])
+    monkeypatch.setattr(hc, "check_key_fields", lambda: [])
+    monkeypatch.setattr(hc, "check_pipeline_freshness", lambda: [])
+    monkeypatch.setattr(hc, "check_write_guard", lambda: {"可用": True, "说明": "ok"})
+    sent = []
+    monkeypatch.setattr(pn, "push_health_summary",
+                        lambda probs, report_path=None: sent.append(report_path))
+    return hc, sent
+
+
+def test_health_check_pushes_by_default(monkeypatch, tmp_path):
+    """调度器/周检语义：默认必须推（否则体检又变回「没人看」）。"""
+    hc, sent = _stub_health_check(monkeypatch, tmp_path)
+    hc.main()
+    assert len(sent) == 1
+
+
+def test_health_check_no_push_is_silent(monkeypatch, tmp_path):
+    """`--no-push`（人手动查看）只出报告，不打扰群。
+
+    实踩：本脚本默认推送，手动跑一次看数字就给企业微信群发了一条「体检 N 项」。
+    """
+    hc, sent = _stub_health_check(monkeypatch, tmp_path)
+    hc.main(push=False)
+    assert sent == []
+    assert list((tmp_path / "logs").glob("项目体检_*.md")), "报告仍须落盘"
+

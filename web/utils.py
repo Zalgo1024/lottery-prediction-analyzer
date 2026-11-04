@@ -1243,6 +1243,15 @@ def run_auto_pipeline_core(lottery_name: str, params: dict, task_id: Optional[st
             from data.feedback import renumber_scope
             _rn = _renumber_for_regenerate(lottery_name, target_issue, existing,
                                            _record_pending(params))
+            # ★★ 2026-11-04：另起一批 = **又买了一整套票** ⇒ 额度必须按本批的幂等键重算。
+            #   上面那次 `resolve_groups` 是在**作用域外**调的，闸门读到的重出批号是 0
+            #   ⇒ 会把第 1 批的钱当成「本次将要覆盖的那一条」加回可用额度
+            #   ⇒ 新批次可以超出月度总额（每重出一次放大一次）。
+            #   这里带上真实批号重算一次：新批没有历史记录 ⇒ 不回补任何钱，只可能是**更小**
+            #   的注数（可能为 0 = 停发，engine 有对应的停发分支）。
+            if _rn:
+                with renumber_scope(_rn):
+                    groups_eff = resolve_groups(lottery_name, params.get("groups"))
             if existing:
                 steps.append(f"重新生成(下期{target_issue}已有预测"
                              f"{len(existing.get('预测号码') or [])}组 ≠ 出号数量{groups_eff})"

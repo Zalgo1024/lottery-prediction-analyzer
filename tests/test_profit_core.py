@@ -84,6 +84,40 @@ def test_dlt_ticket_price_reflects_addon():
     assert R.rules_for("双色球").avg_ticket_price == pytest.approx(2.0)
 
 
+def test_digit_group_plays_unmodelled_but_same_return_rate():
+    """数字型的**概率层**只建直选；组选3/组选6 **未建模**，但三者返奖率同一水位。
+
+    这条不是"证明模型对"，而是把「未建模」这件事**量化**成人能复核的数：
+      ① 概率层（`grade_probabilities` / `grade_table`）只有直选 —— 缺口是显式的；
+      ② 奖金层其实认得组选（`grades` 里有，历史结算不会落「未知奖级」），
+         只是没有概率口径，所以进不了 EV；
+      ③ 若把组选建进概率层，返奖率与直选差 ≤0.2pp ⇒「无可证明优势（不参与）」
+         的判决不会因为换玩法而翻转，不值得为它另建两套奖级。
+    ★ 前提是**生产票面就是直选**。哪天票面改成组选，必须先把 `grade_table`
+      从 (位宽, 0)→直选 扩成多玩法，概率口径也要从「10^k 可重复」改成组选的
+      组合计数 —— 否则会按直选赔率算组选票（不会报错的错数）。
+    """
+    from data.prize_table import FIXED_PAYOUT
+
+    for name in ("排列3", "福彩3D"):
+        r = R.rules_for(name)
+        assert set(grade_probabilities(name)) == {"直选"}      # ① 概率层只有直选
+        assert set(r.grade_table) == {(3, 0)}
+        assert {"组选3", "组选6"} <= set(r.grades)             # ② 奖金层认得组选
+
+    cost = 2.0
+
+    def rate(amount: float, p: float) -> float:
+        return amount * p / cost
+
+    pay = FIXED_PAYOUT["排列3"]
+    direct = rate(pay["直选"], 1 / 1000)      # 直选：1 种排列
+    g3 = rate(pay["组选3"], 3 / 1000)         # 组选3（对子）：3 种排列
+    g6 = rate(pay["组选6"], 6 / 1000)         # 组选6（三不同）：6 种排列
+    assert [direct, g3, g6] == pytest.approx([0.52, 0.519, 0.519], abs=2e-3)
+    assert FIXED_PAYOUT["福彩3D"] == pay
+
+
 # ---------------------------------------------------------------- 枚举内核（地基）
 
 _TICKETS = {

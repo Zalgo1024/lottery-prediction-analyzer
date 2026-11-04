@@ -10,7 +10,8 @@
   5) 流水线新鲜度    —— logs/automation/status.json 快照是否落后于 CSV 最新期
   6) 写保护自检      —— pytest 生产写入守卫是否生效
 
-用法: E:/Python/python.exe scripts/health_check.py
+用法: E:/Python/python.exe scripts/health_check.py            # 跑完推送企微摘要
+      E:/Python/python.exe scripts/health_check.py --no-push  # 只出报告（人手动查看）
 产物: logs/项目体检_<日期>.md + .json
 本脚本**只读**，不修改任何数据文件。
 """
@@ -186,7 +187,17 @@ def _quarantined(tag: str, hist: list, pend: list) -> bool:
     return False
 
 
-def main():
+def main(push: bool = True):
+    """六项全扫描 → `logs/项目体检_*.md`。
+
+    ★ `push=False`（CLI `--no-push`）：只出报告不推送。
+      为什么需要：本脚本**默认推送**企业微信摘要，而它同时被
+      ① 晚间调度器（`auto_scheduled.ps1`，应当推）、
+      ② 每周日全量体检（`web/health_digest.run_full_health`，应当推）、
+      ③ **人手动跑一次看数字**（不该推）三种场景调用。
+      原先没有开关，手动跑一次就会给群里发一条「体检 N 项」，2026-11-04 实测踩到。
+      默认 True 是为了不改变调度器/周检的既有语义（去掉推送＝把体检变成没人看）。
+    """
     today = date.today()
     integrity = [scan_lottery(n, today) for n in LOTTERY_CONFIG]
     record_issues = {}
@@ -287,11 +298,15 @@ def main():
 
     # 自检推送（2026-09-18）：体检跑完把「真实待处理问题 N 项」摘要推给企业微信群。
     # 未启用/失败一律降级，绝不影响体检本身。
-    try:
-        from data.push_notify import push_health_summary
-        push_health_summary(real_problems, report_path=str(md))
-    except Exception as e:  # pragma: no cover
-        print(f"  体检推送失败(降级): {e}")
+    # ★ push=False（`--no-push`）= 人手动查看时不打扰群；见 main() docstring。
+    if push:
+        try:
+            from data.push_notify import push_health_summary
+            push_health_summary(real_problems, report_path=str(md))
+        except Exception as e:  # pragma: no cover
+            print(f"  体检推送失败(降级): {e}")
+    else:
+        print("  已跳过推送（--no-push）")
 
     print(f"体检完成：真实待处理问题 {len(real_problems)} 项")
     for n, d in real_problems:
@@ -300,4 +315,11 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+
+    ap = argparse.ArgumentParser(
+        description="项目数据体检（只读）。默认跑完推送企业微信摘要。")
+    ap.add_argument("--no-push", action="store_true",
+                    help="只出报告，不推送企业微信（人手动查看时用）")
+    args = ap.parse_args()
+    main(push=not args.no_push)

@@ -58,6 +58,10 @@ scripts/oneoff/_*.py
 
 # ===== 历史开奖数据（约 3.3MB CSV，纳入版本做备份；锁文件与替换前的旧档忽略） =====
 lottery_data/_backup_*/
+# 导出元数据：流水线每次跑都会重写（含导出时刻/行数），属运行时产物。
+# 不入库的理由不是"体积"，而是它会**每跑一次就脏一次工作区**，
+# 让 `git status` 永远有噪音、掩盖真正的未提交改动。
+lottery_data/_*_export_meta.json
 
 # ===== 临时/缓存目录（PPT 工具与 pytest 产物，不入库） =====
 .pytest_cache/

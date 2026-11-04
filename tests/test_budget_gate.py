@@ -174,6 +174,72 @@ def test_regeneration_does_not_shrink_monotonically():
     assert first == second == third == 100, (first, second, third)
 
 
+# ------------------------------------------------- ⑤' 重出批：不能退别批的钱
+def test_renumber_batch_does_not_reclaim_previous_batch_credit():
+    """★★ 同期第 2 批**不会覆盖**第 1 批 ⇒ 不许把第 1 批的钱退回来。
+
+    早期实现按「本彩种本月最近一条 + 期号相同」退额度，第 2 批（重出批号=1）
+    会把第 1 批（=0）的 200 元加回可用额度 —— 而那 200 元是**已经花掉的**。
+    后果：可用额度凭空多一批，且每重出一次再放大一次，闸门比配置更松。
+    """
+    _write_limit(月度总额=1000, 单期上限=1000)
+    BG.record_spend("双色球", 目标期号="26125", 注数=100)          # 第 1 批 200 元
+    r = BG.clamp("双色球", 400, baseline=50, source="manual",
+                 目标期号="26125", renumber=1)
+    assert r["本彩种本月已记元"] == 0.0, "第 2 批不该退回第 1 批的钱"
+    assert r["已投元"] == 200.0
+    assert r["注数"] == 400            # 剩 800 元 ÷ 2 = 400 注（不因重出而放大到 500）
+    # 第 2 批自己重生成（同批号）仍然不递缩
+    BG.record_spend("双色球", 目标期号="26125", 注数=400, 重出批号=1)
+    r2 = BG.clamp("双色球", 400, baseline=50, source="manual",
+                  目标期号="26125", renumber=1)
+    assert r2["本彩种本月已记元"] == 800.0
+    assert r2["注数"] == 400
+
+
+def test_renumber_batch_is_never_reclaimed_repeatedly():
+    """每重出一批，可用额度只能减少，不能被「退回」循环放大。"""
+    _write_limit(月度总额=1000, 单期上限=1000)
+    BG.record_spend("双色球", 目标期号="26125", 注数=100)      # 首出批 200 元
+    got = []
+    for n in (1, 2, 3):
+        r = BG.clamp("双色球", 500, baseline=50, source="manual",
+                     目标期号="26125", renumber=n)
+        assert r["本彩种本月已记元"] == 0.0, f"第 {n} 批退回了别人的钱"
+        got.append(r["注数"])
+        BG.record_spend("双色球", 目标期号="26125", 注数=r["注数"], 重出批号=n)
+    assert got == [400, 0, 0]                    # 800 元 → 400 注；之后额度已满
+    assert BG.spent_this_month() == 1000.0       # ★ 永不越过月度总额
+    assert BG.clamp("双色球", 500, baseline=50, source="manual",
+                    目标期号="26125", renumber=9)["注数"] == 0
+
+
+def test_clamp_reads_renumber_scope_like_record_spend():
+    """`clamp()` 不传 renumber 时必须读 `_RENUMBER_VAR`（与记账同源）。
+
+    否则「重新出号」走的正是这条路径：`renumber_scope(1)` 里跑流水线，
+    clamp 看不到批号 ⇒ 按首出批退额度 ⇒ 又把上一个月的钱退回来了。
+    """
+    _write_limit(月度总额=1000, 单期上限=1000)
+    BG.record_spend("双色球", 目标期号="26125", 注数=100)      # 首出批 200 元
+    with fb.renumber_scope(1):
+        r = BG.clamp("双色球", 400, baseline=50, source="manual", 目标期号="26125")
+        assert r["重出批号"] == 1
+        assert r["本彩种本月已记元"] == 0.0
+    # 作用域外仍是首出批 ⇒ 该退（重生成不递缩的原有语义）
+    r0 = BG.clamp("双色球", 400, baseline=50, source="manual", 目标期号="26125")
+    assert r0["重出批号"] == 0
+    assert r0["本彩种本月已记元"] == 200.0
+
+
+def test_research_batch_is_not_rebated():
+    """研究批不占生产账，也就不该成为生产批的「可退回额度」。"""
+    _write_limit(月度总额=1000, 单期上限=1000)
+    BG.record_spend("双色球", 目标期号="26125", 注数=100, 台账域="研究")
+    r = BG.clamp("双色球", 400, baseline=50, source="manual", 目标期号="26125")
+    assert r["本彩种本月已记元"] == 0.0
+
+
 # ---------------------------------------------------------------- ⑥ 跨月/损坏
 def test_month_rollover_resets(monkeypatch):
     from datetime import datetime

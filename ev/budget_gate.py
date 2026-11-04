@@ -22,7 +22,16 @@
 ★ 为什么「重生成不递缩」
   同一期被重算时，那条记录本来就要被覆盖。若先把旧记录算进「已投」再算额度，
   第二次调用的可用额度就已经少了一笔 —— 反复触发自愈会让注数**单调塌到 0**。
-  故 `clamp()` 先扣掉「本彩种本月最近一条记录」的金额，再算额度。
+  故 `clamp()` 先把「**本次将要覆盖的那一条**」的金额加回可用额度，再算额度。
+
+  ★★ 「那一条」必须与 `record_spend` 的幂等键对齐
+  （月份/期号/台账域/彩种/**重出批号**；档位不参与——调用方不总知道档位，
+  同键多条时取**最小**金额，少退只会更紧），而不是「本彩种本月最近一条」。
+  早期实现按「最近一条 + 期号相同」退额度，遇到「重新出号」就出错：
+  第 2 批和第 1 批**期号相同但键不同**，第 2 批并不会覆盖第 1 批，
+  可它照样把第 1 批的钱加了回来 ⇒ 可用额度凭空多一批 ⇒ 闸门比配置更松，
+  且反复重出会反复加回（实测可把月度总额放大成 N 倍）。这不是显示问题，是钱。
+  重出批号与 `data/feedback.py::_RENUMBER_VAR` 同源（`renumber_scope` 注入）。
 
 ★ 本模块不写 pending、不触碰 `data/ticket_size.json`（注数仍由滑轨决定，
   闸门只可能把它压小）。
@@ -241,16 +250,52 @@ def spent_this_month(*, path: Optional[Path] = None,
 
 
 # ------------------------------------------------------------------ 夹取
-def _latest_same_month(doc: Dict[str, Any], lottery: str) -> Optional[Dict[str, Any]]:
-    rows = [r for r in doc.get("记录") or [] if str(r.get("彩种")) == lottery]
+def _renumber_of(rec: Dict[str, Any]) -> int:
+    """记录里的「重出批号」（缺字段 = 0 = 首出批）。"""
+    try:
+        return int((rec or {}).get("重出批号") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _current_renumber() -> int:
+    """取当前作用域里的重出批号 —— 与 `record_spend` **同一个来源**。
+
+    `data/feedback.py::record_pending_prediction` 记账时读的是
+    `prediction["重出批号"]`，缺省回落到 `_RENUMBER_VAR`（`renumber_scope`
+    注入）。`clamp()` 看不到 prediction，只能读同一个 ContextVar；读不到
+    就按 0（首出批）——**退错比不退危险**，宁可少退（额度更紧）。
+    """
+    try:
+        from data.feedback import _RENUMBER_VAR
+        return _renumber_of({"重出批号": _RENUMBER_VAR.get()})
+    except Exception:                                         # noqa: BLE001
+        return 0
+
+
+def _rebate_amount(doc: Dict[str, Any], lottery: str, issue: Any,
+                   renumber: int) -> float:
+    """本次出号**将要覆盖的那一条**的金额（元），找不到返回 0。
+
+    ★ 键必须与 `record_spend` 的 `_rec_key` 对齐（不含档位：调用方不总知道档位）。
+      同键多条（只是档位不同）时取**最小**：少退只会让额度更紧，多退会超支。
+    ★ 台账域只认「生产」：研究批（低拥挤台账）不占生产账，也就不该被退回。
+    """
+    if issue is None:
+        return 0.0
+    rows = [r for r in (doc.get("记录") or [])
+            if str(r.get("彩种")) == lottery
+            and str(r.get("目标期号")) == str(issue)
+            and str(r.get("台账域") or "生产") == "生产"
+            and _renumber_of(r) == int(renumber)]
     if not rows:
-        return None
-    rows.sort(key=lambda r: str(r.get("时间") or ""))
-    return rows[-1]
+        return 0.0
+    return min(float(r.get("金额") or 0.0) for r in rows)
 
 
 def clamp(lottery: str, want: int, *, baseline: Optional[int] = None,
           source: str = "auto", 目标期号: Any = None,
+          renumber: Optional[Any] = None,
           path: Optional[Path] = None, now: Optional[datetime] = None) -> Dict[str, Any]:
     """把「想买多少注」夹成「可以买多少注」。
 
@@ -262,6 +307,10 @@ def clamp(lottery: str, want: int, *, baseline: Optional[int] = None,
       · `auto`    —— 调度器 / worker / 自愈：强行夹取，**且不超过基线**（永不自动加注）；
       · `manual`  —— 用户在界面上显式出号：夹取（额度是硬约束），但可以**超过基线**；
       · `research`—— 回测 / 训练：**豁免**（不占生产账），但返回值里显式标 `豁免=true`。
+
+    ★ `renumber`：本次出号的「重出批号」（0/None = 首出批）。不传时读
+      `data.feedback._RENUMBER_VAR`（与记账同源）。它决定「退哪一条的钱」：
+      退错批 ⇒ 可用额度凭空多一批。见模块 docstring。
     """
     if source not in SOURCES:
         raise ValueError(f"未知来源 {source!r}（只能是 {SOURCES}）")
@@ -293,10 +342,13 @@ def clamp(lottery: str, want: int, *, baseline: Optional[int] = None,
     doc = load_spend(path=path, now=now)
     spent = float(doc.get("已投") or 0.0)
 
-    # ★ 重生成不递缩：本期这条记录本来就会被覆盖 ⇒ 先把它的金额加回可用额度。
+    # ★ 重生成不递缩：本次将要覆盖的那条记录本来就会被覆盖 ⇒ 先把它的金额加回可用额度。
     #   ★★ 键必须**精确**：早期实现写成「目标期号 is None 就豁免最近一条」，
     #   等于给每个彩种开了一个无上限额度（最近那条的金额永远被加回来），
     #   而且不会报错 —— 故缺省时先解析出「本次要出的那一期」，解析不到就不豁免。
+    #   ★★ 2026-11-04 再收一层：还必须匹配**重出批号**。只按「期号相同的最近一条」
+    #   退额度时，同期第 2 批（重出批号=1）会把第 1 批（=0）的钱退回来，而第 1 批
+    #   其实**不会被覆盖**（键不同）⇒ 可用额度凭空多一批，且每重出一次再放大一次。
     issue = 目标期号
     if issue is None:
         try:
@@ -304,11 +356,8 @@ def clamp(lottery: str, want: int, *, baseline: Optional[int] = None,
             issue = _next_issue(lottery)
         except Exception:                                     # noqa: BLE001
             issue = None
-    last = _latest_same_month(doc, lottery)
-    rebate = 0.0
-    if last is not None and issue is not None \
-            and str(last.get("目标期号")) == str(issue):
-        rebate = float(last.get("金额") or 0.0)
+    rn = _current_renumber() if renumber is None else _renumber_of({"重出批号": renumber})
+    rebate = _rebate_amount(doc, lottery, issue, rn)
 
     remaining = max(0.0, monthly - spent + rebate)
     n_month = int(remaining // price) if price > 0 else 0
@@ -329,6 +378,7 @@ def clamp(lottery: str, want: int, *, baseline: Optional[int] = None,
     return _out(n, n != w, "；".join(why) if why else ("未受限" if n == w else "被夹取"),
                 月度总额=monthly, 单期上限=cap, 已投元=round(spent, 2),
                 剩余额度元=round(remaining, 2), 本彩种本月已记元=round(rebate, 2),
+                重出批号=rn, 目标期号=(None if issue is None else str(issue)),
                 锁定=bool(lim.get("锁定", True)))
 
 

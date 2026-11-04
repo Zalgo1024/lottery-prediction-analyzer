@@ -112,6 +112,31 @@ class AutoPipelineCoreTests(unittest.TestCase):
         self.assertEqual(self.predict_calls, [("大乐透", 100, "fresh", True)])
         self.assertTrue(any("重新生成" in s for s in res["steps"]))
 
+    def test_regenerate_recomputes_groups_inside_renumber_scope(self):
+        """★★ 另起一批时必须**带批号**重算注数（2026-11-04 预算闸门联动）。
+
+        原因：`resolve_groups` → `clamp` 的「重生成不递缩」会按「本次要覆盖的那一条」
+        退额度。另起一批 = 又买一整套票，上一批不会被覆盖 ⇒ 不许退它的钱。
+        而决策用的那次 `resolve_groups` 在作用域**外**（批号还没算出来，读到 0），
+        所以必须在本批作用域内**重算一次**，否则第 2 批能花掉第 1 批的额度。
+        """
+        from data.feedback import _RENUMBER_VAR
+
+        seen = []
+
+        def _fake_resolve(lottery, requested=None):
+            seen.append((requested, _RENUMBER_VAR.get()))
+            return 100
+
+        pending = [{"目标期号": 26104, "预测号码": [{"红球": [9]}] * 7}]
+        with patch.object(utils_mod, "resolve_groups", side_effect=_fake_resolve):
+            self._run(pending=pending)
+
+        self.assertEqual(seen[0][1], 0, "决策那一次在作用域外，批号应为 0")
+        self.assertTrue(any(rn == 1 for _, rn in seen[1:]),
+                        f"重算必须带重出批号，实际: {seen}")
+        self.assertEqual(self.predict_calls[0][1], 100)
+
     # ---------- 2026-10-18：生产 pending 防覆盖（真实事故回归） ----------
     # 背景：一次 auto_batch 验证出号带 groups=5（6 彩种 × 3 模式），把下一期
     # 生产 pending 全量覆盖成 5 注，滑轨 200/38/50/44 静默失效。以下用例锁死防护。

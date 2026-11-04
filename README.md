@@ -2,7 +2,7 @@
 
 > **一套把「看起来有效」和「真的有效」分开的检验框架 · 彩票是最严苛的压力测试场**
 
-![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB) ![Tests](https://img.shields.io/badge/pytest-2508%20passed-3B6D11) ![Lotteries](https://img.shields.io/badge/%E5%BD%A9%E7%A7%8D-6-854F0B) ![License](https://img.shields.io/badge/License-AGPL--3.0-blue)
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB) ![Tests](https://img.shields.io/badge/pytest-2519%20passed-3B6D11) ![Lotteries](https://img.shields.io/badge/%E5%BD%A9%E7%A7%8D-6-854F0B) ![License](https://img.shields.io/badge/License-AGPL--3.0-blue)
 
 ## 这个项目真正解决的问题
 
@@ -61,7 +61,7 @@ python run.py                # 看门狗模式，访问 http://127.0.0.1:5000
 # 3. 或者只用 CLI
 python cli.py --help
 
-# 4. 跑测试套件（全量 2508 例）
+# 4. 跑测试套件（全量 2519 例）
 pytest -q                    # 约 15 分钟（慢点集中在真实 predict 全流程的契约测试）
 ```
 
@@ -199,12 +199,16 @@ python cli.py history --days 30
 ### 4. 数据可靠性校验（都是只读，放心跑）
 
 ```bash
-python scripts/health_check.py           # ★ 体检总入口：6 类检查 → logs/项目体检_*.md
+python scripts/health_check.py           # ★ 体检总入口：6 类检查 → logs/项目体检_*.md（跑完推企微摘要）
+python scripts/health_check.py --no-push # 同上但**不推送**（人手动看数时用，别打扰群）
 python scripts/scan_data_integrity.py    # 缺期/号码越界/空值/重复期号
 python scripts/verify_draws_vs_source.py # 与 500.com 逐期外部核对
 python scripts/audit_records.py          # 命中记录审计（命中/奖级 vs 真实开奖）
 python scripts/repair_records.py         # 记录修复（默认 dry-run，--apply 自动备份）
 ```
+
+★ `health_check.py` **默认推送**，因为它同时被晚间调度器与周检调用（不推就等于没人看）；
+手动跑一次只想知道数字时请加 `--no-push`，否则群里会多一条「体检 N 项」。
 
 ---
 
@@ -379,6 +383,14 @@ EV 退化到名义值、预算上限回落到 500）。逐个判定结果：
 
 > 正确读法：**未检出**只表示「在现有样本与检验功效下看不到稳定偏差」，
 > 既不是「已证明不存在」，也不是「多买就能中」。真正能动的只有三处：覆盖设计、实得优化、Rollover 时机。
+
+**数字型的玩法口径（显式缺口）**：EV 层只建模**直选**。排列3 / 福彩3D 的组选3、组选6
+在 `data/prize_table.FIXED_PAYOUT` 里有奖金（结算认得、不会落「未知奖级」），但没有概率
+口径，所以进不了 EV。原因不是省事，是**判决无关**：三种玩法在 2 元票面上的返奖率同为 ~52%
+（直选 1040×1/1000、组选3 346×3/1000、组选6 173×6/1000）⇒ 换玩法不改变「无可证明优势」
+的判决。**前提是生产票面为直选**；哪天改成组选，必须先扩 `grade_table` 并把概率口径
+从「10^k 可重复」换成组合计数（`ev/profit/rules.DIGIT_PLAY_GAP`、测试
+`test_digit_group_plays_unmodelled_but_same_return_rate` 锁住这三行）。
 
 ---
 
@@ -606,10 +618,15 @@ POST /api/predict/regenerate   # {"lottery":"七乐彩"}
   pending 的是 `predict` 内部的四条返回分支，而这条需求与「怎么选号」毫无关系。
 * **不改变任何概率**：多批只是多买票，单注中奖概率恒定、整体 EV 仍为负。同一期买两批
   意味着中奖事件的**重复计数**（`Σ pᵢ` 相加，不是并集），所以每批必须可区分、可追溯。
-* ★ **已知边界（未修）**：`clamp()` 的「重生成不递缩」回补按「该彩种该期最近一条台账」
-  取金额，而它拿不到重出批号 ⇒ 重出时会把上一批的金额也加回可用额度（约一批票的额度）。
-  影响有界（只在用户点重出时发生、且 auto 来源仍受基线约束），但不是零 —— 若日后要
-  收紧闸门，这里得把批号一路传进 `resolve_groups`/`clamp`。
+* ★ **闸门回补的批号边界（2026-11-04 已修）**：`clamp()` 的「重生成不递缩」回补过去按
+  「该彩种该期最近一条台账」取金额，拿不到重出批号 ⇒ 重出时把**上一批**的金额也加回
+  可用额度（约一批票的额度，且每重出一次再放大一次）。现在回补严格按
+  `record_spend` 的幂等键（月份/期号/档位/台账域/彩种/**重出批号**）取那一行，
+  批号与记账同源（`data.feedback.renumber_scope` 的 ContextVar）；
+  匹配不到就**不退**（少退只会更紧，多退才超支）。研究批不参与回补。
+  流水线的「滑轨变化 ⇒ 另起一批」也在**本批作用域内重算一次**注数
+  （`web/utils.py`）—— 决策那次 `resolve_groups` 跑在作用域外、闸门读到的批号是 0，
+  不重算就等于按「第 1 批可退回」给新批次批额度。
 
 ### 消息推送：出号 / 数量 / 中奖记录推到手机（`config/push_notify.json`）
 
@@ -735,8 +752,8 @@ POST /api/settings/push-notify/test     # 发一条测试消息（未配置返�
 ## 测试
 
 ```bash
-pytest -q              # 2508 passed（全量；含奖金表 33 例、写保护/分区归一化回归、撞号度量与中奖归因、批次契约、出号数量固定/动态、消息推送：图片渲染/发送节流/降级/全入口接线、随机锚点走前验证与持续训练循环、休市日历与真实开奖数据一致性、三口径 EV 对照/冷门口径 rollover/奖池门槛/Kelly 纪律仓位/限号前置与组合方差指标、策略历史实测命中统计（归一/过滤/基线/样本不足）、休市期全链路感知（看板滞后/下一期 + 调度器排班 + 启动自愈 + cli lag + 体检脚本 + 销量模型前瞻 + 休市提示条）、机制缝隙四轨测量（A/A′注数比、开出号分位、结构偏差、派奖期）+ 缝隙内选号与反馈闭环、机制缝隙策略层可见性与前瞻对照、叙事解绑文案扫描、生产 pending 防覆盖（record_pending 开关）、出号数量硬性拉平与注数一致性体检/启动自愈）
-pytest tests/          # 2499 passed（仅 tests/ 目录；另有 9 例在 scripts/ 下，故用 pytest -q 跑全量）
+pytest -q              # 2519 passed（全量；含奖金表 33 例、写保护/分区归一化回归、撞号度量与中奖归因、批次契约、出号数量固定/动态、消息推送：图片渲染/发送节流/降级/全入口接线、随机锚点走前验证与持续训练循环、休市日历与真实开奖数据一致性、三口径 EV 对照/冷门口径 rollover/奖池门槛/Kelly 纪律仓位/限号前置与组合方差指标、策略历史实测命中统计（归一/过滤/基线/样本不足）、休市期全链路感知（看板滞后/下一期 + 调度器排班 + 启动自愈 + cli lag + 体检脚本 + 销量模型前瞻 + 休市提示条）、机制缝隙四轨测量（A/A′注数比、开出号分位、结构偏差、派奖期）+ 缝隙内选号与反馈闭环、机制缝隙策略层可见性与前瞻对照、叙事解绑文案扫描、生产 pending 防覆盖（record_pending 开关）、出号数量硬性拉平与注数一致性体检/启动自愈）
+pytest tests/          # 2510 passed（仅 tests/ 目录；另有 9 例在 scripts/ 下，故用 pytest -q 跑全量）
 ```
 
 ## 维护（放着不管时会发生什么）
