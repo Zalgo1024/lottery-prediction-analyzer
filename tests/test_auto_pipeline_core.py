@@ -166,6 +166,84 @@ class AutoPipelineCoreTests(unittest.TestCase):
         self.assertEqual(kwargs["draw_numbers"]["期号"], 26103)
 
 
+class AutoBatchPushDedupTests(unittest.TestCase):
+    """批量流水线「每个彩种只推一组」（2026-11-04 实测事故）。
+
+    现象：点一次「流水线」→ 8 个彩种各被推 3 遍，合计 162 条企业微信消息
+    （推送间隔 3.2s ⇒ 连续发 9 分钟）。根因：批流水线是
+    `for 彩种: for mode in ("fresh","rule","trained")`，而按钮传 `modes=__all__`；
+    第 2、3 遍因为「下期已预测」其实什么都没做，却各自又推了一整组。
+
+    修法：批次维护一个 `pushed_lots` set，经 `params["_push_dedup"]` 传进 core，
+    推送成功后登记彩种，后续模式同彩种跳过。
+    """
+
+    def setUp(self):
+        self.push_calls = []
+
+        def _fake_push(*a, **k):
+            self.push_calls.append(a[0] if a else k)
+
+        # 复用与其它用例同一套桩：直接替换 core 里那次 import 到的函数
+        self.push_patch = patch("data.push_notify.push_pipeline_result",
+                                side_effect=_fake_push)
+        self.push_patch.start()
+        self.addCleanup(self.push_patch.stop)
+
+        self.env = [
+            patch("data.fetcher.update_lottery_data",
+                  return_value={"fetched": 0, "latest_before": 26103, "latest_after": 26103}),
+            patch("data.feedback.evaluate_pending_predictions",
+                  return_value={"evaluated_count": 0, "new_feedback_count": 0,
+                                "new_feedback_records": [], "updated_weights": {}}),
+            patch("prediction.engine.predict",
+                  return_value={"预测日期": "2026-09-12", "号码组数": 5, "预测模式": "fresh",
+                                "目标期号": 26104,
+                                "预测号码": [{"红球": [1, 2, 3, 4, 5], "蓝球": [6, 7],
+                                          "策略": "高频策略"}]}),
+            patch("prediction.reporter.save_prediction_record",
+                  side_effect=lambda pred: Path("training") / "fake_predict"),
+            patch("prediction.anomaly.detect_anomalies",
+                  return_value={"异常总条数": 0, "异常明细": []}),
+            patch("pipeline.step6_ev.current_period_advice",
+                  return_value={"单注期望": -0.762, "是否值得买": False}),
+            patch("data.loader.load_lottery", return_value=_fake_draw()),
+            patch("data.automation_status.record_run"),
+            patch("data.feedback._next_issue", return_value=26104),
+            patch("data.feedback.load_pending", return_value=[]),
+        ]
+        for p in self.env:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def _run(self, dedup):
+        return run_auto_pipeline_core("大乐透", {"mode": "fresh", "groups": 5,
+                                                 "_push_dedup": dedup})
+
+    def test_same_lottery_pushes_only_once_per_batch(self):
+        """同批同彩种：第一次推、第二次跳过（否则就是用户看到的重复消息）。"""
+        dedup = set()
+        self._run(dedup)
+        self.assertEqual(len(self.push_calls), 1, "首个模式应当推送一次")
+        self.assertIn("大乐透", dedup)
+
+        self._run(dedup)
+        self.assertEqual(len(self.push_calls), 1, "同批第二个模式不该再推")
+        self.assertIn("大乐透", dedup)
+
+    def test_lottery_already_in_batch_is_skipped(self):
+        """已在集合里的彩种直接跳过（模拟第二个模式进场）。"""
+        dedup = {"大乐透"}
+        self._run(dedup)
+        self.assertEqual(len(self.push_calls), 0, "已在集合里的彩种应当跳过")
+
+    def test_without_marker_keeps_old_behaviour(self):
+        """不传 `_push_dedup`（单彩种流水线）时行为不变 —— 每次都推。"""
+        self._run(None)
+        self._run(None)
+        self.assertEqual(len(self.push_calls), 2)
+
+
 class AutoBatchRecordPendingTests(unittest.TestCase):
     """批流水线必须把 record_pending 透传到 batch 与每个子任务（2026-10-18 事故回归）。
 

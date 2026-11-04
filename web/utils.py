@@ -1388,20 +1388,35 @@ def run_auto_pipeline_core(lottery_name: str, params: dict, task_id: Optional[st
 
     # ⑤ 微信推送（出号 + 中奖记录送上门；2026-09-16）
     #    未启用/无新内容/失败一律静默跳过，绝不影响主流水线。
-    try:
-        from data.push_notify import push_pipeline_result
-        push_pipeline_result(
-            lottery_name,
-            predictions=predictions,
-            eval_result=eval_result,
-            hit_summary=hit_summary,
-            hit_records=hit_records,
-            draw_numbers=draw_numbers,
-            pred_info=pred_info,
-            fresh_prediction=bool(record_dir),
-        )
-    except Exception as e:
-        logger.warning(f"微信推送失败(降级): {e}")
+    #
+    # ★ 2026-11-04：批量流水线是 `for 彩种: for 模式(AUTO_PIPELINE_MODES)`，
+    #   而「流水线」按钮传的是 `modes=__all__` ⇒ 同一彩种会被跑 3 遍（fresh/rule/trained）。
+    #   第 2、3 遍因为「下期已预测」其实什么也没做，却各自又推了一整组
+    #   ⇒ 实测一次点击给每个彩种推了 3 组、8 彩种共 162 条消息（3.2s/条 ≈ 9 分钟）。
+    #   按「**同一批里每个彩种只推一组**」去重：批次把一个 set 通过 params 传进来，
+    #   推成功即登记；后续模式同彩种直接跳过（日志留痕，不静默）。
+    #   注意只在**推送成功**后登记：失败不登记，让后面的模式还有机会补上。
+    _push_dedup = params.get("_push_dedup")
+    if isinstance(_push_dedup, set) and lottery_name in _push_dedup:
+        logger.info(f"{lottery_name} 本批已推送过 ⇒ 跳过重复推送（批量按彩种只推一组）")
+        steps.append("推送: 本批已推过，跳过")
+    else:
+        try:
+            from data.push_notify import push_pipeline_result
+            push_pipeline_result(
+                lottery_name,
+                predictions=predictions,
+                eval_result=eval_result,
+                hit_summary=hit_summary,
+                hit_records=hit_records,
+                draw_numbers=draw_numbers,
+                pred_info=pred_info,
+                fresh_prediction=bool(record_dir),
+            )
+            if isinstance(_push_dedup, set):
+                _push_dedup.add(lottery_name)
+        except Exception as e:
+            logger.warning(f"微信推送失败(降级): {e}")
 
     return {
         "lottery": lottery_name,
@@ -1493,6 +1508,9 @@ def run_auto_batch_task(task_id: str, lotteries: list, modes: list, params: dict
     total = max(1, len(lotteries) * len(modes))
     sub_results: list = []
     completed = 0
+    # ★ 同一批里「每个彩种只推一组」：这个 set 会随 params 进到 `run_auto_pipeline_core`，
+    #   推送成功后登记彩种，后续模式同彩种直接跳过。不放进 batch_params（那里要能 JSON 序列化）。
+    pushed_lots: set = set()
     update_task(
         task_id, status="running", progress=0,
         message=f"批流水线: 0/{total} (彩种 {len(lotteries)} × 模式 {len(modes)})",
@@ -1502,6 +1520,8 @@ def run_auto_batch_task(task_id: str, lotteries: list, modes: list, params: dict
         for mode in modes:
             sub_params = dict(params)
             sub_params["mode"] = mode
+            # 同彩种在同批里只推一次（第二个模式起跳过）
+            sub_params["_push_dedup"] = pushed_lots
             label = f"[{completed + 1}/{total}] {lot} / {mode}"
             update_task(
                 task_id, progress=int(completed * 100 / total),
