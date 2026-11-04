@@ -68,26 +68,31 @@ class SanitizeTests(unittest.TestCase):
         self.assertGreater(ts.max_tickets("双色球"), 200)
         self.assertGreater(ts.max_tickets("排列3"), 50)
 
-    def test_limits_are_uniform_500_for_every_lottery(self):
-        """所有彩种上限统一 500（2026-11-02 用户要求）。
+    def test_limits_are_uniform_1000_for_every_lottery(self):
+        """所有彩种上限统一 1000（2026-11-04 用户要求：由 500 提到 1000）。
 
-        为什么值得一条测试：上限曾是逐彩种给的（500/400/300/200/100），卡片上五种刻度；
-        只要有人「按彩种的理由」再调一个回去，滑轨又会变成参差不齐 —— 而这是**操作成本**，
-        不是安全收益（真正的硬约束是 `ev/budget_gate` 的月度总额/单期上限）。
-        ★ 上限是**承诺**：能拖到 500 就必须真能出 500 注（可行性由
-          `_check_cap_500.py` 的实测另证，这条只管「数字一致」）。
+        为什么值得一条测试：上限曾逐彩种给（500/400/300/200/100），卡片上五种刻度；
+        后来统一 500，2026-11-04 又整体提到 1000。只要有人「按彩种的理由」再调一个
+        回去，滑轨又会变成参差不齐 —— 而这是**操作成本**，不是安全收益
+        （真正的硬约束是 `ev/budget_gate` 的月度总额/单期上限）。
+
+        ★ 上限是**承诺**：能拖到 1000 就必须真出得了 1000 注。数字型/乐透型的空间
+          都够（排列3/3D 直选空间正好 1000）；双色球的**贪心覆盖**在 cap=3 + 池 8000
+          下实测只到约 649 注，超出部分走 `_pad_to_groups` 的随机补齐
+          （票面仍是 1000 张，只是覆盖优化退化成随机补），这条只管「数字一致」。
+        ★ 上限必须 ≤ `HARD_CAP`，否则 `_resolve_limits` 会静默夹回去。
         """
         from config import LOTTERY_CONFIG
 
-        self.assertEqual(set(ts.DEFAULT_LIMITS.values()), {500},
+        self.assertEqual(set(ts.DEFAULT_LIMITS.values()), {1000},
                          f"默认上限不统一：{ts.DEFAULT_LIMITS}")
         for lot in LOTTERY_CONFIG:
-            self.assertEqual(ts.max_tickets(lot), 500, f"{lot} 上限不是 500")
+            self.assertEqual(ts.max_tickets(lot), 1000, f"{lot} 上限不是 1000")
         # 兜底值也要跟着统一，否则新接入的彩种会掉回旧刻度
-        self.assertEqual(ts._FALLBACK_LIMIT_LOTTO, 500)
-        self.assertEqual(ts._FALLBACK_LIMIT_DIGITAL, 500)
-        # 500 必须仍低于绝对上限，别把 HARD_CAP 也顺手改小
-        self.assertLess(500, ts.HARD_CAP)
+        self.assertEqual(ts._FALLBACK_LIMIT_LOTTO, 1000)
+        self.assertEqual(ts._FALLBACK_LIMIT_DIGITAL, 1000)
+        # ★ 默认值不得超过绝对上限（超过就会被静默夹回，表现为「改了没生效」）
+        self.assertLessEqual(max(ts.DEFAULT_LIMITS.values()), ts.HARD_CAP)
 
     def test_lower_bound_is_one(self):
         cfg = ts.sanitize({"mode": "fixed", "fixed": {"双色球": 0, "福彩3D": -5}})

@@ -126,13 +126,15 @@ def test_ticket_size_limits_cover_all():
     """★ 注数上限必须**在代码里**覆盖全部彩种。
 
     只靠 `config/ticket_size.json` 不够：该文件是运行时状态，可能缺失/被重置，
-    而 `_resolve_limits()` 的兜底是 `_FALLBACK_LIMIT_LOTTO=500`。
-    对日开 30 期的快乐8 来说，500 意味着月度上限 3 万元 —— 这不是"保守兜底"，
-    是把预算炸掉。所以 DEFAULT_LIMITS 必须有显式值。
+    而 `_resolve_limits()` 会落到 `_FALLBACK_LIMIT_LOTTO`（乐透型兜底）。
+    对日开 30 期的快乐8 来说，兜底值 ×30 期 ×2 元就足以把预算炸掉
+    —— 这不是"保守兜底"。所以 DEFAULT_LIMITS 必须有显式值。
+    ★ 兜底值会随统一上限一起调（500 → 1000），故这里不写死数字。
     """
-    from data.ticket_size import DEFAULT_LIMITS
-    missing = set(LOTTERY_CONFIG) - set(DEFAULT_LIMITS)
-    assert not missing, f"DEFAULT_LIMITS 缺 {missing}（会落到 500 的乐透型兜底）"
+    from data import ticket_size as ts
+    missing = set(LOTTERY_CONFIG) - set(ts.DEFAULT_LIMITS)
+    assert not missing, (f"DEFAULT_LIMITS 缺 {missing}"
+                         f"（会落到 {ts._FALLBACK_LIMIT_LOTTO} 的乐透型兜底）")
 
 
 def test_monthly_periods_cover_all():

@@ -89,13 +89,14 @@ def _seed_ticket_size_store():
             "fixed": dict(_TEST_TICKET_DYNAMIC),
             "dynamic": dict(_TEST_TICKET_DYNAMIC),
             "current": dict(_TEST_TICKET_DYNAMIC),
-            # ★ 上限必须与 `data/ticket_size.py::DEFAULT_LIMITS` 同口径：2026-11-02
-            #   起统一 500。这里曾是「逐彩种 500/400/100/200/200/300/500/100」的镜像，
+            # ★ 上限必须与 `data/ticket_size.py::DEFAULT_LIMITS` 同口径：
+            #   2026-11-02 起统一（500），2026-11-04 用户要求提到 **1000**。
+            #   这里曾是「逐彩种 500/400/100/200/200/300/500/100」的镜像，
             #   于是代码改了上限、测试还在用旧刻度 —— 断言读到的是这份种子而不是新默认，
             #   表现为「明明改了却还有测试说 400」（本轮实踩）。
-            "limits": {"双色球": 500, "大乐透": 500, "排列5": 500,
-                       "福彩3D": 500, "排列3": 500, "七星彩": 500,
-                       "七乐彩": 500, "快乐8": 500},
+            "limits": {"双色球": 1000, "大乐透": 1000, "排列5": 1000,
+                       "福彩3D": 1000, "排列3": 1000, "七星彩": 1000,
+                       "七乐彩": 1000, "快乐8": 1000},
             "锁定": True,
         }, ensure_ascii=False), encoding="utf-8")
     except OSError:

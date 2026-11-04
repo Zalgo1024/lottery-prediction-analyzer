@@ -94,7 +94,8 @@ def api_ticket_size_get():
     from data import ticket_size as ts
     rates, stats = _expected_and_stats()
     # ★ 预算只读快照跟着一起回：卡片上要同时显示「可拖到多少」与「这个月还能花多少」，
-    #   否则「上限 500」会被读成「可以随便 500」，而真正先撞到的是额度而不是上限。
+    #   否则「上限」会被读成「可以随便买满」，而真正先撞到的是额度而不是上限。
+    #   ★ 这里不写具体数字：上限是配置项，写成裸数字会随下一次调整一起腐烂。
     return jsonify({**ts.snapshot(expected_rates=rates, hit_stats=stats),
                     "预算": _budget_snapshot()})
 
