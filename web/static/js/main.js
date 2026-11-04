@@ -10,7 +10,23 @@
 function wbLotteries() {
     const v = (typeof window !== 'undefined' && Array.isArray(window.WB_LOTTERIES))
         ? window.WB_LOTTERIES : [];
-    return v.length ? v : ['双色球', '大乐透', '排列5', '福彩3D', '排列3', '七星彩'];
+    return v.length ? v : ['双色球', '大乐透', '排列5', '福彩3D', '排列3', '七星彩',
+                           '七乐彩', '快乐8'];
+}
+
+// ===== 发行机构分组（唯一真源）=====
+// 体彩名单只能手写（config 里没有「发行机构」字段），福彩组则由 wbLotteries() 反推：
+// 凡不在体彩名单、又不是主卡片的都是福彩 ⇒ 新增福彩彩种自动出现。
+// ★ 2026-11-05：流水线状态看板曾另写一份手写福彩清单，后端七乐彩/快乐8
+//   明明都在跑、页面上却看不到卡片。两处分组必须共用这一份，不许再各自手写。
+const MAIN_LOTTERIES = ['双色球', '大乐透'];
+const TICAI_LOTS = ['大乐透', '七星彩', '排列3', '排列5'];
+function centerLots() {
+    const all = wbLotteries();
+    return {
+        '福彩': all.filter(l => l !== '双色球' && !TICAI_LOTS.includes(l)),
+        '体彩': TICAI_LOTS.filter(l => l !== '大乐透' && all.includes(l)),
+    };
 }
 
 async function api(url, opts = {}) {
@@ -378,25 +394,24 @@ async function loadDataStatus() {
     // 下一期预测日期（从 pending 预测取最新）——已废弃，改为 backend 计算 next_draw_date
     // 保留以下空块以便未来需要时扩展
 
-    // 按发行机构展示同部门其他彩种（福彩中心 / 体彩中心），不区分玩法类型
-    // ★ 体彩这一组必须手写（配置里没有「发行机构」字段），福彩组则**反推**：
-    //   凡不在体彩名单里的都是福彩 —— 这样新增福彩彩种（七乐彩、快乐8）自动出现，
-    //   不会再出现「后端已接入、看板上找不到这张卡」。
-    const TICAI = ['大乐透', '七星彩', '排列3', '排列5'];
+    // 按发行机构展示同部门其他彩种（福彩中心 / 体彩中心），不区分玩法类型。
+    // ★ 清单统一取文件顶部的 centerLots()，不许在这里再写一份 —— 2026-11-05
+    //   流水线状态看板就是另写一份手写清单，漏掉了七乐彩/快乐8。
+    const centerCfg = centerLots();
     const dependents = {
         'ssq-dependents': {
             title: '福彩中心其他彩种',
             accent: '#e74c3c',
             bg: '#fff5f5',
             border: '#ffcccc',
-            lots: wbLotteries().filter(l => l !== '双色球' && !TICAI.includes(l)),
+            lots: centerCfg['福彩'],
         },
         'dlt-dependents': {
             title: '体彩中心其他彩种',
             accent: '#3498db',
             bg: '#f0f9ff',
             border: '#b3e0ff',
-            lots: TICAI.filter(l => l !== '大乐透'),
+            lots: centerCfg['体彩'],
         },
     };
     for (const [containerId, cfg] of Object.entries(dependents)) {
@@ -728,7 +743,7 @@ async function loadAutomationStatus() {
     window._autoData = data; // 供 showAutoDetail / _renderAutoBrief 复用
 
     const byLottery = data.last_run_by_lottery || {};
-    const mainLotteries = ['双色球', '大乐透'];
+    const mainLotteries = MAIN_LOTTERIES;
     const allLotteries = wbLotteries();
     // （原 dependentMap 只声明未使用，且硬编码 4 个数字型彩种；
     //   已删 —— 依赖关系改由上面的 dependents 列表按发行机构反推。）
@@ -770,18 +785,32 @@ async function loadAutomationStatus() {
         htmlStr += _renderOneLotteryStatus(lottery, byLottery[lottery]);
     }
 
-    // 按发行机构展示同部门其他彩种运行状态
+    // 按发行机构展示同部门其他彩种运行状态。
+    // ★ 清单与「数据状态」页共用 centerLots()（此前这里另写一份手写福彩清单，
+    //   后端七乐彩/快乐8 都在跑，页面却看不到卡片）。
+    // ★ 无运行记录也要占位写明「未参与」，不能静默 filter 掉 —— 缺席 ≠ 通过。
+    const centerCfg = centerLots();
     const centerGroups = [
-        { title: '福彩中心其他彩种', color: '#e74c3c', lots: ['福彩3D'] },
-        { title: '体彩中心其他彩种', color: '#3498db', lots: ['七星彩', '排列3', '排列5'] },
+        { title: '福彩中心其他彩种', color: '#e74c3c', lots: centerCfg['福彩'] },
+        { title: '体彩中心其他彩种', color: '#3498db', lots: centerCfg['体彩'] },
     ];
     for (const group of centerGroups) {
-        const depRecords = group.lots.map(l => ({ lottery: l, record: byLottery[l] })).filter(r => r.record);
+        const depRecords = group.lots.map(l => ({ lottery: l, record: byLottery[l] }));
         if (!depRecords.length) continue;
         htmlStr += `<div style="margin-top:10px;padding:10px;border-radius:8px;background:var(--color-background-secondary,#f8f9fa);border:1px solid var(--color-border-tertiary,#eee)">
             <div style="font-size:12px;font-weight:bold;color:${group.color};margin-bottom:6px">${group.title}</div>
             <div style="display:flex;flex-wrap:wrap;gap:8px">`;
         for (const { lottery, record } of depRecords) {
+            if (!record) {
+                htmlStr += `<div style="flex:1;min-width:180px;padding:8px;border-radius:6px;background:#fff;border:1px solid var(--color-border-tertiary,#eee)">
+                    <div style="display:flex;justify-content:space-between;align-items:center">
+                        <strong style="font-size:13px">${lottery}</strong>
+                        <span style="font-size:11px;color:var(--gray)">未参与</span>
+                    </div>
+                    <div style="font-size:12px;color:var(--gray);margin-top:2px">暂无运行记录（未参与本次流水线）</div>
+                </div>`;
+                continue;
+            }
             const okColor = record.success ? '#2e7d32' : '#c62828';
             const hit = record.hit_summary || '';
             const preds = record.predictions || [];
@@ -1490,7 +1519,7 @@ function _renderAutoBrief(data) {
     const box = $('auto-brief');
     if (!box) return;
     const byLottery = data.last_run_by_lottery || {};
-    const mainLotteries = ['双色球', '大乐透'];
+    const mainLotteries = MAIN_LOTTERIES;
     const allLotteries = wbLotteries();
     const hasAny = allLotteries.some(l => byLottery[l]);
     if (!hasAny) { box.innerHTML = ''; return; }

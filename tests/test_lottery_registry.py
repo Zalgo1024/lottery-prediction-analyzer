@@ -206,3 +206,54 @@ def test_ev_is_negative_for_new_lotteries(name):
     r = payout_eff(name, ticket)
     assert "error" not in r, r.get("error")
     assert r["净EV"] < 0, (name, r["净EV"])
+
+
+# ---------------------------------------------------------------- D. 前端分组清单
+def _main_js() -> str:
+    from pathlib import Path
+    return (Path(__file__).resolve().parents[1]
+            / "web" / "static" / "js" / "main.js").read_text(encoding="utf-8")
+
+
+def test_frontend_center_groups_share_one_truth():
+    """★ 2026-11-05：流水线状态看板另写一份手写分组清单，漏掉七乐彩/快乐8。
+
+    后端 `/api/automation-status` 明明返回 8 个彩种（七乐彩 142 注、快乐8 5 注，
+    均运行成功），页面上「福彩中心其他彩种」却只有福彩3D —— `centerGroups` 里
+    写死了福彩清单，而同一文件「数据状态」页已改成按注册表反推。两处不一致就是
+    这类「静默漏彩种」的温床：**不报错、不告警，只是卡片不见了**。
+
+    判据：① 分组只有一个真源 `centerLots()`；② 两处渲染都调用它；
+          ③ 源码不许再出现手写 lots 数组；④ 反推结果覆盖全部非主彩种。
+    """
+    import re
+
+    src = _main_js()
+    assert "function centerLots()" in src
+    assert src.count("centerLots();") >= 2, "两处分组渲染必须都走同一真源"
+    assert "lots: [" not in src, "又出现手写分组清单（新增彩种会再次静默漏掉）"
+
+    m = re.search(r"const TICAI_LOTS = \[(.*?)\]", src, re.S)
+    assert m, "找不到体彩名单常量"
+    ticai = re.findall(r"'([^']+)'", m.group(1))
+    fucai = [x for x in LOTTERY_CONFIG if x != "双色球" and x not in ticai]
+    ticai_rest = [x for x in ticai if x != "大乐透"]
+    assert set(fucai) | set(ticai_rest) == set(LOTTERY_CONFIG) - {"双色球", "大乐透"}
+    assert {"七乐彩", "快乐8"} <= set(fucai), "两个福彩新彩种必须落在福彩组"
+
+
+def test_frontend_fallback_list_covers_all_lotteries():
+    """`wbLotteries()` 的 fallback（window 注入失效时）也必须覆盖全部彩种。"""
+    import re
+
+    src = _main_js()
+    m = re.search(r"return v\.length \? v : \[(.*?)\];", src, re.S)
+    assert m, "找不到 wbLotteries 的 fallback 清单"
+    assert set(re.findall(r"'([^']+)'", m.group(1))) == set(LOTTERY_CONFIG)
+
+
+def test_frontend_missing_run_is_explicit_not_silent():
+    """无运行记录时占位写「未参与」，不能 filter 掉（缺席 ≠ 通过）。"""
+    src = _main_js()
+    assert "暂无运行记录（未参与本次流水线）" in src
+    assert ".filter(r => r.record)" not in src

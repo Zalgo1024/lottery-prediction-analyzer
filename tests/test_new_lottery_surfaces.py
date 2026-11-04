@@ -126,13 +126,30 @@ def test_frontend_gets_lottery_list_from_backend(client):
 
 
 def test_main_js_has_no_parallel_lottery_list():
-    """main.js 里除了兜底 fallback，不许再手抄一份彩种清单。"""
+    """main.js 只允许 3 份**具名**彩种字面量，不许再出现第四份。
+
+    ★ 2026-11-05 修强：原判据只搜固定字面串
+      `'排列5', '福彩3D', '排列3', '七星彩'`，于是「半份清单」全都溜过去了 ——
+      流水线状态看板里写着 `lots: ['福彩3D']` 和 `lots: ['七星彩','排列3','排列5']`，
+      后端七乐彩/快乐8 明明都在跑，页面却看不到这两张卡，而且**不报任何错**。
+      改为扫描所有含 ≥2 个彩种名的数组字面量，逐一核对内容。
+    """
     from pathlib import Path
     src = (Path(__file__).resolve().parent.parent / "web" / "static" / "js" / "main.js")
     text = src.read_text(encoding="utf-8")
-    hits = [ln for ln in text.splitlines()
-            if "'排列5', '福彩3D', '排列3', '七星彩'" in ln]
-    assert len(hits) <= 1, f"main.js 又出现了手写彩种清单：{hits}"
+    names = set(LOTTERY_CONFIG)
+    arrays = []
+    for m in re.finditer(r"\[([^\[\]]*)\]", text):
+        quoted = re.findall(r"['\"]([^'\"]+)['\"]", m.group(1))
+        if len([q for q in quoted if q in names]) >= 2:
+            arrays.append(tuple(quoted))
+    allowed = {
+        tuple(LOTTERY_CONFIG),                      # wbLotteries() 的 fallback
+        ('大乐透', '七星彩', '排列3', '排列5'),     # TICAI_LOTS（体彩，config 无机构字段）
+        ('双色球', '大乐透'),                      # MAIN_LOTTERIES（主卡片）
+    }
+    assert len(arrays) == len(allowed), f"main.js 的彩种字面量清单数量变了：{arrays}"
+    assert set(arrays) == allowed, f"出现未登记的彩种清单（会静默漏新彩种）：{arrays}"
 
 
 # ---------------------------------------------------------------- 审计隔离
