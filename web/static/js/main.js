@@ -263,6 +263,29 @@ function renderBalls(red, blue, size = 24, showLabels = true) {
 // field: 渲染哪个字段（"pred" 预测球 / "actual" 实际球）。
 // opts.hitHighlight: 预测球是否按"是否命中实际"做暗化（战绩页用）。
 const ZONE_PALETTE = ['#E24B4A', '#1E90FF', '#2E9E5B', '#E0A020', '#8E44AD', '#16A085', '#D35400', '#34495E'];
+
+// ===== 分区 → 球面样式（单一真源，前端所有号码渲染都走这里）=====
+// ★ 2026-11-05：七乐彩此前掉进 ZONE_PALETTE[0] 的**纯红平球**，这是分区分类错误 ——
+//   它是 30 选 7 的乐透型（无放回选号），不是「第N位」那种按位数字型；数字型才该
+//   按位调色。用户要求「改成双色球同款」⇒ 基本号 = 红球(.red-ball 渐变亮面)、
+//   特别号 = 蓝球(.blue-ball)，与双色球/大乐透共用同一套球面。
+// ★ 顺带修正命中页：renderZoneBalls 用 `!cls` 判断「数字型」，七乐彩原来会被当成
+//   数字型画成灰球/金框/对勾；现在有 cls 了，会走红蓝型的 .dim 暗化，判读才对。
+// ★ 特别号 choose=0/draw=1（draw_only，票面不含，见 config.py）⇒ 预测卡里**不会**
+//   凭空多出一个蓝球；只有开奖号 / 命中对照里真的出现特别号时才着蓝色。
+//   「为了配色给票面补一个特别号」是把开奖号混进预测（前视），一律不做。
+// ★ 快乐8 的「基本号」保持原调色板口径：它也是乐透型，但没有第二色分区，
+//   本次用户只要求七乐彩，不擅自扩大视觉改动范围。
+const LOTTERY_ZONE_CLS = {
+    '七乐彩': { '基本号': 'red', '特别号': 'blue' },
+};
+function zoneClsFor(name, lottery) {
+    const byLot = lottery ? LOTTERY_ZONE_CLS[lottery] : null;
+    if (byLot && Object.prototype.hasOwnProperty.call(byLot, name)) return byLot[name];
+    if (name === '红球') return 'red';
+    if (name === '蓝球') return 'blue';
+    return null;                       // 数字型 → 按位调色板
+}
 function renderZoneBalls(zones, field, opts = {}) {
     const size = opts.size || 24;
     const showLabels = opts.showLabels !== false;
@@ -324,20 +347,24 @@ function renderZoneBalls(zones, field, opts = {}) {
     return out;
 }
 
-// 看板/首页开奖号码：兼容 红球/蓝球（双/大）与 号码(dict)（数字型）
-function renderDrawNumbers(dn) {
+// 看板/首页开奖号码：兼容 红球/蓝球（双/大）与 号码(dict)（数字型 / 乐透型分区）
+function renderDrawNumbers(dn, lottery = null) {
     if (!dn) return '';
     if (dn.号码 && typeof dn.号码 === 'object') {
-        const zones = Object.entries(dn.号码).map(([name, pred]) => ({ name, pred, cls: null }));
+        const zones = Object.entries(dn.号码).map(([name, pred]) => ({
+            name, pred, cls: zoneClsFor(name, lottery)
+        }));
         return renderZoneBalls(zones, 'pred', { size: 24, showLabels: true });
     }
     return renderBalls(dn.红球, dn.蓝球, 24);
 }
 
-// 渲染一组预测号码（PredictSet.to_dict 的 号码 分区字典；红球→红/蓝光球，数字型按位着色）
+// 渲染一组预测号码（PredictSet.to_dict 的 号码 分区字典）
+// ★ opts.lottery 必传时才能命中七乐彩这类「按彩种定制」的分区；拿不到彩种的旧调用点
+//   会退化成原来的按分区名规则（红球/蓝球 + 数字型调色板），不会报错也不会画错号。
 function renderPredNumbers(num, opts = {}) {
     const zones = Object.entries(num || {}).map(([name, pred]) => ({
-        name, pred, cls: name === '红球' ? 'red' : name === '蓝球' ? 'blue' : null
+        name, pred, cls: zoneClsFor(name, opts.lottery)
     }));
     return renderZoneBalls(zones, 'pred', opts);
 }
@@ -647,7 +674,7 @@ function _renderOneLotteryStatus(lottery, record) {
     // 抓取到的开奖号
     if (dn && dn.期号) {
         htmlStr += `<div style="margin-top:8px"><strong style="font-size:12px"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M5 5h14v14H5z"/><path d="M3 12h5l2 3h4l2-3h5"/></svg> 抓取到的开奖 ${dn.期号}${dn.日期 ? '（' + dn.日期 + '）' : ''}：</strong><br>
-            ${renderDrawNumbers(dn)}</div>`;
+            ${renderDrawNumbers(dn, lottery)}</div>`;
     }
     // 本次生成的预测
     if (preds.length) {
@@ -655,7 +682,7 @@ function _renderOneLotteryStatus(lottery, record) {
         preds.slice(0, 5).forEach((g, i) => {
             const conf = (g.置信度 != null) ? Number(g.置信度).toFixed(2) : '-';
             htmlStr += `<div style="margin:6px 0;font-size:12px;display:flex;align-items:center;flex-wrap:wrap;gap:4px 0">第${i + 1}组
-                ${renderPredNumbers(_ticketZoneDict(g), { size: 22, showLabels: false })}
+                ${renderPredNumbers(_ticketZoneDict(g), { size: 22, showLabels: false, lottery })}
                 <span style="color:var(--gray);margin-left:6px">${g.策略 || ''} · 置信度${conf}</span></div>`;
         });
         htmlStr += `</div>`;
@@ -820,7 +847,7 @@ async function loadAutomationStatus() {
                 const conf = (g.置信度 != null) ? Number(g.置信度).toFixed(2) : '-';
                 return `<div style="display:flex;align-items:center;gap:6px;margin-top:4px">
                     <span style="font-size:11px;color:var(--gray);min-width:32px;flex-shrink:0">第${i + 1}组</span>
-                    <span style="display:inline-flex;align-items:center;flex-wrap:wrap">${renderPredNumbers(_ticketZoneDict(g), { size: 18, showLabels: false })}</span>
+                    <span style="display:inline-flex;align-items:center;flex-wrap:wrap">${renderPredNumbers(_ticketZoneDict(g), { size: 18, showLabels: false, lottery })}</span>
                     <span style="font-size:11px;color:var(--gray);margin-left:auto">· ${g.策略 || ''} ${conf}</span>
                 </div>`;
             }).join('');
@@ -1573,7 +1600,7 @@ function _renderAutoBrief(data) {
         const preds = run.predictions || [];
         const dnHtml = (dn && dn.期号) ? `<span style="font-size:12px;color:var(--gray)">
             ${lottery} 最新开奖 ${dn.期号}：</span>
-            ${renderDrawNumbers(dn)}` : '';
+            ${renderDrawNumbers(dn, lottery)}` : '';
         const predHtml = preds.length ? `<span style="font-size:12px;color:var(--gray)">
             已生成下一期预测 <strong>${preds.length}</strong> 组</span>` : '';
         const hitBadge = hit ? `<span style="margin-left:auto;font-size:12px;padding:2px 8px;border-radius:10px;${hit.includes('<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/></svg>') ? 'background:#fff3e0;color:#b26a00;font-weight:bold' : 'color:var(--gray)'}">${hit}</span>` : '';
@@ -1648,6 +1675,9 @@ function renderAutoDetail(data, lottery = null) {
         last = data.last_run_by_lottery[lottery];
     }
     const title = lottery || (last && last.lottery) || '最近一次运行';
+    // ★ 分区配色必须用**真彩种名**：title 在未指定彩种时会是「最近一次运行」占位文案，
+    //   拿它去查配色表只会落回通用规则 ⇒ 七乐彩又变回纯红平球（静默、不报错）。
+    const zoneLottery = lottery || (last && last.lottery);
     if (!last) {
         box.innerHTML = `<div class="card" style="margin-top:10px"><div class="alert alert-info">` +
             `${ico('inbox')} ${lottery || '该彩种'} 还没有运行记录。点上方「${ico('robot')} 一键流水线」跑一次，或等开奖日 21:30 定时任务自动运行后，` +
@@ -1669,14 +1699,14 @@ function renderAutoDetail(data, lottery = null) {
 
     if (dn.期号) {
         html += `<div style="margin-top:8px"><strong style="font-size:12px"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M5 5h14v14H5z"/><path d="M3 12h5l2 3h4l2-3h5"/></svg> 抓取开奖 ${dn.期号}${dn.日期 ? '（' + dn.日期 + '）' : ''}：</strong><br>
-            ${renderDrawNumbers(dn)}</div>`;
+            ${renderDrawNumbers(dn, zoneLottery)}</div>`;
     }
     if (preds.length) {
         html += `<div style="margin-top:8px"><strong style="font-size:12px">${ico('target')} 生成预测 ${preds.length} 组：</strong>`;
         preds.forEach((g, i) => {
             const conf = (g.置信度 != null) ? Number(g.置信度).toFixed(2) : '-';
             html += `<div style="margin:6px 0;font-size:12px;display:flex;align-items:center;flex-wrap:wrap;gap:4px 0">第${i + 1}组
-                ${renderPredNumbers(_ticketZoneDict(g), { size: 22, showLabels: false })}
+                ${renderPredNumbers(_ticketZoneDict(g), { size: 22, showLabels: false, lottery: zoneLottery })}
                 <span style="color:var(--gray);margin-left:6px">${g.策略 || ''} · 置信度${conf}</span></div>`;
         });
         html += `</div>`;
@@ -2236,6 +2266,9 @@ async function viewRollingReport(recordDir) {
 // ===== 预测 =====
 let predictTaskId = null;
 let predictPollTimer = null;
+// ★ 轮询期间用户可能改了彩种下拉框 ⇒ 结果弹窗的分区配色不能去读 DOM 现值，
+//   要钉在发起预测那一刻的彩种上（否则七乐彩的结果会按新彩种着色）。
+let predictLottery = null;
 
 // 出号数量（滑轨）缓存：{彩种: 当前生效注数}
 let _slideCache = null;
@@ -2282,6 +2315,7 @@ async function doPredict() {
         body: JSON.stringify({ lottery, groups, mode, record_pending: record })
     }).then(data => {
         predictTaskId = data.task_id;
+        predictLottery = lottery;
         pollPredictStatus();
     });
 }
@@ -2307,7 +2341,7 @@ function pollPredictStatus() {
             let htmlStr = '<div style="display:flex;flex-wrap:wrap">';
             for (const ps of r.numbers) {
                 const zones = Object.entries(ps.号码 || {}).map(([name, pred]) => ({
-                    name, pred, cls: name === '红球' ? 'red' : name === '蓝球' ? 'blue' : null
+                    name, pred, cls: zoneClsFor(name, predictLottery)
                 }));
                 const balls = renderZoneBalls(zones, 'pred', { size: 24, showLabels: true });
                 const note = ps.备注 ? `<div style="font-size:11px;color:var(--gray);margin-top:4px">${ps.备注}</div>` : '';
@@ -3218,26 +3252,28 @@ async function _showBatchDetail(idx) {
     try {
         const url = `/api/hits/batch-detail?lottery=${encodeURIComponent(r.lottery)}&batch_id=${encodeURIComponent(r.批次号)}`;
         const d = await api(url);
-        html('modal-body', _renderBatchDetail(d));
+        html('modal-body', _renderBatchDetail(d, r.lottery));
     } catch (e) {
         html('modal-body', `<div class="alert alert-danger">加载批次详情失败：${e.message || e}</div>`);
     }
 }
 
 // 单注号码 → 通用 zones 结构，直接复用命中页的 renderZoneBalls 渲染（同一套球面设计）
-function _ticketZones(nums) {
+function _ticketZones(nums, lottery = null) {
     const keys = Object.keys(nums || {});
     if (keys.includes('红球') || keys.includes('蓝球')) {
         return [
-            { name: '红球', pred: nums['红球'] || [], cls: 'red' },
-            { name: '蓝球', pred: nums['蓝球'] || [], cls: 'blue' },
+            { name: '红球', pred: nums['红球'] || [], cls: zoneClsFor('红球', lottery) },
+            { name: '蓝球', pred: nums['蓝球'] || [], cls: zoneClsFor('蓝球', lottery) },
         ];
     }
-    // 数字型：分区名→该区选的数字（键顺序即出号时的分区顺序）
-    return keys.map(k => ({ name: k, pred: Array.isArray(nums[k]) ? nums[k] : [nums[k]] }));
+    // 数字型 / 乐透型：分区名→该区号码（键顺序即出号时的分区顺序），配色统一走真源
+    return keys.map(k => ({
+        name: k, pred: Array.isArray(nums[k]) ? nums[k] : [nums[k]], cls: zoneClsFor(k, lottery)
+    }));
 }
 
-function _renderBatchDetail(d) {
+function _renderBatchDetail(d, lottery = null) {
     const winStyle = {
         '一等': 'background:linear-gradient(90deg,#ffd700,#ffed4a);color:#7a5c00;font-weight:bold',
         '二等': 'background:linear-gradient(90deg,#ffd699,#ffe0b2);color:#b26a00;font-weight:bold',
@@ -3298,7 +3334,7 @@ function _renderBatchDetail(d) {
         }
         rows += `<div style="display:flex;align-items:center;gap:10px;padding:6px 12px;border-bottom:1px solid #f4f6f8;${isWin ? 'background:#fffdf5' : ''}">
             <span style="min-width:40px;text-align:right;color:var(--gray);font-size:12px;font-weight:600">第${t.序号}注</span>
-            <span style="flex:1">${renderZoneBalls(_ticketZones(t.号码), 'pred', { size: 24, showLabels: false, hitHighlight: false })}</span>
+            <span style="flex:1">${renderZoneBalls(_ticketZones(t.号码, lottery), 'pred', { size: 24, showLabels: false, hitHighlight: false })}</span>
             <span style="min-width:240px;text-align:left;font-size:12px;line-height:1.5"><div>${strat}</div><div>${statLine}</div></span>
             <span style="min-width:48px;text-align:center;font-size:12px;color:var(--gray)">命中 ${t.总命中}</span>
             <span style="min-width:52px;text-align:center;padding:1px 8px;border-radius:10px;font-size:12px;${ps || 'background:#f5f5f5;color:#9e9e9e'}">${isWin ? lvText(lv) : '未中'}</span>
@@ -3756,7 +3792,7 @@ function _renderPendingList(records, groupSize, tierLabel) {
                     ? ` · 前列命中 ${( (rob['前列命中率'] || 0) * 100).toFixed(0)}% · 半区命中 ${((rob['半区命中率'] || 0) * 100).toFixed(0)}%`
                     : '';
                 return `<div style="margin:3px 0;font-size:12px;display:flex;align-items:center;flex-wrap:wrap;gap:4px 0;padding-left:6px;border-left:2px solid ${g.recommended ? '#27ae60' : '#eee'}">
-                    ${renderPredNumbers(_ticketZoneDict(t), { size: 22, showLabels: false })}
+                    ${renderPredNumbers(_ticketZoneDict(t), { size: 22, showLabels: false, lottery: p.lottery_name || p.彩种 || p.lottery })}
                     <span style="color:var(--gray);margin-left:6px">${t.策略 || ''}</span>
                     <span style="color:var(--gray);font-size:11px;margin-left:8px">置信度 ${conf} · 权重 ${w} · 推荐分 ${recScore}${robStr}</span>
                 </div>`;
@@ -4524,7 +4560,7 @@ function _renderEvPending(dataResults) {
                     const w = (g.策略权重 != null) ? (g.策略权重 * 100).toFixed(0) + '%' : '—';
                     const recScore = (g.推荐分 != null) ? g.推荐分.toFixed(3) : '—';
                     line += `<div style="margin:2px 0;font-size:12px;display:flex;align-items:center;flex-wrap:wrap;gap:4px 0">
-                        ${renderPredNumbers(_ticketZoneDict(g), { size: 22, showLabels: false })}
+                        ${renderPredNumbers(_ticketZoneDict(g), { size: 22, showLabels: false, lottery: d.lottery })}
                         <span style="color:var(--gray);margin-left:6px">${g.策略 || ''}</span>
                         <span style="color:var(--gray);font-size:11px;margin-left:8px">置信度 ${conf} · 权重 ${w} · 推荐分 ${recScore}</span>
                     </div>`;

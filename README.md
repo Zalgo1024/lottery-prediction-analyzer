@@ -2,7 +2,7 @@
 
 > **一套把「看起来有效」和「真的有效」分开的检验框架 · 彩票是最严苛的压力测试场**
 
-![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB) ![Tests](https://img.shields.io/badge/pytest-2522%20passed-3B6D11) ![Lotteries](https://img.shields.io/badge/%E5%BD%A9%E7%A7%8D-6-854F0B) ![License](https://img.shields.io/badge/License-AGPL--3.0-blue)
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB) ![Tests](https://img.shields.io/badge/pytest-2537%20passed-3B6D11) ![Lotteries](https://img.shields.io/badge/%E5%BD%A9%E7%A7%8D-6-854F0B) ![License](https://img.shields.io/badge/License-AGPL--3.0-blue)
 
 ## 这个项目真正解决的问题
 
@@ -61,7 +61,7 @@ python run.py                # 看门狗模式，访问 http://127.0.0.1:5000
 # 3. 或者只用 CLI
 python cli.py --help
 
-# 4. 跑测试套件（全量 2522 例）
+# 4. 跑测试套件（全量 2537 例）
 pytest -q                    # 约 15 分钟（慢点集中在真实 predict 全流程的契约测试）
 ```
 
@@ -226,7 +226,13 @@ python scripts/repair_records.py         # 记录修复（默认 dry-run，--app
   **不能用通用组合式**（通用式假设"开奖也是 w 个号"，会把六等概率算错 2/3）。
   精确式写在 `ev/payout._probs_qlc`，偏差对照见该函数 docstring。
 - 一~三等为浮动奖（按当期奖池公布单注金额），四~七等为固定奖（200/50/10/5 元）。
-- 判据：`tests/test_qlc.py`、`tests/test_regulated_amount.py`。
+- **展示层球面与双色球同款**：七乐彩是乐透型（无放回选号），不是「第N位」那种按位数字型；
+  此前被误分到数字型调色板，画成纯红平球。现在基本号走 `.red-ball`、特别号走
+  `.blue-ball`（渐变亮面），与双色球/大乐透共用一套。★ 票面**仍只有基本号，不会为了
+  配色补出特别号**（那是把开奖号混进预测）；第 8 个蓝球只出现在开奖号 / 命中对照里。
+  前后端配色真源分别是 `main.js::zoneClsFor` 与 `web/utils.py::_zone_cls`，两边必须同口径，
+  且每个号码渲染调用点都要传彩种 —— 判据见 `tests/test_zone_ball_style.py`。
+- 判据：`tests/test_qlc.py`、`tests/test_regulated_amount.py`、`tests/test_zone_ball_style.py`。
 
 ### 快乐8（`kl8`，2020-10 起）
 
@@ -764,8 +770,8 @@ POST /api/settings/push-notify/test     # 发一条测试消息（未配置返�
 ## 测试
 
 ```bash
-pytest -q              # 2522 passed（全量；含奖金表 33 例、写保护/分区归一化回归、撞号度量与中奖归因、批次契约、出号数量固定/动态、消息推送：图片渲染/发送节流/降级/全入口接线、随机锚点走前验证与持续训练循环、休市日历与真实开奖数据一致性、三口径 EV 对照/冷门口径 rollover/奖池门槛/Kelly 纪律仓位/限号前置与组合方差指标、策略历史实测命中统计（归一/过滤/基线/样本不足）、休市期全链路感知（看板滞后/下一期 + 调度器排班 + 启动自愈 + cli lag + 体检脚本 + 销量模型前瞻 + 休市提示条）、机制缝隙四轨测量（A/A′注数比、开出号分位、结构偏差、派奖期）+ 缝隙内选号与反馈闭环、机制缝隙策略层可见性与前瞻对照、叙事解绑文案扫描、生产 pending 防覆盖（record_pending 开关）、出号数量硬性拉平与注数一致性体检/启动自愈）
-pytest tests/          # 2513 passed（仅 tests/ 目录；另有 9 例在 scripts/ 下，故用 pytest -q 跑全量）
+pytest -q              # 2537 passed（全量；含奖金表 33 例、写保护/分区归一化回归、撞号度量与中奖归因、批次契约、出号数量固定/动态、消息推送：图片渲染/发送节流/降级/全入口接线、随机锚点走前验证与持续训练循环、休市日历与真实开奖数据一致性、三口径 EV 对照/冷门口径 rollover/奖池门槛/Kelly 纪律仓位/限号前置与组合方差指标、策略历史实测命中统计（归一/过滤/基线/样本不足）、休市期全链路感知（看板滞后/下一期 + 调度器排班 + 启动自愈 + cli lag + 体检脚本 + 销量模型前瞻 + 休市提示条）、机制缝隙四轨测量（A/A′注数比、开出号分位、结构偏差、派奖期）+ 缝隙内选号与反馈闭环、机制缝隙策略层可见性与前瞻对照、叙事解绑文案扫描、生产 pending 防覆盖（record_pending 开关）、出号数量硬性拉平与注数一致性体检/启动自愈）
+pytest tests/          # 2528 passed（仅 tests/ 目录；另有 9 例在 scripts/ 下，故用 pytest -q 跑全量）
 ```
 
 ## 维护（放着不管时会发生什么）

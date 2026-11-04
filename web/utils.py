@@ -399,7 +399,7 @@ def compare_training_with_actual(lottery_name: str) -> dict:
         "actual_draw": str(latest.期号),
         "actual_date": str(latest.开奖日期 or ""),
         "actual_zones": [
-            {"name": name, "numbers": nums, "cls": _zone_cls(name)}
+            {"name": name, "numbers": nums, "cls": _zone_cls(name, lottery_name)}
             for name, nums in actual_zones.items()
         ],
         "predictions_analyzed": 0,
@@ -467,7 +467,8 @@ def compare_training_with_actual(lottery_name: str) -> dict:
                 "total_hits": group_hits,
                 "confidence": ps.get("置信度", 0),
                 "pred_zones": [
-                    {"name": z.name, "numbers": pred_zones[z.name], "cls": _zone_cls(z.name)}
+                    {"name": z.name, "numbers": pred_zones[z.name],
+                     "cls": _zone_cls(z.name, lottery_name)}
                     for z in schema.zones
                 ],
                 "actual_zones": result["actual_zones"],
@@ -531,8 +532,22 @@ def compare_training_with_actual(lottery_name: str) -> dict:
     return result
 
 
-def _zone_cls(name: str) -> Optional[str]:
-    """分区 -> 前端样式类：红球/蓝球保留，其余数字型分区返回 null。"""
+def _zone_cls(name: str, lottery: Optional[str] = None) -> Optional[str]:
+    """分区 -> 前端样式类。与前端 `zoneClsFor()` 同一口径（两边都要改）。
+
+    ★ 2026-11-05：七乐彩是 30 选 7 的**乐透型**（无放回），不是按位数字型，
+      此前落到调色板纯红平球；用户要求「改成双色球同款」⇒ 基本号 = 红球、
+      特别号 = 蓝球，共用 `.red-ball` / `.blue-ball` 渐变亮面球面。
+    ★ 特别号 `choose=0/draw=1`（draw_only，票面不含）⇒ 只在开奖/对照里出现，
+      预测票面绝不为了配色补号（那会把开奖号混进预测）。
+    ★ 快乐8 的「基本号」保持原调色板口径：本次只改七乐彩。
+    """
+    if lottery == "七乐彩":
+        special = {"基本号": "red", "特别号": "blue"}.get(name)
+        if special:
+            return special
+    # ★ 与前端 zoneClsFor 一致：彩种定制表里查不到就回落到通用规则，
+    #   不能直接 return None（否则 `_zone_cls('红球','七乐彩')` 两边会分叉）。
     if name == "红球":
         return "red"
     if name == "蓝球":
