@@ -2,7 +2,7 @@
 
 > **一套把「看起来有效」和「真的有效」分开的检验框架 · 彩票是最严苛的压力测试场**
 
-![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB) ![Tests](https://img.shields.io/badge/pytest-2496%20passed-3B6D11) ![Lotteries](https://img.shields.io/badge/%E5%BD%A9%E7%A7%8D-6-854F0B) ![License](https://img.shields.io/badge/License-AGPL--3.0-blue)
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB) ![Tests](https://img.shields.io/badge/pytest-2508%20passed-3B6D11) ![Lotteries](https://img.shields.io/badge/%E5%BD%A9%E7%A7%8D-6-854F0B) ![License](https://img.shields.io/badge/License-AGPL--3.0-blue)
 
 ## 这个项目真正解决的问题
 
@@ -61,7 +61,7 @@ python run.py                # 看门狗模式，访问 http://127.0.0.1:5000
 # 3. 或者只用 CLI
 python cli.py --help
 
-# 4. 跑测试套件（全量 2496 例）
+# 4. 跑测试套件（全量 2508 例）
 pytest -q                    # 约 15 分钟（慢点集中在真实 predict 全流程的契约测试）
 ```
 
@@ -735,8 +735,8 @@ POST /api/settings/push-notify/test     # 发一条测试消息（未配置返�
 ## 测试
 
 ```bash
-pytest -q              # 2496 passed（全量；含奖金表 33 例、写保护/分区归一化回归、撞号度量与中奖归因、批次契约、出号数量固定/动态、消息推送：图片渲染/发送节流/降级/全入口接线、随机锚点走前验证与持续训练循环、休市日历与真实开奖数据一致性、三口径 EV 对照/冷门口径 rollover/奖池门槛/Kelly 纪律仓位/限号前置与组合方差指标、策略历史实测命中统计（归一/过滤/基线/样本不足）、休市期全链路感知（看板滞后/下一期 + 调度器排班 + 启动自愈 + cli lag + 体检脚本 + 销量模型前瞻 + 休市提示条）、机制缝隙四轨测量（A/A′注数比、开出号分位、结构偏差、派奖期）+ 缝隙内选号与反馈闭环、机制缝隙策略层可见性与前瞻对照、叙事解绑文案扫描、生产 pending 防覆盖（record_pending 开关）、出号数量硬性拉平与注数一致性体检/启动自愈）
-pytest tests/          # 2487 passed（仅 tests/ 目录；另有 9 例在 scripts/ 下，故用 pytest -q 跑全量）
+pytest -q              # 2508 passed（全量；含奖金表 33 例、写保护/分区归一化回归、撞号度量与中奖归因、批次契约、出号数量固定/动态、消息推送：图片渲染/发送节流/降级/全入口接线、随机锚点走前验证与持续训练循环、休市日历与真实开奖数据一致性、三口径 EV 对照/冷门口径 rollover/奖池门槛/Kelly 纪律仓位/限号前置与组合方差指标、策略历史实测命中统计（归一/过滤/基线/样本不足）、休市期全链路感知（看板滞后/下一期 + 调度器排班 + 启动自愈 + cli lag + 体检脚本 + 销量模型前瞻 + 休市提示条）、机制缝隙四轨测量（A/A′注数比、开出号分位、结构偏差、派奖期）+ 缝隙内选号与反馈闭环、机制缝隙策略层可见性与前瞻对照、叙事解绑文案扫描、生产 pending 防覆盖（record_pending 开关）、出号数量硬性拉平与注数一致性体检/启动自愈）
+pytest tests/          # 2499 passed（仅 tests/ 目录；另有 9 例在 scripts/ 下，故用 pytest -q 跑全量）
 ```
 
 ## 维护（放着不管时会发生什么）
@@ -755,6 +755,34 @@ pytest tests/          # 2487 passed（仅 tests/ 目录；另有 9 例在 scrip
 
 日常只需看一处：**看板标题旁的一致性徽章**。绿色 = 滑轨与实际出号对得上；
 变红 = 有旁路改了注数。
+
+### 开机自启（每台机器配一次）
+
+`run.py` **自己不会随开机启动**。不配的话，机器一重启就整夜不出号、不推送
+（已经这样停过三次）。本机可用的机制是**用户级注册表 Run 项**，不需要管理员：
+
+```bat
+scripts\install_autostart.bat            :: 安装（双击即可）
+scripts\install_autostart.bat -Status    :: 查看当前状态
+scripts\install_autostart.bat -Remove    :: 卸载
+```
+
+写入 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\LotteryAnalysis`，值指向
+`启动项目.bat`。**这台机器上另外三条路都实测不通**：
+
+| 方式 | 结果 |
+| --- | --- |
+| `Register-ScheduledTask`（登录时运行） | 拒绝访问（需提权 / 被策略拦） |
+| 启动文件夹放 `.bat` | 系统拒写 `%APPDATA%\…\Startup`（UnauthorizedAccessException） |
+| COM `WScript.Shell` 建 `.lnk` | 主机安全策略禁止 COM 实例化 |
+
+★ **不要**再挂 `scripts/auto_scheduled.ps1` 当第二条流水线：两条路径之间**没有跨进程互斥**
+（`startup_recovery._claim_trigger` 只是进程内的一个 `set`，而 `cli.py auto` 是独立进程），
+同一期可能被两路各生成一次；预算台账又按「月份+期号+档位+域+彩种+重出批号」去重，
+换了批号就会记成两笔钱。**单一路径（Flask 内置调度器）+ 开机自启**更安全。
+
+★ 从别的程序里启动 `run.py`（例如在 IDE / 自动化会话里 spawn）不持久：会话结束会把
+进程树一起收掉。要"现在启动"，双击 `启动项目.bat` 即可。
 
 常用脚本：
 

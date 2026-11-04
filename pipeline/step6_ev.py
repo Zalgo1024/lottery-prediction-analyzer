@@ -234,7 +234,13 @@ def _advice_via_profit(lottery_name: str, data: LotteryData) -> Optional[dict]:
         lo = int(z.min)
         zones[z.name] = list(range(lo, lo + n))
 
-    r = payout_eff(lottery_name, {"号码": zones})
+    # ★ 票面形状必须按彩种分（11-04 实踩）：
+    #   七乐彩 / 快乐8 的票面是 `{"号码": {区名: [...]}}`；
+    #   数字型（排列3 / 福彩3D / 排列5 / 七星彩）要求**直接**给 `{区名: [...]}` ——
+    #   多包一层 "号码" 会被 `normalize_ticket` 当成「一个取值」去 `int()`，
+    #   于是抛 `int() argument must be ... not 'dict'`，整个建议退化成一句错误。
+    ticket = {"号码": zones} if lottery_name in ("七乐彩", "快乐8") else zones
+    r = payout_eff(lottery_name, ticket)
     if r.get("error"):
         logger.warning(f"{lottery_name} payout_eff 失败：{r['error']}")
         return None
