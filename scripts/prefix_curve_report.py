@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 from pathlib import Path
@@ -38,6 +39,25 @@ def _fmt(x) -> str:
     return str(x)
 
 
+def _fmt_ns(x, reason: str = "不可达") -> str:
+    """n* 是期数：∞ 必须写成人话，且写明是「空间为 0」还是「无信息」。"""
+    if x is None:
+        return "—（未锚定）"
+    if isinstance(x, float) and not math.isfinite(x):
+        return f"∞（{reason}）"
+    if isinstance(x, float):
+        return f"{x:,.0f}"
+    return str(x)
+
+
+def _ns_reason(cell: dict) -> str:
+    if cell.get("无信息"):
+        return "评估窗无信息"
+    if cell.get("空间上界") == 0:
+        return "理论空间为 0"
+    return "不可达"
+
+
 def render(result: dict, verdict: dict) -> str:
     pre = result["预注册"]
     L: list = []
@@ -45,7 +65,8 @@ def render(result: dict, verdict: dict) -> str:
     L.append("")
     L.append("## 预注册（跑数之前固定）")
     for k in ("版本", "锁定日", "性质", "口径", "主口径n", "前缀档", "门槛",
-              "基线臂", "族规模", "名义α", "探索窗比例", "判据", "停止规则", "确认力"):
+              "基线臂", "族规模", "名义α", "探索窗比例", "判据", "效应量锚定",
+              "停止规则", "确认力"):
         L.append(f"- **{k}**：{json.dumps(pre[k], ensure_ascii=False)}")
     L.append("")
     L.append("## 口径声明")
@@ -85,6 +106,24 @@ def render(result: dict, verdict: dict) -> str:
     L.append("")
     L.append(f"> {result['口径说明']['整批对照']}")
     L.append(f"> {result['口径说明']['机械上升提示']}")
+    # ★ 整批列的大额净收益常被单期浮动奖撑起；不披露就会被读成「策略赚钱」。
+    whole = [(arm, result["曲线"][sk][arm][str(result["K"])])
+             for arm in result["臂"]]
+    flips = [(arm, r) for arm, r in whole
+             if r.get("期数") and r["净收益"] * r["剔除最大一期后净收益"] < 0]
+    if flips:
+        L.append("")
+        L.append("> ⚠️ **整批对照列的净收益被单期最大实得翻转**："
+                 + "；".join(
+                     f"{arm} {r['净收益']:,.0f} 元 → 剔除最大一期后 "
+                     f"{r['剔除最大一期后净收益']:,.0f} 元"
+                     for arm, r in flips)
+                 + "。该列是「非实际购买」对照，浮动奖金额缺失另计，"
+                   "不得把单期大奖读成策略收益。")
+    else:
+        L.append("")
+        L.append("> 整批对照列未检出「单期最大实得翻转净收益符号」的情形"
+                 "（仅表示本次样本未见，不代表不存在）。")
     L.append("")
     L.append("## 理论上界（按门槛分列，解析值不具确认力）")
     L.append("")
@@ -105,14 +144,22 @@ def render(result: dict, verdict: dict) -> str:
         L.append(f"- 探索窗 {verdict['探索窗期数']} 期 / 评估窗 {verdict['评估窗期数']} 期；"
                  f"BH 族规模 {verdict['族规模']}，α={verdict['名义α']}，"
                  f"检出 {verdict['检出数']} 格")
+        others = len(result["seeds"]) - 1
+        tail = (f"其余 {others} 个 seed 只用于稳定性描述，"
+                if others else "本批仅 1 个 seed，跨 seed 稳定性显式标「未测」，")
+        L.append(f"- **判决 seed = {result['seeds'][0]}**（预注册指定）；{tail}"
+                 "不进 BH、不另作一次判决——不许把「未纳入检验」读成「未检出即通过」。")
         L.append("")
-        L.append("| n | 门槛 | 臂 | 实测Δ | z | p | p_BH | 可判性 | 单期占Δ比 | 判决 |")
-        L.append("|---|---|---|---|---|---|---|---|---|---|")
+        L.append("| n | 门槛 | 臂 | 实测Δ | z | p | p_BH | 空间上界 | n*实测 | n*上界锚定 | n*保守 | 可判性 | 单期占Δ比 | 判决 |")
+        L.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
         for c in verdict["格"]:
             row = c["配对"]
+            why = _ns_reason(c)
             L.append(f"| {c['n']} | {c['门槛']} | {c['臂']} | "
                      f"{_fmt(row.get('实测Δ'))} | {_fmt(row.get('z_实测'))} | "
                      f"{_fmt(c['p'])} | {_fmt(c['p_BH'])} | "
+                     f"{_fmt(c['空间上界'])} | {_fmt_ns(c['n*_实测效应'])} | "
+                     f"{_fmt_ns(c['n*_上界锚定'], why)} | {_fmt_ns(c['n*_保守'], why)} | "
                      f"{row.get('判决', '—')} | "
                      f"{_fmt(c['集中度']['单期占Δ比'])} | {c['判决']} |")
         L.append("")
@@ -121,17 +168,61 @@ def render(result: dict, verdict: dict) -> str:
         L.append(f"> 功效限制：评估窗仅 {verdict['评估窗期数']} 期，绝大多数格的 "
                  "`n*_保守` 远大于可用期数 ⇒ 「未检出」包含「功效不足以识别」，"
                  "不等于「已测出无差异」。窄门槛在短窗里零命中是预期，不是异常。")
+        L.append(f"> 理论不可判 {verdict['理论不可判档数']} 格"
+                 f"（空间上界为 0 ⇒ n*=∞）；未锚定 {verdict['未锚定档数']} 格。")
+        L.append("> `∞（评估窗无信息）` = 评估窗两臂逐期全同（通常是窄门槛零命中）；"
+                 "`pair()` 的零方差分支原本会给 `n*=1`，本层已归一为 ∞ —— "
+                 "不许把「没测出差异」读成「一期就够」。")
     L.append("")
-    L.append("## 稳定性（跨 seed 全距，描述性、不进 BH）")
+    L.append("## 影子验证所需期数（按解析上界锚定）")
     L.append("")
-    L.append("| 臂/n | 状态 | ≥5元期率全距 | ≥四等期率全距 | 说明 |")
-    L.append("|---|---|---|---|---|")
+    if verdict.get("降级"):
+        L.append("- 降级，未计算；不许把「没算」写成「不需要」。")
+    else:
+        main_n = result["预注册"]["主口径n"]
+        avail = verdict["评估窗期数"]
+        rows = [c for c in verdict["格"] if c["n"] == main_n]
+        L.append(f"- 主口径 n={main_n}，评估窗可用 {avail} 期；`n*_保守` = "
+                 "max(实测 Δ 反推, 解析上界锚定)，取大者为准。")
+        L.append("")
+        L.append("| 门槛 | 臂 | 空间上界 | n*（实测） | n*（上界锚定） | n*保守 | 相对可用期数 |")
+        L.append("|---|---|---|---|---|---|---|")
+        for c in rows:
+            ns = c["n*_保守"]
+            why = _ns_reason(c)
+            ratio = ("∞" if not isinstance(ns, float) or not math.isfinite(ns)
+                     else f"{ns / avail:,.1f}×")
+            L.append(f"| {c['门槛']} | {c['臂']} | {_fmt(c['空间上界'])} | "
+                     f"{_fmt_ns(c['n*_实测效应'])} | {_fmt_ns(c['n*_上界锚定'], why)} | "
+                     f"{_fmt_ns(ns, why)} | {ratio} |")
+        L.append("")
+        L.append("- n=1 的可争取空间恒为 0 ⇒ 这一档无论攒多少期都不能判；"
+                 "窄门槛（≥四等）的 n* 通常远超可用期数。")
+        L.append("- 影子验证应先攒够 `n*_保守` 期再开判；只用实测 Δ 反推会偏乐观，"
+                 "搜索批读数还会被抬高，故须另取独立评估批、只追加不回改历史。")
+        L.append("- 接线状态：本轮为**历史回放**，未接生产出号冻结、未接未来开奖追加；"
+                 "影子台账无真实未来期记录（缺席≠通过，不许拿历史窗冒充确认力）。")
+    L.append("")
+    L.append("## 稳定性（跨 seed + 时间窗，均为描述性、不进 BH）")
+    L.append("")
+    L.append("| 臂/n | 跨seed状态 | ≥5元全距 | ≥四等全距 | 窗口状态 | ≥5元前后半差 | ≥四等前后半差 | 说明 |")
+    L.append("|---|---|---|---|---|---|---|---|")
     for k, v in result["稳定性"].items():
-        if v.get("状态") != "已测":
-            L.append(f"| {k} | {v.get('状态', '—')} | — | — | {v.get('原因', '')} |")
-        else:
-            L.append(f"| {k} | 已测 | {v['≥5元期率_跨seed全距']:.4f} | "
-                     f"{v['≥四等期率_跨seed全距']:.4f} | seeds={v['seeds']} |")
+        measured = v.get("状态") == "已测"
+        w = v.get("窗口状态", "—")
+        d5 = v.get("≥5元期率_评估窗前后半差_跨seed最大")
+        dt = v.get("≥四等期率_评估窗前后半差_跨seed最大")
+        note = f"seeds={v['seeds']}" if measured else v.get("原因", "")
+        if not str(w).startswith("已测"):
+            note = "；".join(x for x in (note, v.get("窗口原因", "")) if x)
+        L.append(f"| {k} | {v.get('状态', '—')} | "
+                 f"{_fmt(v.get('≥5元期率_跨seed全距')) if measured else '—'} | "
+                 f"{_fmt(v.get('≥四等期率_跨seed全距')) if measured else '—'} | "
+                 f"{w} | {_fmt(d5) if d5 is not None else '—'} | "
+                 f"{_fmt(dt) if dt is not None else '—'} | {note} |")
+    L.append("")
+    L.append("> 前后半差 = 评估窗对半后两段的期率差，逐 seed 取最大绝对值；"
+             "这是**口径稳定性诊断**，不是显著性检验，也不构成「策略稳定」的结论。")
     L.append("")
     L.append(f"冻结快照 {len(result['冻结快照'])} 份（版本 {result['预注册']['版本']}）。")
     return "\n".join(L)

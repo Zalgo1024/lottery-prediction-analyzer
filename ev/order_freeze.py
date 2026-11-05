@@ -56,14 +56,23 @@ def digest(obj: Any) -> str:
 
 def strategy_hash(*, lottery: str, issue: Any, strategy_version: str,
                   seed: int, K: int, rule_version: Any,
-                  code_version: str, target: Any = None) -> str:
-    """所有会影响排序的输入一起进哈希；换任一项都必须换文件名。"""
-    return digest({
+                  code_version: str, target: Any = None,
+                  experiment: Any = None) -> str:
+    """所有会影响排序的输入一起进哈希；换任一项都必须换文件名。
+
+    ★ `experiment`（块编号 / 池种子 / 池规模 / 重叠上限等）只在非 None 时入哈希：
+      早期快照没有这个字段，默认路径的哈希必须与历史**完全一致**，
+      否则旧证据会被判校验失败。新回放必须显式传，避免不同块撞同一个键。
+    """
+    payload: Dict[str, Any] = {
         "彩种": str(lottery), "期号": str(issue),
         "策略版本": str(strategy_version), "随机种子": int(seed),
         "K": int(K), "规则版本": str(rule_version),
         "代码版本": str(code_version), "目标": target,
-    })
+    }
+    if experiment is not None:
+        payload["实验参数"] = experiment
+    return digest(payload)
 
 
 def build_snapshot(*, lottery: str, issue: Any,
@@ -72,7 +81,8 @@ def build_snapshot(*, lottery: str, issue: Any,
                    rule_version: Any, code_version: str,
                    batch_time: str, target: Any = None,
                    time_nature: str = "回放模拟（非生产批次时间）",
-                   extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                   extra: Optional[Dict[str, Any]] = None,
+                   experiment: Any = None) -> Dict[str, Any]:
     """冻结一份完整票序。★ 不读系统时间，`batch_time` 由调用方给。"""
     tks = copy.deepcopy(list(tickets))
     K = int(K)
@@ -101,8 +111,11 @@ def build_snapshot(*, lottery: str, issue: Any,
     snap["策略哈希"] = strategy_hash(
         lottery=lottery, issue=issue, strategy_version=strategy_version,
         seed=seed, K=K, rule_version=rule_version,
-        code_version=code_version, target=target)
+        code_version=code_version, target=target, experiment=experiment)
     snap["票序哈希"] = digest(tks)
+    if experiment is not None:
+        # 进哈希的字段必须同时留在快照里，否则 verify 无法复算（缺席≠通过）。
+        snap["实验参数"] = copy.deepcopy(experiment)
     if extra:
         snap["备注"] = dict(extra)
     return snap
@@ -135,7 +148,8 @@ def verify_snapshot(snap: Dict[str, Any],
         lottery=snap["彩种"], issue=snap["期号"],
         strategy_version=snap["策略版本"], seed=snap["随机种子"],
         K=snap["K"], rule_version=snap["规则版本"],
-        code_version=snap["代码版本"], target=snap.get("目标"))
+        code_version=snap["代码版本"], target=snap.get("目标"),
+        experiment=snap.get("实验参数"))   # 旧快照缺字段 ⇒ None ⇒ 哈希与历史一致
     if got != snap["策略哈希"]:
         raise OrderFreezeError("策略哈希不符：版本 / 种子 / 目标被事后改动")
     return {"ok": True, "版本": snap["版本"], "注数": len(tks),

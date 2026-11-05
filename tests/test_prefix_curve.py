@@ -70,11 +70,13 @@ def test_prereg_constants_are_frozen():
     assert pre["名义α"] == 0.05
     assert pre["探索窗比例"] == 0.6
     assert pre["基线臂"] == "random"
-    assert pre["版本"] == PC.PREREG_VERSION == "2026-11-05-A"
+    assert pre["版本"] == PC.PREREG_VERSION == "2026-11-05-B"
+    assert "theoretical_head" in pre["效应量锚定"]
 
 
 def test_theoretical_head():
     assert PC.theoretical_head(0.01, 1) == 0.0, "K=1 时空间严格为 0"
+    assert PC.theoretical_head(0.06, 1) == 0.0, "浮点残差 ~1e-17 也必须归零"
     assert PC.theoretical_head(0.01, 0) == 0.0
     h3 = PC.theoretical_head(0.01, 3)
     h10 = PC.theoretical_head(0.01, 10)
@@ -97,10 +99,30 @@ def test_replay_denominator_and_counterfactual_notes(replayed):
 def test_all_prefixes_share_one_frozen_order(replayed):
     """2 块 × 3 臂 × 1 seed = 6 份快照；若每个 n 重选应是 30 份。"""
     assert len(replayed["冻结快照"]) == 6
+    hashes = set()
     for p in replayed["冻结快照"]:
         snap = OF.load_snapshot(Path(p))
         assert len(snap["票序"]) == 12
         assert OF.prefix_of(snap, 3) == snap["票序"][:3]
+        assert "块" in snap.get("实验参数", {}), "块编号必须进哈希字段"
+        hashes.add(snap["策略哈希"])
+    assert len(hashes) == 6, "同 seed 不同块 / 不同臂不许撞同一个快照键"
+    # ★ 向后兼容：早期快照没有「实验参数」，哈希口径不变、仍能校验通过。
+    import copy
+    base = dict(lottery="双色球", issue="26007", strategy_version="random/A",
+                seed=0, K=100, rule_version="2026", code_version="B")
+    assert OF.strategy_hash(**base) == OF.strategy_hash(
+        **base, experiment=None)
+    assert OF.strategy_hash(**base, experiment={"块": 0}) != OF.strategy_hash(
+        **base, experiment={"块": 8})
+    old = copy.deepcopy(OF.load_snapshot(Path(replayed["冻结快照"][0])))
+    old.pop("实验参数", None)
+    old["策略哈希"] = OF.strategy_hash(
+        lottery=old["彩种"], issue=old["期号"],
+        strategy_version=old["策略版本"], seed=old["随机种子"],
+        K=old["K"], rule_version=old["规则版本"],
+        code_version=old["代码版本"], target=old.get("目标"))
+    assert OF.verify_snapshot(old)["ok"] is True
 
 
 def test_cost_is_actual_prefix_stake_and_whole_batch_is_control(replayed):
@@ -149,7 +171,7 @@ def test_verdict_family_size_is_declared_before_bh(replayed, monkeypatch):
 
 def test_shadow_is_append_only(tmp_path):
     p = tmp_path / "shadow.jsonl"
-    rec = {"期号": "26127", "冻结版本": "2026-11-05-A",
+    rec = {"期号": "26127", "冻结版本": PC.PREREG_VERSION,
            "策略哈希": "abc", "n": 3, "读数": 1}
     assert PC.append_shadow(rec, path=p) is True
     assert PC.append_shadow(dict(rec, 读数=999), path=p) is False
@@ -196,3 +218,104 @@ def test_report_header_echoes_prereg_and_notes(replayed):
     for key in ("预注册", "反事实", "非实际购买", "分母", "主口径n",
                 "整批对照", "评估窗", "结论"):
         assert key in text, f"报告首部漏了 {key}"
+
+
+def test_verdict_nstar_is_anchored_to_analytic_bound(replayed):
+    """★ 只用实测 Δ 反推 n* 会被单期噪声与搜索批抬高，必须接解析上界。"""
+    v = PC.verdict_curve(replayed)
+    assert v["未锚定档数"] == 0
+    assert "theoretical_head" in v["效应量锚定说明"]
+    n1 = [c for c in v["格"] if c["n"] == 1]
+    assert len(n1) == 4, "n=1 × 2 门槛 × 2 臂对"
+    for c in n1:
+        assert c["空间上界"] == 0.0
+        assert c["锚定状态"] == "已锚定"
+        assert c["配对"]["外部效应量"] == 0.0
+        assert c["n*_上界锚定"] == float("inf")
+        assert c["n*_保守"] == float("inf")
+        assert c["配对"]["判决"] == "不可判"
+        assert c["判决"] == "未检出"
+    assert v["理论不可判档数"] == 4
+    # fixture 两臂逐期全同 ⇒ 零方差；不许把「无信息」写成 n*=1（一期就够）。
+    assert all(c["无信息"] for c in v["格"])
+    assert all(c["n*_上界锚定"] == float("inf") for c in v["格"])
+    first_arm = v["格"][0]["臂"]
+    n3 = {c["门槛"]: c for c in v["格"]
+          if c["n"] == 3 and c["臂"] == first_arm}
+    assert n3["≥5元"]["空间上界"] > n3["≥四等"]["空间上界"] > 0
+    assert n3["≥5元"]["配对"]["效应量口径"] == "解析上界/实测保守取大"
+
+
+def test_k_must_not_collide_with_prefix_ks():
+    """K 落在档表内会让同一档既是主口径又是整批对照，标记失去意义。"""
+    with pytest.raises(ValueError, match="落在前缀档"):
+        PC.run_prefix_curve("双色球", K=10, prefix_ks=(1, 3, 5, 10),
+                            periods=1, seeds=(0,), pool_size=10)
+    with pytest.raises(ValueError, match="小于最大前缀档"):
+        PC.run_prefix_curve("双色球", K=2, prefix_ks=(1, 3, 5, 10),
+                            periods=1, seeds=(0,), pool_size=10)
+
+
+def test_report_displays_shadow_horizon(replayed):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "prefix_curve_report_horizon", ROOT / "scripts" / "prefix_curve_report.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    text = mod.render(replayed, PC.verdict_curve(replayed))
+    for key in ("影子验证所需期数", "n*（上界锚定）", "n*保守",
+                "效应量锚定", "理论不可判", "只追加不回改历史", "时间窗",
+                "∞（评估窗无信息）", "零方差"):
+        assert key in text, f"报告漏了 {key}"
+    # 整批列被单期大奖翻转净收益符号时，报告必须点名，不许只贴大额正数。
+    import copy
+    res = copy.deepcopy(replayed)
+    r = res["曲线"][str(res["seeds"][0])]["random"][str(res["K"])]
+    r["净收益"], r["剔除最大一期后净收益"] = 357296.0, -55060.0
+    t2 = mod.render(res, PC.verdict_curve(res))
+    assert "被单期最大实得翻转" in t2 and "357,296" in t2
+    assert "不得把单期大奖读成策略收益" in t2
+    _assert_multiseed_report_discloses(replayed)
+
+
+def test_window_split_is_single_source_with_guard():
+    w = PC.window_split(20)
+    assert (w["探索窗期数"], w["评估窗期数"], w["前半"], w["后半"]) == (12, 8, 4, 4)
+    assert w["可测"] is True
+    assert PC.window_split(6)["可测"] is False
+    assert PC.window_split(20, ratio=0.5)["探索窗期数"] == 10
+
+
+def test_stability_covers_window_even_with_one_seed(replayed):
+    """时间窗与跨 seed 是两个独立维度；单 seed 时窗口仍可测，不许一起写成未测。"""
+    v = replayed["稳定性"]["random/n3"]
+    assert v["状态"].startswith("未测")
+    assert v["窗口状态"].startswith("已测")
+    assert v["≥5元期率_评估窗前后半差_跨seed最大"] >= 0
+    assert "≥四等期率_评估窗前后半差_跨seed最大" in v
+    assert "≥5元期率_跨seed全距" not in v
+
+
+def _assert_multiseed_report_discloses(replayed):
+    """多 seed 下 BH 仍只做一次；报告必须点明其余 seed 未纳入检验。"""
+    import copy
+    import importlib.util
+    res = copy.deepcopy(replayed)
+    res["seeds"] = [0, 1]
+    res["预注册"]["seeds"] = [0, 1]
+    res["曲线"]["1"] = copy.deepcopy(res["曲线"]["0"])
+    res["逐期"]["1"] = copy.deepcopy(res["逐期"]["0"])
+    for v in res["稳定性"].values():
+        v["状态"] = "已测"
+        v["≥5元期率_跨seed全距"] = 0.1
+        v["≥四等期率_跨seed全距"] = 0.0
+    verdict = PC.verdict_curve(res)
+    assert verdict["族规模"] == 16, "族规模不含 seed 维，不许随 seed 数扩容"
+    spec = importlib.util.spec_from_file_location(
+        "prefix_curve_report_multiseed", ROOT / "scripts" / "prefix_curve_report.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    text = mod.render(res, verdict)
+    assert "判决 seed = 0" in text
+    assert "其余 1 个 seed 只用于稳定性描述" in text
+    assert "不进 BH" in text

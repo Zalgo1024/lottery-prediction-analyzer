@@ -25,7 +25,9 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from ev.order_freeze import ORDER_FREEZE_VERSION
 
-PREREG_VERSION = "2026-11-05-A"
+#: B：判决层的 n* 增补解析上界锚定（原 A 只用实测 Δ 反推，偏乐观）；
+#:    并禁止 K 落在前缀档表内。判据变更 ⇒ 版本 bump，旧快照不回改、不重排。
+PREREG_VERSION = "2026-11-05-B"
 CODE_VERSION = PREREG_VERSION
 
 #: ★ 主口径：用户授权的假设值。改它必须同时 bump `PREREG_VERSION` 并全量重跑。
@@ -57,7 +59,11 @@ PREREGISTRATION: Dict[str, Any] = {
                "检验数": len(PREFIX_KS) * 2 * (len(ARMS) - 1)},
     "名义α": 0.05,
     "探索窗比例": 0.6,
-    "判据": "评估窗（后 40%）逐期配对差 → BH(m=族规模) → 且可判性为「可判」才写「检出」",
+    "判据": ("评估窗（后 40%）逐期配对差 → BH(m=族规模) → 且可判性为「可判」才写「检出」；"
+             "n* 用解析上界与实测 Δ 保守取大"),
+    "效应量锚定": ("外部效应量 = theoretical_head(p_门槛, n)，即该档可争取空间的解析上界；"
+                   "n=1 时恒为 0 ⇒ n*=∞ ⇒ 该档不可判。只用实测 Δ 反推 n* 会被单期噪声"
+                   "与搜索批抬高，属偏乐观口径。两个门槛的 p 分开取，不共用。"),
     "停止规则": "未来开奖只追加、不回改历史；探索窗读数只作描述，不进 BH",
     "确认力": ("登记时尚未产生任何前缀回放读数；Step 0 的解析上界只作上界与诊断，"
                "不具确认力。历史窗一律挂探索性标签。"),
@@ -84,11 +90,28 @@ def theoretical_head(p: float, n: int) -> float:
     n=1 时恒为 0；小 n 时是 `O((n·p)²)` 的二阶小量。★ 这是上界，不是实测收益。
     """
     n = int(n)
-    if n <= 0:
+    # ★ n=1 时 min(1,p) − (1−(1−p)) 在浮点下会残留 ~1e-17，不是严格 0。
+    #   但这一档的空间在数学上恒为 0；留着残差会让 n* 误得有限值、「理论不可判」漏计。
+    if n <= 0 or n == 1:
         return 0.0
     p = float(p)
     iid = 1.0 - (1.0 - p) ** n
     return max(0.0, min(1.0, n * p) - iid)
+
+
+def window_split(n_periods: int, *, ratio: Optional[float] = None) -> Dict[str, Any]:
+    """评估窗切分的**单一真源**：判决层与稳定性层都走这里，不许两处各算一次。
+
+    探索窗 = 前 60%（只描述、不进 BH）；评估窗对半切作时间窗稳定性（描述性）。
+    ★ 前后半各需 ≥3 期，不足时显式标「未测」——写 0 等于把没测写成稳定。
+    """
+    r = float(PREREGISTRATION["探索窗比例"] if ratio is None else ratio)
+    cut = int(n_periods * r)
+    eval_len = int(n_periods) - cut
+    half = eval_len // 2
+    return {"探索窗期数": cut, "评估窗期数": eval_len,
+            "前半": half, "后半": eval_len - half,
+            "可测": bool(half >= 3 and eval_len - half >= 3)}
 
 
 def _bounds(p: float, n: int) -> Dict[str, float]:
@@ -150,6 +173,10 @@ def run_prefix_curve(lottery: str, *, K: int,
     ks = tuple(int(x) for x in (prefix_ks if prefix_ks is not None else PREFIX_KS))
     if K < max(ks):
         raise ValueError(f"K={K} 小于最大前缀档 {max(ks)}：前缀必须落在整批之内")
+    if K in ks:
+        raise ValueError(
+            f"K={K} 落在前缀档 {ks} 内：该档会同时被当作主口径与整批对照，"
+            "「非实际购买」标记失去意义；请换一个不在档表内的 K")
     all_ks = tuple(dict.fromkeys(list(ks) + [K]))
     arms = tuple(arms)
     seeds = tuple(int(s) for s in seeds)
@@ -194,14 +221,20 @@ def run_prefix_curve(lottery: str, *, K: int,
                 if len(tks) != K:
                     raise ValueError(
                         f"臂 {arm} 选出 {len(tks)} 注 != K={K}；同预算口径被污染")
+                # ★ 块编号 / 池种子 / 选号种子都影响票序，必须进策略哈希：
+                #   曾出现「360 期第 8 块」与「120 期第 0 块」起始期号相同、
+                #   seed/K/策略全同却票序不同，撞同一个快照键被拒。
+                exp = {"块": blk, "重选间隔": int(reselect_every),
+                       "候选池规模": int(pool_size), "重叠上限": cap,
+                       "池种子": s * 100003 + blk,
+                       "选号种子": s * 1009 + blk}
                 snap = build_snapshot(
                     lottery=lottery, issue=chunk[0].期号, tickets=tks,
                     strategy_version=f"{arm}/{ORDER_FREEZE_VERSION}",
                     seed=s, K=K, rule_version=rule_version,
                     code_version=CODE_VERSION, batch_time=batch_time,
-                    target=target,
-                    extra={"块": blk, "重选间隔": int(reselect_every),
-                           "候选池规模": int(pool_size), "重叠上限": cap})
+                    target=target, experiment=exp,
+                    extra=dict(exp, K=K))
                 snapshots.append(str(save_snapshot(snap, directory=snapshot_dir)))
                 for n in all_ks:
                     pref = prefix_of(snap, n)          # ★ 纯切片，绝不重排
@@ -225,27 +258,46 @@ def run_prefix_curve(lottery: str, *, K: int,
                 curves[sk][arm][str(n)] = _summarize(
                     series[sk][arm][str(n)], n, K, p5, p_tier)
 
-    # 稳定性：跨 seed 全距（描述性，不进 BH）。
-    # ★ 缺席≠通过：只有一个 seed 时不能写「全距 0」——那是「未测」，不是「稳定」。
+    # 稳定性：跨 seed 全距 + 评估窗前后半差（**均为描述性，不进 BH**）。
+    # ★ 缺席≠通过：单 seed 不能写「全距 0」；窗口不足 6 期不能写「差 0」。
+    w = window_split(len(recs))
+    cut, eval_len, half = w["探索窗期数"], w["评估窗期数"], w["前半"]
     stability: Dict[str, Any] = {}
     for arm in arms:
         for n in all_ks:
             key = f"{arm}/n{n}"
+            item: Dict[str, Any] = {"seeds": list(seeds)}
             if len(seeds) < 2:
-                stability[key] = {
-                    "状态": "未测（仅 1 个 seed）",
-                    "原因": "跨 seed 全距需要 ≥2 个独立种子；单 seed 下 0 只表示没测，不表示稳定",
-                    "seeds": list(seeds),
-                }
-                continue
-            vals = [curves[str(s)][arm][str(n)]["≥5元期率"] for s in seeds]
-            tiers = [curves[str(s)][arm][str(n)]["≥四等期率"] for s in seeds]
-            stability[key] = {
-                "状态": "已测",
-                "≥5元期率_跨seed全距": round(max(vals) - min(vals), 6),
-                "≥四等期率_跨seed全距": round(max(tiers) - min(tiers), 6),
-                "seeds": list(seeds),
-            }
+                item["状态"] = "未测（仅 1 个 seed）"
+                item["原因"] = ("跨 seed 全距需要 ≥2 个独立种子；"
+                                "单 seed 下 0 只表示没测，不表示稳定")
+            else:
+                vals = [curves[str(s)][arm][str(n)]["≥5元期率"] for s in seeds]
+                tiers = [curves[str(s)][arm][str(n)]["≥四等期率"] for s in seeds]
+                item["状态"] = "已测"
+                item["≥5元期率_跨seed全距"] = round(max(vals) - min(vals), 6)
+                item["≥四等期率_跨seed全距"] = round(max(tiers) - min(tiers), 6)
+            # 时间窗维度：评估窗对半，逐 seed 算 |前半 − 后半| 后取最大。
+            if not w["可测"]:
+                item["窗口状态"] = "未测（评估窗不足 6 期）"
+                item["窗口原因"] = ("前后半各需 ≥3 期；不足时写 0 "
+                                    "等于把没测写成稳定")
+            else:
+                d5: List[float] = []
+                dt: List[float] = []
+                for s in seeds:
+                    row = series[str(s)][arm][str(n)]
+                    g5, gt = row["≥5元"], row["达标"]
+                    d5.append(abs(sum(g5[cut:cut + half]) / half
+                                  - sum(g5[cut + half:]) / (eval_len - half)))
+                    dt.append(abs(sum(gt[cut:cut + half]) / half
+                                  - sum(gt[cut + half:]) / (eval_len - half)))
+                item["窗口状态"] = "已测（描述性，不进 BH）"
+                item["≥5元期率_评估窗前后半差_跨seed最大"] = round(max(d5), 6)
+                item["≥四等期率_评估窗前后半差_跨seed最大"] = round(max(dt), 6)
+                item["窗口"] = {"探索窗期数": cut, "评估窗期数": eval_len,
+                                "前半": half, "后半": eval_len - half}
+            stability[key] = item
 
     n_periods = len(recs)
     return {
@@ -292,7 +344,7 @@ def verdict_curve(result: Dict[str, Any], *, seed: Optional[int] = None,
     a = float(pre["名义α"] if alpha is None else alpha)
     sk = str(pre["seeds"][0] if seed is None else seed)
     issues = result["期号表"]
-    cut = int(len(issues) * float(pre["探索窗比例"]))
+    cut = window_split(len(issues), ratio=pre["探索窗比例"])["探索窗期数"]
     eval_issues = issues[cut:]
     if len(eval_issues) < 3:
         return {"降级": "评估窗不足 3 期", "判决": "无数据",
@@ -300,18 +352,42 @@ def verdict_curve(result: Dict[str, Any], *, seed: Optional[int] = None,
     seqs = result["逐期"][sk]
     baseline = pre["基线臂"]
     others = [x for x in result["臂"] if x != baseline]
+    # ★ 解析上界按门槛分列。缺 p 时显式标「未锚定」，不许静默退回只用实测 Δ。
+    ps = result.get("单注p") or {}
+    p_for = {"≥5元": ps.get("≥5元"),
+             "≥四等": ps.get("≥四等", result.get("单注达标概率"))}
     cells: List[Dict[str, Any]] = []
     pvals: List[float] = []
     for n in pre["前缀档"]:
         for key, label in METRICS:
+            p = p_for.get(label)
+            head = theoretical_head(p, n) if p is not None else None
             for arm in others:
                 av = np.asarray(seqs[arm][str(n)][key][cut:], dtype=float)
                 bv = np.asarray(seqs[baseline][str(n)][key][cut:], dtype=float)
                 row = pair(av, bv, issues_a=eval_issues, issues_b=eval_issues,
-                           metric="binary", name_a=arm, name_b=baseline)
+                           metric="binary", name_a=arm, name_b=baseline,
+                           effect=head,
+                           effect_source=("解析上界/实测保守取大" if head is not None
+                                          else "未锚定（缺单注 p）"))
                 achievable(row, len(eval_issues))
-                cells.append({"n": n, "门槛": label, "臂": arm, "配对": row,
-                              "p": z_to_p_two_sided(row["z_实测"])})
+                # ★ pair() 在 sd=0 时对任何非零 effect 都返回 n*=1（「零方差⇒一期够」）。
+                #   但「两臂逐期全同且全 0」是**无信息**，不是「效应可测」：窄门槛短窗
+                #   零命中时给 n*=1 会把没测读成「一期就能判」。此处显式归一为 ∞。
+                no_info = (float(row["配对差SD"]) == 0.0
+                           and abs(float(row["实测Δ"])) <= 1e-15)
+                n_ext = float("inf") if no_info else row.get("n*_外部效应")
+                cells.append({
+                    "n": n, "门槛": label, "臂": arm, "配对": row,
+                    "p": z_to_p_two_sided(row["z_实测"]),
+                    "空间上界": head,
+                    "n*_实测效应": row["n*_实测效应"],
+                    "n*_上界锚定": n_ext,
+                    "n*_保守": row["n*_保守"],
+                    "无信息": bool(no_info),
+                    "锚定状态": ("已锚定" if head is not None
+                                 else "未锚定（缺单注 p；缺席≠通过）"),
+                })
                 pvals.append(cells[-1]["p"])
     declared = int(pre["族规模"]["检验数"])
     if len(pvals) != declared:
@@ -341,6 +417,10 @@ def verdict_curve(result: Dict[str, Any], *, seed: Optional[int] = None,
         "探索窗期数": cut, "评估窗期数": len(eval_issues),
         "族规模": declared, "名义α": a, "BH": adj,
         "格": cells,
+        "理论不可判档数": sum(c["空间上界"] == 0 for c in cells
+                              if c["空间上界"] is not None),
+        "未锚定档数": sum(c["锚定状态"] != "已锚定" for c in cells),
+        "效应量锚定说明": pre["效应量锚定"],
         "检出数": sum(c["判决"] == "检出" for c in cells),
         "结论": ("未检出稳定差异；仅表示已测维度在该样本量下未见差异，不构成证明"
                  if not any(c["判决"] == "检出" for c in cells)
