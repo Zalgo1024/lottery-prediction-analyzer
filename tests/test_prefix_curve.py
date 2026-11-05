@@ -189,14 +189,15 @@ def test_offline_modules_not_imported_by_production():
         files = [base] if base.is_file() else list(base.rglob("*.py"))
         for f in files:
             text = f.read_text(encoding="utf-8", errors="replace")
-            for bad in ("ev.prefix_curve", "ev.order_freeze",
-                        "from ev import prefix_curve", "from ev import order_freeze"):
+            for bad in ("ev.prefix_curve", "ev.order_freeze", "ev.prefix_shadow",
+                        "from ev import prefix_curve", "from ev import order_freeze",
+                        "from ev import prefix_shadow"):
                 assert bad not in text, f"生产路径 {f.name} 引入了离线研究模块：{bad}"
 
 
 def test_no_forbidden_narrative_words_in_new_modules():
-    for name in ("ev/prefix_curve.py", "ev/order_freeze.py",
-                 "scripts/prefix_curve_report.py"):
+    for name in ("ev/prefix_curve.py", "ev/order_freeze.py", "ev/prefix_shadow.py",
+                 "scripts/prefix_curve_report.py", "scripts/prefix_shadow_report.py"):
         text = (ROOT / name).read_text(encoding="utf-8")
         for bad in FORBIDDEN:
             assert bad not in text, f"{name} 出现禁词 {bad}"

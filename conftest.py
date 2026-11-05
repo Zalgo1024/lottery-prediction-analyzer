@@ -65,6 +65,11 @@ _TARGETS = (
     ("ev.order_freeze", "SNAPSHOT_DIR", "order_freeze"),
     ("ev.prefix_curve", "SNAPSHOT_DIR", "order_freeze"),
     ("ev.prefix_curve", "SHADOW_PATH", "prefix_shadow.jsonl"),
+    # 影子验证接线层（2026-11-05，离线通道）。它在 import 时从上面两个模块
+    # 复制了路径常量，若不单独重定向，autouse 夹具改的是源模块的属性，
+    # 本模块仍读真实 logs/ ⇒ 用例会污染影子台账 / 冻结快照池。
+    ("ev.prefix_shadow", "SHADOW_PATH", "prefix_shadow.jsonl"),
+    ("ev.prefix_shadow", "FREEZE_DIR", "order_freeze"),
 )
 
 

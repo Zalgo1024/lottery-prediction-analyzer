@@ -429,11 +429,26 @@ def verdict_curve(result: Dict[str, Any], *, seed: Optional[int] = None,
     }
 
 
+def _shadow_key(record: Dict[str, Any]) -> tuple:
+    """影子台账去重键。
+
+    ★ 2026-11-05 扩展：加入 `阶段`（登记 / 结算）。方案骨架第 ④ 步要求
+      「开奖前登记冻结票序 → 开奖后只追加结算」，两态必须能共存于同一台账；
+      旧记录没有该字段 ⇒ 归一为空串，**旧口径去重行为完全不变**。
+    """
+    return (str(record.get("期号")), str(record.get("冻结版本")),
+            str(record.get("策略哈希")), str(record.get("n")),
+            str(record.get("阶段") or ""))
+
+
 def append_shadow(record: Dict[str, Any], *, path: Optional[Path] = None) -> bool:
-    """影子台账 append-only：同一键已存在就拒绝回改，返回是否新写入。"""
+    """影子台账 append-only：同一键已存在就拒绝回改，返回是否新写入。
+
+    离线研究通道是单进程、不接生产出号/结算，故不加跨进程锁；这与企微推送
+    那种「同进程多线程 + 多进程」的锁纪律不是同一场景。
+    """
     p = Path(path) if path is not None else SHADOW_PATH
-    key = (str(record.get("期号")), str(record.get("冻结版本")),
-           str(record.get("策略哈希")), str(record.get("n")))
+    key = _shadow_key(record)
     p.parent.mkdir(parents=True, exist_ok=True)
     if p.exists():
         for line in p.read_text(encoding="utf-8").splitlines():
@@ -443,8 +458,7 @@ def append_shadow(record: Dict[str, Any], *, path: Optional[Path] = None) -> boo
                 old = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if (str(old.get("期号")), str(old.get("冻结版本")),
-                str(old.get("策略哈希")), str(old.get("n"))) == key:
+            if _shadow_key(old) == key:
                 return False                 # ★ 只追加、不回改
     with p.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
