@@ -1143,6 +1143,45 @@ function tsCollectValues() {
 // 新号在展示/推送/命中历史里优先，但旧号若中奖也要照常入账。
 // 实现分工：后端 `/api/predict/regenerate` 给新批打「重出批号」，pending
 // 去重键含该维度 ⇒ 旧批不被覆盖；结算遍历全部 pending ⇒ 两批都入历史。
+//
+// ★★ 2026-11-05：新增「统一重新出号」后，把「发请求 → 轮询 → 结构化结果」抽成
+//   _tsRegenerateOne 单一真源，单彩种按钮与批量按钮共用。同一套轮询/超时/停发
+//   判据写两遍必漂移，而这类漂移往往「功能看着都对、只有对账时才发现」。
+// ★★ 批量按钮**串行**执行不是嫌并发慢：`ev/budget_gate.record_spend` 是
+//   「读盘 → 改 → 原子替换」，没有跨线程互斥。8 个后台线程同时记账会互相覆盖
+//   ⇒ 少记钱 ⇒ 闸门比配置更松且不报错。串行同时避开 8 个千注预测任务抢 CPU/内存。
+
+// 单个彩种的重出核心：不弹窗、不刷新页面，只返回结构化结果。
+// onProgress(text) 由调用方决定怎么显示（卡片按钮写 ts-msg，批量按钮带序号）。
+async function _tsRegenerateOne(lottery, onProgress) {
+    const meta = await api('/api/predict/regenerate', {
+        method: 'POST', body: JSON.stringify({ lottery })
+    });
+    if (meta && meta.ok === false) return { ok: false, reason: meta.error || '后端拒绝' };
+    const rn = meta['重出批号'];
+    const prevN = meta['上一批注数'] || 0;
+    if (onProgress) onProgress('第 ' + rn + ' 批已启动…');
+
+    const t0 = Date.now();
+    let result = null, err = null;
+    while (Date.now() - t0 < 300000) {
+        await new Promise(r => setTimeout(r, 1500));
+        let st;
+        try {
+            st = await api('/api/predict/status/' + encodeURIComponent(meta.task_id));
+        } catch (e) { err = String(e); break; }
+        if (st.status === 'done') { result = st.result || {}; break; }
+        if (st.status === 'error') { err = st.error || '未知错误'; break; }
+        if (onProgress) onProgress((st.progress != null ? st.progress + '% ' : '') + (st.message || ''));
+    }
+    if (err) return { ok: false, reason: err };
+    if (!result) return { ok: false, reason: '超时（号码可能已经生成，请到「命中历史 / 记录」页确认，不要反复点击）' };
+    if (result['停发']) return { ok: false, reason: '本期停发：' + (result['停发']['原因'] || '预算闸门') };
+    const n = (result.numbers || []).length;
+    if (!n) return { ok: false, reason: '未生成号码（目标期已开奖，或当前出号数量为 0）' };
+    return { ok: true, n: n, rn: rn, prevN: prevN };
+}
+
 async function tsRegenerate(lottery) {
     const ok = confirm(
         '为「' + lottery + '」重新出一批号？\n\n' +
@@ -1155,45 +1194,98 @@ async function tsRegenerate(lottery) {
     const oldTxt = btn ? btn.textContent : '';
     if (btn) { btn.disabled = true; btn.textContent = '出号中…'; }
     try {
-        const meta = await api('/api/predict/regenerate', {
-            method: 'POST', body: JSON.stringify({ lottery })
-        });
-        if (meta && meta.ok === false) { alert('重新出号失败：' + (meta.error || '')); return; }
-        tsMsg('正在为 ' + lottery + ' 重新出号（第 ' + meta['重出批号'] + ' 批）…');
-
-        const t0 = Date.now();
-        let result = null, err = null;
-        while (Date.now() - t0 < 300000) {
-            await new Promise(r => setTimeout(r, 1500));
-            let st;
-            try {
-                st = await api('/api/predict/status/' + encodeURIComponent(meta.task_id));
-            } catch (e) { err = String(e); break; }
-            if (st.status === 'done') { result = st.result || {}; break; }
-            if (st.status === 'error') { err = st.error || '未知错误'; break; }
-            tsMsg('正在为 ' + lottery + ' 重新出号… ' +
-                  (st.progress != null ? st.progress + '% ' : '') + (st.message || ''));
-        }
-        if (err) { alert('重新出号失败：' + err); return; }
-        if (!result) { alert('重新出号超时。号码可能已经生成，请到「命中历史 / 记录」页确认，不要反复点击。'); return; }
-
-        if (result['停发']) {
-            alert('本期停发，未出号：' + (result['停发']['原因'] || '预算闸门'));
-            return;
-        }
-        const n = (result.numbers || []).length;
-        if (!n) {
-            alert('没有生成任何号码。常见原因：目标期已开奖（马后炮出号会被拒绝），' +
-                  '或当前出号数量为 0。请先更新数据、确认期号后再试。');
-            return;
-        }
-        tsMsg('已为 ' + lottery + ' 出新号：' + n + ' 注（第 ' + meta['重出批号'] + ' 批）。' +
-              '旧批 ' + (meta['上一批注数'] || 0) + ' 注已保留，开奖后两批都会结算。');
+        const r = await _tsRegenerateOne(lottery,
+            p => tsMsg('正在为 ' + lottery + ' 重新出号… ' + p));
+        if (!r.ok) { alert('重新出号失败：' + r.reason); return; }
+        // 上一批注数必须出现在结果里：用户要能确认旧号还在（两批都会结算）。
+        tsMsg('已为 ' + lottery + ' 出新号：' + r.n + ' 注（第 ' + r.rn + ' 批）。' +
+              '旧批 ' + r.prevN + ' 注已保留，开奖后两批都会结算。');
         await tsLoad();          // 刷新「当前生效 / 下一期建议」
     } catch (e) {
         alert('重新出号失败：' + e);
     } finally {
         if (btn) { btn.disabled = false; btn.textContent = oldTxt; }
+    }
+}
+
+// 彩种清单只从**页面上真实渲染出来的卡片**取：所见即所得，且不另写一份手写数组。
+// （2026-11-05 刚踩过：看板某处手写半份清单，后端七乐彩/快乐8 明明在跑，卡片却静默消失。）
+function _tsRegenTargets() {
+    return Array.from(document.querySelectorAll('#ts-rows [data-regenerate]'))
+        .map(el => el.getAttribute('data-regenerate'))
+        .filter(Boolean);
+}
+
+// 汇总判据抽成纯函数，便于真跑对账：★ 不许用「有一个成功就算成功」。
+function _tsRegenSummary(results) {
+    // ★ 空结果必须显式写「未执行」：0 个成功 ≠ 全部成功（缺席 ≠ 通过）。
+    if (!results.length) {
+        return { head: '未执行：没有可判的彩种结果',
+                 text: '未执行：没有可判的彩种结果。请确认页面卡片已加载，且没有中途取消。',
+                 成功数: 0, 失败数: 0 };
+    }
+    const good = results.filter(r => r.ok);
+    const bad = results.filter(r => !r.ok);
+    let head;
+    if (!bad.length) head = '全部成功：' + good.length + '/' + results.length + ' 个彩种已出新号';
+    else if (!good.length) head = '全部失败：0/' + results.length + ' 个彩种出新号';
+    else head = '部分成功：' + good.length + '/' + results.length + ' 个成功、' + bad.length + ' 个未出号';
+    const lines = results.map(r => r.ok
+        ? '√ ' + r.lottery + '：' + r.n + ' 注（第 ' + r.rn + ' 批；旧批 ' + r.prevN + ' 注保留）'
+        : '× ' + r.lottery + '：未出号 —— ' + r.reason);
+    return { head: head, text: head + '\n\n' + lines.join('\n'),
+             成功数: good.length, 失败数: bad.length };
+}
+
+async function tsRegenerateAll() {
+    const lots = _tsRegenTargets();
+    if (!lots.length) { alert('没有可重新出号的彩种卡片，请刷新页面后重试。'); return; }
+
+    // 注数明细取接口读数，不从 DOM 猜；缺读数显式写「?」，绝不悄悄当 0。
+    const byLot = {};
+    ((_tsState && _tsState.lotteries) || []).forEach(it => { byLot[it.lottery] = it['当前生效']; });
+    const detail = lots.map(l => l + ' ' + (byLot[l] != null ? byLot[l] : '?') + ' 注').join('、');
+    const total = lots.reduce((s, l) => s + (Number(byLot[l]) || 0), 0);
+    const ok = confirm(
+        '为页面上全部 ' + lots.length + ' 个彩种各重新出一批号？\n\n' +
+        '· 注数取「出号数量」当前生效值：' + detail + '\n' +
+        '· 合计约 ' + total + ' 注，预算台账按批各记一笔\n' +
+        '· 旧号码不删除，开奖后新旧两批都照常结算\n' +
+        '· 逐个串行执行，某个彩种失败不中断其余彩种\n' +
+        '· 预算闸门照常生效（额度不足会「本期停发」）\n\n' +
+        '★ 这会真的产生新批次并占用预算，确认继续？');
+    if (!ok) return;
+
+    const btn = $('ts-regen-all-btn');
+    const oldTxt = btn ? btn.textContent : '';
+    const cardBtns = Array.from(document.querySelectorAll('#ts-rows [data-regenerate]'));
+    if (btn) { btn.disabled = true; btn.textContent = '统一出号中…'; }
+    cardBtns.forEach(b => { b.disabled = true; });   // 别与单彩种按钮并发
+    const results = [];
+    try {
+        for (let i = 0; i < lots.length; i++) {
+            const lot = lots[i];
+            const tag = '统一重新出号 ' + (i + 1) + '/' + lots.length + ' ' + lot;
+            tsMsg(tag + '：启动中…');
+            let r;
+            try {
+                r = await _tsRegenerateOne(lot, p => tsMsg(tag + '：' + p));
+            } catch (e) {
+                r = { ok: false, reason: String(e) };
+            }
+            results.push({ lottery: lot, ok: r.ok, n: r.n, rn: r.rn,
+                           prevN: r.prevN, reason: r.reason });
+            // ★ 单个失败继续下一个：语义是「每个都试一次」，不是「第一个失败就
+            //   整体放弃」——那样用户根本不知道后面几个到底跑没跑。
+        }
+        await tsLoad();   // 只整体刷新一次，别每个彩种都重绘
+        const sum = _tsRegenSummary(results);
+        alert(sum.text);
+        tsMsg(sum.head);
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = oldTxt; }
+        // tsLoad() 已重绘 #ts-rows，旧 cardBtns 多为游离节点；恢复只是兜底
+        cardBtns.forEach(b => { b.disabled = false; });
     }
 }
 

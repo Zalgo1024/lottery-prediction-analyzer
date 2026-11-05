@@ -70,6 +70,8 @@
     <button class="btn btn-primary btn-sm" onclick="tsSave()">保存</button>
     <button class="btn btn-warning btn-sm" id="ts-apply-btn" onclick="tsApplyDynamic()" title="动态模式：立刻按策略算一次并应用（不用等下一期开奖）">立即按策略调整</button>
     <button class="btn btn-sm" onclick="tsReset()">恢复默认</button>
+    <button class="btn btn-warning btn-sm" id="ts-regen-all-btn" onclick="tsRegenerateAll()"
+            title="对页面上全部彩种各重新出一批号（逐个串行执行）。旧批保留、开奖后两批都结算；注数取「出号数量」当前生效值，预算台账按批各记一笔。">统一重新出号</button>
     <span id="ts-msg" style="font-size:12px;color:var(--gray);align-self:center"></span>
   </div>
 </div>
