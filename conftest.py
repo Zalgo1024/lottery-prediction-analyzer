@@ -83,6 +83,9 @@ _TARGETS = (
     # 指到 tmp 后文件不存在 ⇒ 开关按「缺失=未启用」处理 ⇒ 默认零副作用。
     ("ev.shadow_bridge", "CONFIG_PATH", "prefix_shadow.json"),
     ("ev.shadow_bridge", "SCHEDULE_PATH", "draw_schedule.json"),
+    # 方案 B 的外部开奖证据（2026-11-06）。只追加不改写，但写脏了会让后续所有
+    # 期次的「下界交叉校验」读到测试数据 ⇒ 必须隔离。
+    ("ev.draw_evidence", "EVIDENCE_PATH", "draw_evidence.jsonl"),
 )
 
 

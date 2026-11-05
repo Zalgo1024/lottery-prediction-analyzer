@@ -33,6 +33,9 @@ RESEARCH_MODULES = (
     "ev.prefix_shadow",
     "ev.prefix_real",
     "ev.draw_schedule",
+    # 方案 B 证据层与结算编排（2026-11-06）：同样只准编排层碰。
+    "ev.draw_evidence",
+    "ev.shadow_settle",
 )
 
 # 编排层：只允许被两个出号入口调用

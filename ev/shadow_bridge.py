@@ -41,6 +41,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence
 
+from ev import draw_evidence as DE
 from ev import draw_schedule as DS
 from ev import order_freeze as OF
 from ev import prefix_shadow as PS
@@ -126,6 +127,7 @@ def freeze_after_predict(
         renumber: Any = 0,
         n: int = MAIN_N,
         schedule_path: Optional[Path] = None,
+        evidence_path: Optional[Path] = None,
         switch_path: Optional[Path] = None,
         snapshot_dir: Optional[Path] = None,
         shadow_path: Optional[Path] = None,
@@ -157,7 +159,19 @@ def freeze_after_predict(
             return dict(base, 状态=STATUS_NA,
                         原因="时刻表未覆盖全部彩种：" + json.dumps(
                             sched["未参与"], ensure_ascii=False))
-        draw_time = DS.build_draw_time(lottery, target_date, sched_doc)
+        declared_time = DS.build_draw_time(lottery, target_date, sched_doc)
+
+        # ---- 1b. 方案 B：外部证据只用来**交叉校验下界**，不取代它 ----
+        #   声明值（直播开始）是下界；证据的「首次可观测时刻」是上界。
+        #   若上界 < 声明值 ⇒ 声明值偏高、不再是下界 ⇒ 本期按保守处理，不具备资格。
+        ev_rows = DE.for_issue(lottery, issue, path=evidence_path)
+        bound = DE.derive_draw_lower_bound(declared_time, ev_rows)
+        if not bound["可用"]:
+            return dict(base, 状态=STATUS_FAIL,
+                        原因="开奖时刻下界不可用：" + "；".join(bound["原因"]),
+                        证据条数=len(ev_rows), 开奖时刻明细=bound["明细"],
+                        披露=bound["披露"])
+        draw_time = bound["下界"]
 
         # ---- 2. 时区口径 + 先后关系预检（早失败，给明确原因）----
         DS.check_time_basis(batch_time, register_time, draw_time)
@@ -194,7 +208,12 @@ def freeze_after_predict(
             experiment={"重出批号": _rn},
             extra={
                 "编排版本": BRIDGE_VERSION,
-                "开奖时刻口径": "开奖直播开始时刻（声明值），作为开奖事件时间上界",
+                "开奖时刻口径": "声明值 = 开奖直播开始时刻，作为开奖事件的**下界**"
+                                "（直播开始后才摇奖）；外部证据的「首次可观测时刻」是"
+                                "**上界**，只用于交叉校验下界，不单独当判据",
+                "开奖时刻下界": str(draw_time),
+                "外部证据条数": len(ev_rows),
+                "外部证据校验": "无矛盾" if not bound["矛盾"] else "声明值被证据否定",
                 "时刻表核验状态": sched["核验状态"],
                 "时刻表来源": sched["来源"],
                 "种子性质": "标识用（crc32(彩种|期号)）；主路径随机性来自系统微秒，"
