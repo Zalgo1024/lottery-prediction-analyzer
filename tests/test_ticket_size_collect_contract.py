@@ -227,6 +227,23 @@ def test_regenerate_all_button_is_next_to_reset(js: str):
     assert re.search(r"function\s+tsRegenerateAll\s*\(", js), "缺少 tsRegenerateAll 处理函数"
 
 
+def test_regenerate_all_button_is_blue():
+    """★ 2026-11-05 用户要求：「统一重新出号」按钮换成蓝色。
+
+    页面里 `btn-primary` 是青绿 #4ECDC4，只有 `btn-info`(--info #45B7D1) 是蓝色；
+    同时锁住 CSS 变量，避免日后改 :root 让「蓝色按钮」悄悄变绿/变黄。
+    """
+    html = DASHBOARD.read_text(encoding="utf-8")
+    m = re.search(r'<button\s+class="([^"]*)"\s+id="ts-regen-all-btn"', html)
+    assert m, "找不到统一重新出号按钮"
+    cls = m.group(1).split()
+    assert "btn-info" in cls, "统一重新出号按钮不是蓝色（缺 btn-info）"
+    assert "btn-warning" not in cls, "统一重新出号按钮仍是黄色 warning"
+    css = (ROOT / "web" / "static" / "css" / "style.css").read_text(encoding="utf-8")
+    assert re.search(r"--info:\s*#45B7D1", css), "蓝色变量被改，按钮不再是约定的蓝色"
+    assert re.search(r"\.btn-info\s*\{\s*background:\s*var\(--info\)", css), "btn-info 不再取蓝色变量"
+
+
 def test_regenerate_all_targets_come_from_rendered_cards(js: str):
     """批量清单必须从渲染出来的卡片反推，不许再手写一份（半份）彩种数组。
 
