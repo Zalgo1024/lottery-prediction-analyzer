@@ -60,6 +60,11 @@ _TARGETS = (
     # 影子对照台账（2026-10-31）。写脏了会让三臂汇总混入测试期的假读数，
     # 而「同预算对照」正是用来判「要不要加注」的依据 —— 污染它的代价最大。
     ("data.shadow", "SHADOW_DIR", "shadow"),
+    # 前缀口径研究（2026-11-05，离线通道）。冻结快照是「排序在开奖前已定」的
+    # 唯一证据，影子台账只追加不回改；用例写脏真实 logs/ 会污染这两份留痕。
+    ("ev.order_freeze", "SNAPSHOT_DIR", "order_freeze"),
+    ("ev.prefix_curve", "SNAPSHOT_DIR", "order_freeze"),
+    ("ev.prefix_curve", "SHADOW_PATH", "prefix_shadow.jsonl"),
 )
 
 

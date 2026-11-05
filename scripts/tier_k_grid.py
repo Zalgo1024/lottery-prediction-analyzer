@@ -167,8 +167,10 @@ def main() -> int:
 
     os.makedirs(OUT_DIR, exist_ok=True)
     # ★ 文件名必须带池口径：上一版只按彩种命名，2000 池那次的证据被 8000 池直接覆盖。
+    # ★ 2026-11-05 追加目标口径：前缀研究要同时看 ≥四等 / ≥六等，两个目标的
+    #   `可争取空间` 差几个数量级；不带目标就会让后跑的把前跑的证据覆盖掉。
     tag = (f"{args.pool_mode}{len(pool)}" + ("_relax" if args.relax else "")
-           + f"_cap{args.cap}")
+           + f"_cap{args.cap}" + f"_t{args.target_grade}")
     path = os.path.join(OUT_DIR, f"tier_k_grid_{lottery_global}_{tag}.json")
     with open(path, "w", encoding="utf-8") as f:
         json.dump({"彩种": lottery_global, "期号": issue, "目标": tgt,
