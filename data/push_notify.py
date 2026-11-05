@@ -139,6 +139,10 @@ DEFAULTS = {
     "看板地址": "",
     "组级互斥": True,              # 关掉即回滚到「无锁发送」（顺序可能错，但绝不丢消息）
     "组锁超时秒": 420.0,           # 拿不到锁就降级为无锁发送并告警
+    # 单次推送条数的**软预算**：超了只告警，绝不砍内容（注数必须全画）。
+    # 2026-11-05 起可配（手改 config/push_notify.json，load_config() 热读）；
+    # 默认值保持不变，看板保存设置时 sanitize() 会原样保留手改值。
+    "单次软预算条数": 12,
 }
 
 
@@ -202,6 +206,12 @@ def sanitize(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     except (TypeError, ValueError):
         lock_timeout = DEFAULTS["组锁超时秒"]
     lock_timeout = max(60.0, min(1800.0, lock_timeout))
+    # 软预算条数：1~200。只影响告警阈值，绝不砍内容；非法值回落默认。
+    try:
+        soft = int(payload.get("单次软预算条数", DEFAULTS["单次软预算条数"]))
+    except (TypeError, ValueError):
+        soft = DEFAULTS["单次软预算条数"]
+    soft = max(1, min(200, soft))
     stats = payload.get("stats")
     cfg = {
         "provider": provider,
@@ -215,6 +225,7 @@ def sanitize(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         "看板地址": str(payload.get("看板地址") or DEFAULTS["看板地址"]).strip()[:200],
         "组级互斥": bool(payload.get("组级互斥", DEFAULTS["组级互斥"])),
         "组锁超时秒": lock_timeout,
+        "单次软预算条数": soft,
         "stats": stats if isinstance(stats, dict) else {},
     }
     return cfg
@@ -978,7 +989,9 @@ def _render_numbers_png(lottery: str, predictions: List[Dict[str, Any]], subtitl
 # 分隔头 + 「一组图」编排小件（2026-10-24 改版）
 # ------------------------------------------------------------
 DIVIDER_CHAR = "━"
-PUSH_MAX_MSGS = 12        # 单次软预算：超了只告警，**绝不砍内容**（注数必须全画）
+# 兼容别名：单一真源是 DEFAULTS["单次软预算条数"]，不要单独改这里的数值。
+# 告警读的是 sanitize() 后的 cfg（可配），不是这个模块级常量。
+PUSH_MAX_MSGS = DEFAULTS["单次软预算条数"]
 
 
 def _divider_title(lottery: str) -> str:
@@ -1388,8 +1401,12 @@ def push_lottery_images(
                         group_label, len(out), time.time() - t0, lock_state,
                         sum(1 for r in out if not r.get("ok")))
 
-        if len(out) > PUSH_MAX_MSGS:
-            logger.warning(f"{lottery} 单次推送 {len(out)} 条 > 软预算 {PUSH_MAX_MSGS}"
+        # ★ 软预算只告警、绝不砍内容：注数必须全画（1000 注 = 20 页号码图）。
+        #   阈值走 sanitize() 后的 cfg ⇒ 手改 config/push_notify.json 即热读生效；
+        #   调用方传手写 cfg 时回落默认值，行为与接入前一致。
+        soft_budget = int(cfg.get("单次软预算条数", DEFAULTS["单次软预算条数"]))
+        if len(out) > soft_budget:
+            logger.warning(f"{lottery} 单次推送 {len(out)} 条 > 软预算 {soft_budget}"
                            "（不砍内容：注数必须全画；必要时调大「推送间隔秒」）")
         return out
     except Exception as e:  # pragma: no cover - 推送绝不影响主流水线

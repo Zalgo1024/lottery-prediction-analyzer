@@ -269,7 +269,14 @@ def strategy_robustness() -> Dict[str, Any]:
     except Exception:                                        # noqa: BLE001
         pass
 
-    out: Dict[str, Any] = {"可用": True, "生成时间": d.get("生成时间"), "彩种": {}}
+    # 老缓存没有口径字段 ⇒ 显式写「未标注 + 原因」，不许静默留空（缺席≠通过）。
+    from ev.profit.ev_basis import UNANNOTATED_REASON
+
+    out: Dict[str, Any] = {
+        "可用": True, "生成时间": d.get("生成时间"), "彩种": {},
+        "EV口径": d.get("EV口径") or UNANNOTATED_REASON,
+        "历史读数说明": d.get("历史读数说明") or UNANNOTATED_REASON,
+    }
     for lot, r in (d.get("彩种") or {}).items():
         out["彩种"][lot] = {
             "判决": r.get("判决"),
@@ -340,14 +347,17 @@ def refresh_strategy_robustness(lotteries: Optional[Sequence[str]] = None,
       七乐彩、快乐8）、倾斜来源是未检验代理（排列3/排列5/七星彩）⇒ 全部只记理由。
     """
     from ev.profit import stress as ST
+    from ev.profit.ev_basis import annotate
 
     if lotteries is None:
         from config import LOTTERY_CONFIG
 
         lotteries = list(LOTTERY_CONFIG)
 
-    out: Dict[str, Any] = {"生成时间": datetime.now().isoformat(timespec="seconds"),
-                           "彩种": {}}
+    # ★ 口径标注：EV 绝对水平在 2026-11-04 修过一次（旧读数约真实的 1/5），
+    #   不标口径的话，新旧缓存里的「元/注」会被当成同一把尺子直接比较。
+    out: Dict[str, Any] = annotate({
+        "生成时间": datetime.now().isoformat(timespec="seconds"), "彩种": {}})
     for lot in lotteries:
         try:
             reason = _robustness_skip_reason(lot)

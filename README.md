@@ -2,7 +2,7 @@
 
 > **一套把「看起来有效」和「真的有效」分开的检验框架 · 彩票是最严苛的压力测试场**
 
-![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB) ![Tests](https://img.shields.io/badge/pytest-2653%20passed-3B6D11) ![Lotteries](https://img.shields.io/badge/%E5%BD%A9%E7%A7%8D-6-854F0B) ![License](https://img.shields.io/badge/License-AGPL--3.0-blue)
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB) ![Tests](https://img.shields.io/badge/pytest-2707%20passed-3B6D11) ![Lotteries](https://img.shields.io/badge/%E5%BD%A9%E7%A7%8D-6-854F0B) ![License](https://img.shields.io/badge/License-AGPL--3.0-blue)
 
 ## 这个项目真正解决的问题
 
@@ -61,7 +61,7 @@ python run.py                # 看门狗模式，访问 http://127.0.0.1:5000
 # 3. 或者只用 CLI
 python cli.py --help
 
-# 4. 跑测试套件（全量 2653 例）
+# 4. 跑测试套件（全量 2707 例）
 pytest -q                    # 约 15 分钟（慢点集中在真实 predict 全流程的契约测试）
 ```
 
@@ -855,6 +855,7 @@ POST /api/settings/push-notify/test     # 发一条测试消息（未配置返�
 | `python scripts/prefix_shadow_report.py` | **前缀口径影子验证接线状态**（冻结快照资格体检 + 台账状态 + 开判门槛；离线只读，不写台账、不接生产） |
 | `python scripts/prefix_real_report.py` | 真实生产票序前缀读数（8 彩种 / 分母 / 顺序对照；离线） |
 | `python scripts/prefix_curve_report.py` | 前缀 K 曲线离线回放（三臂 / 判决层 / 影子所需期数；离线） |
+| `python scripts/budget_monitor.py` | **预算闸门只读调额决策表**（逐轮夹注 / 停发推演 + 候选档测算；不写 config、不写台账、不含推荐值） |
 
 > ⚠️ 冒烟/验证出号请加 `--no-record`（`predict`/`auto` 均支持）：只算不落库，**不覆盖**生产 pending。
 > 同理 Web API `/api/auto`、`/api/predict` 支持 `{"record_pending": false}`。
@@ -882,8 +883,8 @@ POST /api/settings/push-notify/test     # 发一条测试消息（未配置返�
 ## 测试
 
 ```bash
-pytest -q              # 2653 passed（全量；含奖金表 33 例、写保护/分区归一化回归、撞号度量与中奖归因、批次契约、出号数量固定/动态、消息推送：图片渲染/发送节流/降级/全入口接线、随机锚点走前验证与持续训练循环、休市日历与真实开奖数据一致性、三口径 EV 对照/冷门口径 rollover/奖池门槛/Kelly 纪律仓位/限号前置与组合方差指标、策略历史实测命中统计（归一/过滤/基线/样本不足）、休市期全链路感知（看板滞后/下一期 + 调度器排班 + 启动自愈 + cli lag + 体检脚本 + 销量模型前瞻 + 休市提示条）、机制缝隙四轨测量（A/A′注数比、开出号分位、结构偏差、派奖期）+ 缝隙内选号与反馈闭环、机制缝隙策略层可见性与前瞻对照、叙事解绑文案扫描、生产 pending 防覆盖（record_pending 开关）、出号数量硬性拉平与注数一致性体检/启动自愈）
-pytest tests/          # 2644 passed（仅 tests/ 目录；另有 9 例在 scripts/ 下，故用 pytest -q 跑全量）
+pytest -q              # 2707 passed（全量；含奖金表 33 例、写保护/分区归一化回归、撞号度量与中奖归因、批次契约、出号数量固定/动态、消息推送：图片渲染/发送节流/降级/全入口接线、随机锚点走前验证与持续训练循环、休市日历与真实开奖数据一致性、三口径 EV 对照/冷门口径 rollover/奖池门槛/Kelly 纪律仓位/限号前置与组合方差指标、策略历史实测命中统计（归一/过滤/基线/样本不足）、休市期全链路感知（看板滞后/下一期 + 调度器排班 + 启动自愈 + cli lag + 体检脚本 + 销量模型前瞻 + 休市提示条）、机制缝隙四轨测量（A/A′注数比、开出号分位、结构偏差、派奖期）+ 缝隙内选号与反馈闭环、机制缝隙策略层可见性与前瞻对照、叙事解绑文案扫描、生产 pending 防覆盖（record_pending 开关）、出号数量硬性拉平与注数一致性体检/启动自愈）
+pytest tests/          # 2698 passed（仅 tests/ 目录；另有 9 例在 scripts/ 下，故用 pytest -q 跑全量）
 ```
 
 ## 维护（放着不管时会发生什么）

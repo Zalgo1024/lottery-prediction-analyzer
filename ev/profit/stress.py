@@ -32,7 +32,7 @@
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 import numpy as np
 
@@ -230,5 +230,86 @@ def stress_test(lottery: str, issue: Any, K: int = 20, seed: int = 0,
             "选号用扰动后分数、评估用基准分数 ⇒ 量化「被误导后真实优势还剩多少」",
             "开奖前不可见由 PIT 校验（history 严格早于目标期），不是假设",
             "开奖若可被完全操控 ⇒ 策略与随机同时归零，任何选号策略都无正期望",
+        ],
+    }
+
+
+# ---------------------------------------------------------------- 跨期滚动
+ROLLING_VERSION = "2026-11-05-A"
+
+
+def rolling_stress_test(
+        lottery: str, issues: Sequence[Any], *, K: int = 20, seed: int = 0,
+        runner: Optional[Callable[..., Dict[str, Any]]] = None,
+        **kwargs: Any) -> Dict[str, Any]:
+    """跨期滚动压力测试：把逐期 `stress_test()` 读数汇总成序列（离线研究，不接生产）。
+
+    为什么需要它：单期读数无法反映「并非每期都买」下的连续敞口，也无法看出
+    判据是否只在某一期偶然翻车。本函数**只做描述性汇总**，不做 BH、不做统计判决、
+    不写「检出/未检出」——跨期样本量通常远不足以支撑任何推断。
+
+    ★ 三条纪律
+      ① 每期的 PIT 不变量由 `stress_test()` 自己校验；本层**不得覆盖或补写**。
+         前视检查不通过的期数不进判据，但仍计入分母并逐条写原因（缺席≠通过）。
+      ② 分母三数并列：总期数 / 参与期数 / 未参与期数；空期建行进分母。
+      ③ 退化按**连续段**合并（沿用监控告警口径）：连续 3 期退化记 1 段，不是 3 段。
+
+    `runner` 只用于测试注入逐期读数；生产/离线调用一律走真实 `stress_test`。
+    """
+    run = runner or stress_test
+    rows: List[Dict[str, Any]] = []
+    for issue in issues:
+        try:
+            r = run(lottery, issue, K=K, seed=seed, **kwargs)
+        except Exception as e:                                    # noqa: BLE001
+            rows.append({"期号": str(issue), "参与": False,
+                         "原因": f"逐期读数不可用：{type(e).__name__}: {e}"[:200],
+                         "判决": None, "基准优势_元每注": None,
+                         "情景数": 0, "最差保留率": None})
+            continue
+        pit_ok = bool(r.get("前视检查"))
+        rets = [s.get("保留率") for s in (r.get("情景") or [])
+                if isinstance(s, dict) and s.get("保留率") is not None]
+        rows.append({
+            "期号": str(issue), "参与": pit_ok,
+            "原因": ("" if pit_ok else
+                     "未参与：前视检查未通过（history 不严格早于目标期），逐期读数不进判据"),
+            "判决": (r.get("判决") if pit_ok else None),
+            "基准优势_元每注": (r.get("基准优势_元每注") if pit_ok else None),
+            "情景数": (len(r.get("情景") or []) if pit_ok else 0),
+            "最差保留率": (min(rets) if (pit_ok and rets) else None),
+        })
+
+    total = len(rows)
+    joined = [r for r in rows if r["参与"]]
+    counts: Dict[str, int] = {}
+    for r in joined:
+        key = str(r["判决"] or "未标注")
+        counts[key] = counts.get(key, 0) + 1
+
+    # 连续退化段：只在「参与」的序列上合并；未参与期打断连续段。
+    segments = 0
+    in_seg = False
+    for r in rows:
+        degraded = bool(r["参与"] and r["判决"] == "退化")
+        if degraded and not in_seg:
+            segments += 1
+        in_seg = degraded
+
+    return {
+        "彩种": lottery, "滚动版本": ROLLING_VERSION, "判据版本": STRESS_VERSION,
+        "期数": {"总数": total, "参与": len(joined), "未参与": total - len(joined)},
+        "逐期": rows,
+        "累计情景数": sum(int(r["情景数"]) for r in rows),
+        "判决计数": counts,
+        "连续退化段数": segments,
+        "基准优势序列": [r["基准优势_元每注"] for r in joined],
+        "最差保留率": (min((r["最差保留率"] for r in joined
+                          if r["最差保留率"] is not None), default=None)),
+        "说明": [
+            "只汇总逐期读数，不做多重校正、不做统计判决；样本量不足时结论写「未开判」",
+            "未参与期仍进分母并逐条写原因（缺席≠通过）",
+            "每期 PIT 前视检查由 stress_test 校验，本层不覆盖",
+            "跨期滚动是离线研究，不接生产选号、不改下注量",
         ],
     }

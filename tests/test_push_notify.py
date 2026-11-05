@@ -1665,3 +1665,148 @@ def test_direct_also_fails_degrades_cleanly(monkeypatch):
         res = pn.send("标题", "正文", _wecom_cfg())
     assert res["ok"] is False and "direct down" in res["detail"]
 
+
+# ---------------------------------------------------------------- 软预算 / 组锁降级
+# 2026-11-05：1000 注 = 20 页号码图 ⇒ 一组 22 条，超过软预算告警刷屏；
+# 同夜 5 个彩种报「线程锁 420s 降级」。两条分支此前**零测试覆盖**，
+# 本轮把阈值做成可配（默认值不变），并补行为级牙齿。
+def _group_cfg(**over):
+    base = {"provider": "wecom", "token": "k1", "enabled": True,
+            "推送间隔秒": 0, "组锁超时秒": 60, "组级互斥": False}
+    base.update(over)
+    return pn.sanitize(base)
+
+
+def _run_group(monkeypatch, cfg, warnings=None, events=None):
+    """跑一次整组推送：不真渲染、不真发网；可选收集告警与事件顺序。"""
+    warnings = warnings if warnings is not None else []
+    events = events if events is not None else []
+    monkeypatch.setattr(pn.logger, "warning",
+                        lambda *a, **k: warnings.append(" ".join(str(x) for x in a)))
+    # 单元测试不许真等节流（3.2s/条 × 4 条 ≈ 13s）：记录而不睡。
+    # 若把渲染/发送挪回真实路径，这里的 sleep 记录会暴露出来。
+    monkeypatch.setattr(pn.time, "sleep", lambda s: None)
+    # ★ 组头文案里的机制倾斜行会触发一次 walk-forward 测量；conftest 把机制缓存
+    #   指向空 tmp ⇒ 每次重算约 15s。它与本组被测的软预算/组锁/顺序无关，打桩掉。
+    #   组头文案本身由 WecomPipelineTests.test_end_to_end_wecom 单独覆盖。
+    monkeypatch.setattr(pn, "_mechanism_footer_line", lambda *a, **k: "")
+
+    def _png(tag):
+        if events is not None:
+            events.append("render")
+        return b"\x89PNG\r\n\x1a\n" + tag.encode()
+
+    def _send(*a, **k):
+        events.append("send")
+        return {"ok": True, "detail": "ok"}
+
+    monkeypatch.setattr(pn, "send", _send)
+    monkeypatch.setattr(pn, "send_image", _send)
+    monkeypatch.setattr(pi, "render_draw_image", lambda *a, **k: _png("DRAW"))
+    monkeypatch.setattr(pi, "render_wins_image", lambda *a, **k: _png("WIN"))
+    monkeypatch.setattr(pi, "render_tickets_image", lambda *a, **k: _png("NUM"))
+    return pn.push_lottery_images(
+        "双色球", cfg=cfg,
+        predictions=[{"号码": {"红球": [1, 2, 3, 4, 5, 6], "蓝球": [7]}}] * 3,
+        eval_result={"new_feedback_count": 1},
+        hit_records=[{"issue": "2026104", "prize": "六等奖", "valid": True,
+                      "num": "01 02 03 04 05 06 + 07", "match": "红中2 蓝中1"}],
+        draw_numbers={"期号": "2026104", "红球": [1, 2, 3, 4, 5, 6], "蓝球": [7]})
+
+
+def test_soft_budget_single_source_and_default_unchanged():
+    """★ 行为零变化：默认值仍是原模块常量的值；别名不许与 DEFAULTS 漂移。"""
+    assert pn.DEFAULTS["单次软预算条数"] == 12
+    assert pn.PUSH_MAX_MSGS == pn.DEFAULTS["单次软预算条数"]
+    assert pn.sanitize(None)["单次软预算条数"] == 12
+
+
+@pytest.mark.parametrize("raw,expect", [
+    (0, 1), (1, 1), (22, 22), (200, 200), (201, 200), ("bad", 12), (None, 12)])
+def test_soft_budget_is_clamped(raw, expect):
+    """非法/越界值必须回落或夹取，不能出现 0（0 会让每条推送都告警）。"""
+    assert pn.sanitize({"单次软预算条数": raw})["单次软预算条数"] == expect
+
+
+@pytest.mark.parametrize("raw,expect", [
+    (0, 60.0), (59, 60.0), (420, 420.0), (1801, 1800.0)])
+def test_group_lock_timeout_is_clamped(raw, expect):
+    """固化「60~1800s」夹取；420s 必须原样通过（< 调度器 600s 窗口）。"""
+    assert pn.sanitize({"组锁超时秒": raw})["组锁超时秒"] == expect
+
+
+def test_soft_budget_warning_reads_cfg(monkeypatch):
+    """阈值从 cfg 读：调小必告警、调大不告警，且告警里回显实际阈值。"""
+    warns_low = []
+    out_low = _run_group(monkeypatch, _group_cfg(单次软预算条数=1), warns_low)
+    assert len(out_low) >= 2
+    assert any("软预算 1" in w for w in warns_low), warns_low
+    warns_high = []
+    _run_group(monkeypatch, _group_cfg(单次软预算条数=100), warns_high)
+    assert not any("软预算" in w for w in warns_high), warns_high
+
+
+def test_soft_budget_boundary_is_strict_greater_than(monkeypatch):
+    """★ 牙齿：把告警条件从 `>` 改成 `>=` 会在这里红（等于阈值时不该告警）。"""
+    probe = _run_group(monkeypatch, _group_cfg(单次软预算条数=999))
+    n_msgs = len(probe)
+    assert n_msgs > 1
+    warns = []
+    _run_group(monkeypatch, _group_cfg(单次软预算条数=n_msgs), warns)
+    assert not any("软预算" in w for w in warns), f"等于阈值被误告警：{warns}"
+
+
+def test_soft_budget_never_drops_messages(monkeypatch):
+    """软预算只告警，**绝不砍内容**：阈值调到 1 也要把每条都发完。"""
+    full = _run_group(monkeypatch, _group_cfg(单次软预算条数=999))
+    low = _run_group(monkeypatch, _group_cfg(单次软预算条数=1))
+    assert len(low) == len(full) and len(full) > 1
+
+
+def test_thread_lock_timeout_degrades_and_does_not_hang(monkeypatch):
+    """★ 线程锁被占满 ⇒ 立刻降级为无锁发送，不许无限等（删掉超时判定即挂）。
+
+    今日实证：5 组各等满 420s 后 `degraded-thread`，组用时 ≈830s，
+    主因是锁竞争，不是发送慢。
+    """
+    pn._GROUP_THREAD_LOCK.acquire()
+    t0 = time.time()
+    try:
+        with pn._group_spin_lock("被占用测试", timeout=0.05) as state:
+            assert state == "degraded-thread"
+    finally:
+        pn._GROUP_THREAD_LOCK.release()
+    assert time.time() - t0 < 1.0, "没走降级分支（改成无条件等待就会挂在这里）"
+
+
+def test_file_lock_failure_degrades(monkeypatch):
+    """文件锁超时/OSError ⇒ `degraded-file`，且不抛异常阻断整组。"""
+    import contextlib
+
+    @contextlib.contextmanager
+    def _busy(*a, **k):
+        raise TimeoutError("file lock busy")
+        yield                                      # pragma: no cover
+
+    monkeypatch.setattr(pn, "file_lock", _busy)
+    with pn._group_spin_lock("文件锁测试", timeout=1.0) as state:
+        assert state == "degraded-file"
+
+
+def test_lock_state_is_attached_to_every_result(monkeypatch):
+    """降级/关闭必须留痕：每条结果都带 lock 状态，不许静默。"""
+    out = _run_group(monkeypatch, _group_cfg(组级互斥=False))
+    assert out and all(r.get("lock") == "disabled" for r in out)
+
+
+def test_rendering_all_happens_before_first_send(monkeypatch):
+    """★ 渲染必须在锁外先做完（t0 在渲染之后 ⇒ 日志「用时」不含渲染）。
+
+    把渲染挪进发送循环，或把组头挪到号码之后，这条会红。
+    """
+    events = []
+    _run_group(monkeypatch, _group_cfg(), events=events)
+    assert "send" in events and "render" in events
+    first_send = events.index("send")
+    assert all(e == "render" for e in events[:first_send]), events
+

@@ -33,6 +33,12 @@ _TARGETS = (
     # 导致当晚真实日报被静默跳过。
     ("web.health_digest", "STATE_PATH", "digest_state.json"),
     ("web.health_digest", "DIGEST_DIR", "automation"),
+    # ★ 策略鲁棒性缓存是**独立常量**（health_digest.py:243 直接拼 BASE_DIR），
+    #   不由 DIGEST_DIR 派生 ⇒ 只隔离 DIGEST_DIR 时，调用
+    #   refresh_strategy_robustness() 的用例会把真身
+    #   logs/automation/strategy_robustness.json 写成测试读数，
+    #   覆盖当晚 23:40 的夜间留痕。2026-11-05 补上这条隔离。
+    ("web.health_digest", "ROBUSTNESS_PATH", "strategy_robustness.json"),
     # 娱乐预算账本（v1.8 新增，「本月已投」跨期状态）。不加这一条，用例会把真实
     # config/budget_ledger.json 写成「本月已投 400 元」，让当晚真实包络闸门误判额度耗尽。
     ("ev.budget_envelope", "LEDGER_PATH", "budget_ledger.json"),
