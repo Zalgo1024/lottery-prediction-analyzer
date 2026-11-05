@@ -10,8 +10,9 @@ import struct
 import tempfile
 import time
 import unittest
+import urllib.error
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -1554,4 +1555,113 @@ def test_health_check_no_push_is_silent(monkeypatch, tmp_path):
     hc.main(push=False)
     assert sent == []
     assert list((tmp_path / "logs").glob("项目体检_*.md")), "报告仍须落盘"
+
+
+# ------------------------------------------------------------
+# 代理降级（2026-11-05）：本机 HTTPS_PROXY 端口退出 ⇒ 所有推送全失败
+# ------------------------------------------------------------
+def _wecom_cfg():
+    return pn.sanitize({
+        "provider": "wecom", "enabled": True,
+        "token": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=unit-test",
+        "推送间隔秒": 0,
+    })
+
+
+def _refused():
+    """复刻 Windows 日志形态：`urlopen error [WinError 10061] …积极拒绝`。"""
+    return urllib.error.URLError(ConnectionRefusedError(10061, "目标计算机积极拒绝"))
+
+
+def _stub_pace(monkeypatch):
+    monkeypatch.setattr(pn, "_pace", lambda cfg: None)
+    monkeypatch.setattr(pn, "_pace_global", lambda cfg: None)
+
+
+def _stub_direct(monkeypatch, payload=None):
+    """造一个「直连成功」的 opener，返回 (build_opener mock, opener mock)。"""
+    opener = MagicMock()
+    opener.open.side_effect = _fake_urlopen(payload or {"errcode": 0, "errmsg": "ok"})
+    build = MagicMock(return_value=opener)
+    monkeypatch.setattr(pn.urllib.request, "build_opener", build)
+    return build, opener
+
+
+def test_proxy_refusal_retries_direct_and_succeeds(monkeypatch):
+    """★ 代理拒绝连接时绕过代理直连一次，消息不丢（企微渠道）。"""
+    _stub_pace(monkeypatch)
+    monkeypatch.setattr(pn.urllib.request, "getproxies",
+                        lambda: {"https": "http://127.0.0.1:28023"})
+    build, opener = _stub_direct(monkeypatch)
+    with patch.object(pn.urllib.request, "urlopen", side_effect=_refused()) as u:
+        res = pn.send("标题", "正文", _wecom_cfg())
+    assert res["ok"] is True, res
+    assert u.call_count == 1 and build.call_count == 1 and opener.open.call_count == 1
+
+
+def test_normal_path_never_builds_opener(monkeypatch):
+    """代理正常时一次成功，绝不额外建 opener（不削功能、不多发一条）。"""
+    _stub_pace(monkeypatch)
+    monkeypatch.setattr(pn.urllib.request, "getproxies", lambda: {})
+    build, _ = _stub_direct(monkeypatch)
+    with patch.object(pn.urllib.request, "urlopen",
+                      MagicMock(side_effect=_fake_urlopen({"errcode": 0, "errmsg": "ok"}))) as u:
+        res = pn.send("标题", "正文", _wecom_cfg())
+    assert res["ok"] is True
+    assert u.call_count == 1 and build.call_count == 0
+
+
+def test_no_proxy_does_not_retry(monkeypatch):
+    """没配代理还被拒 ⇒ 目标本身不可达，直连重试是白费，直接降级。"""
+    _stub_pace(monkeypatch)
+    monkeypatch.setattr(pn.urllib.request, "getproxies", lambda: {})
+    build, _ = _stub_direct(monkeypatch)
+    with patch.object(pn.urllib.request, "urlopen", side_effect=_refused()):
+        res = pn.send("标题", "正文", _wecom_cfg())
+    assert res["ok"] is False and build.call_count == 0
+    assert "10061" in res["detail"]
+
+
+def test_response_stage_error_never_retries(monkeypatch):
+    """★ 响应阶段/读超时绝不重试：服务端可能已收下消息，重发会打扰用户。"""
+    _stub_pace(monkeypatch)
+    monkeypatch.setattr(pn.urllib.request, "getproxies",
+                        lambda: {"https": "http://127.0.0.1:28023"})
+    build, _ = _stub_direct(monkeypatch)
+    errors = [
+        urllib.error.URLError(TimeoutError("read timeout")),
+        urllib.error.HTTPError("https://qyapi.weixin.qq.com", 500, "err", {}, None),
+    ]
+    for exc in errors:
+        build.reset_mock()
+        with patch.object(pn.urllib.request, "urlopen", side_effect=exc):
+            res = pn.send("标题", "正文", _wecom_cfg())
+        assert res["ok"] is False
+        assert build.call_count == 0, f"不该重试: {type(exc).__name__}"
+
+
+def test_send_image_uses_same_proxy_fallback(monkeypatch):
+    """图片消息与文本消息共用同一个出口，不能只修一边。"""
+    _stub_pace(monkeypatch)
+    monkeypatch.setattr(pn.urllib.request, "getproxies",
+                        lambda: {"https": "http://127.0.0.1:28023"})
+    build, opener = _stub_direct(monkeypatch)
+    with patch.object(pn.urllib.request, "urlopen", side_effect=_refused()):
+        res = pn.send_image(b"\x89PNG\r\n\x1a\nfake", _wecom_cfg())
+    assert res["ok"] is True, res
+    assert build.call_count == 1 and opener.open.call_count == 1
+
+
+def test_direct_also_fails_degrades_cleanly(monkeypatch):
+    """直连也不通 ⇒ 照旧 ok=False，保留可读原因，绝不抛异常阻塞流水线。"""
+    _stub_pace(monkeypatch)
+    monkeypatch.setattr(pn.urllib.request, "getproxies",
+                        lambda: {"https": "http://127.0.0.1:28023"})
+    opener = MagicMock()
+    opener.open.side_effect = OSError("direct down")
+    monkeypatch.setattr(pn.urllib.request, "build_opener",
+                        MagicMock(return_value=opener))
+    with patch.object(pn.urllib.request, "urlopen", side_effect=_refused()):
+        res = pn.send("标题", "正文", _wecom_cfg())
+    assert res["ok"] is False and "direct down" in res["detail"]
 

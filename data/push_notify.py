@@ -50,6 +50,7 @@ import os
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from collections import Counter
@@ -458,6 +459,43 @@ def _wecom_render(title: str, body: str, *, heading: bool = True) -> str:
 # ------------------------------------------------------------
 # 渠道发送（内部吞异常，绝不抛出）
 # ------------------------------------------------------------
+def _is_proxy_refusal(exc: BaseException) -> bool:
+    """是否「连接建立阶段被本地代理拒绝」——**只有**这类失败允许重试。
+
+    Windows 实测形态：`URLError(reason=ConnectionRefusedError(10061, …))`
+    （日志里打印成 `urlopen error [WinError 10061] 由于目标计算机积极拒绝`）。
+    此时请求体根本没发出，绕过代理重发不会造成重复消息。
+    """
+    if not isinstance(exc, urllib.error.URLError):
+        return False
+    reason = getattr(exc, "reason", None)
+    return (isinstance(reason, ConnectionRefusedError)
+            or getattr(reason, "winerror", None) == 10061)
+
+
+def _urlopen(req, timeout):
+    """统一网络出口：本地代理拒绝连接时，绕过代理**直连重试一次**。
+
+    ★ 只重试「连接层拒绝」：HTTP 响应已收到后的错误（HTTPError、读超时、
+      JSON 解析失败）一律不重试 —— 那些情况下服务端可能已收下消息，
+      重发会打扰用户、还会白耗企微 20 条/分钟的额度。
+    ★ 仅在确实配置了代理时才直连；没配代理还被拒说明目标本身不可达，
+      试一次也是白费，直接把原错误交回上层降级。
+    ★ 2026-11-05 实踩：本机代理（WinINET 注册表 `127.0.0.1:7897`，会话里
+      另有 `HTTPS_PROXY`）已退出，14:26 / 14:35 / 20:17 三条推送全报
+      `WinError 10061`；干净进程里 `getproxies()` 仍能读到注册表代理，
+      而 qyapi:443 直连可达 ⇒ 单次降级即可恢复，不必改用户机器的代理配置。
+    """
+    try:
+        return urllib.request.urlopen(req, timeout=timeout)
+    except urllib.error.URLError as e:
+        if not (_is_proxy_refusal(e) and urllib.request.getproxies()):
+            raise
+        logger.warning("[PUSH] 本地代理拒绝连接，绕过代理直连重试一次")
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        return opener.open(req, timeout=timeout)
+
+
 def send(title: str, content: str, cfg: Optional[Dict[str, Any]] = None,
          *, heading: bool = True) -> Dict[str, Any]:
     """发一条 markdown。`heading=False` 时不加 `# `（见 `_wecom_render`）。
@@ -481,7 +519,7 @@ def send(title: str, content: str, cfg: Optional[Dict[str, Any]] = None,
             req = urllib.request.Request(
                 _wecom_webhook_url(token), data=body, method="POST",
                 headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            with _urlopen(req, timeout=10) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
             ok = (data.get("errcode") == 0)
             return {"ok": ok, "provider": provider,
@@ -494,7 +532,7 @@ def send(title: str, content: str, cfg: Optional[Dict[str, Any]] = None,
             req = urllib.request.Request(
                 "https://www.pushplus.plus/send", data=body, method="POST",
                 headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            with _urlopen(req, timeout=10) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
             ok = (data.get("code") == 200)
             return {"ok": ok, "provider": provider,
@@ -504,7 +542,7 @@ def send(title: str, content: str, cfg: Optional[Dict[str, Any]] = None,
             url = f"https://sctapi.ftqq.com/{urllib.parse.quote(token)}.send"
             req = urllib.request.Request(url, data=form, method="POST",
                                          headers={"Content-Type": "application/x-www-form-urlencoded"})
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            with _urlopen(req, timeout=10) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
             ok = (data.get("code") == 0)
             return {"ok": ok, "provider": provider,
@@ -546,7 +584,7 @@ def send_image(png: bytes, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, An
         req = urllib.request.Request(
             _wecom_webhook_url(token), data=body, method="POST",
             headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=20) as resp:
+        with _urlopen(req, timeout=20) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         ok = (data.get("errcode") == 0)
         return {"ok": ok, "provider": provider, "bytes": len(png),

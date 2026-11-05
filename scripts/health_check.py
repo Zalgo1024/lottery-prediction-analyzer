@@ -59,13 +59,24 @@ def check_pending_freshness():
         pend = json.load(open(pf, encoding="utf-8")) if pf.exists() else []
         # ★ 只看生产批：研究台账批（低拥挤 200 注）会把「出号注数」抬高，
         #   触发「出号 N 注（期望 M）」的假告警。
-        from data.feedback import DOMAIN_PROD, DOMAIN_RESEARCH, _domain_of
+        from data.feedback import (DOMAIN_PROD, DOMAIN_RESEARCH, _domain_of,
+                                   latest_production_pending)
 
         pending_all = [p for p in pend if p.get("状态") == "pending"]
         active = [p for p in pending_all if _domain_of(p) == DOMAIN_PROD]
         research_n = sum(1 for p in pending_all if _domain_of(p) == DOMAIN_RESEARCH)
         targets = sorted({p.get("目标期号") for p in active if p.get("目标期号") is not None})
-        groups = sum(len(p.get("预测号码") or []) for p in active)
+        # ★★ 出号注数只认「当期有效批」= 最新生产批：展示 / 推送 / 组数核对 /
+        #    预算闸门全是这个口径（`latest_production_pending`）。「重新出号」会往
+        #    同一期追加新批，旧批保留且各自结算；此前把 4 批号码累加、却拿数组里
+        #    最旧一批的「目标注数」当期望 ⇒ 两边口径错配的假告警
+        #    （11-05 实踩：排列5 3100 注 / 期望 100，福彩3D、排列3 各 2200 / 200）。
+        current = latest_production_pending(
+            pending_all, target_issue=targets[0] if targets else None)
+        groups = len((current or {}).get("预测号码") or [])
+        # 分母纪律：被排除的旧批不许静默丢掉，单独计数并在报告里披露。
+        other_n = max(0, len(active) - (1 if current else 0))
+        other_groups = sum(len(p.get("预测号码") or []) for p in active) - groups
         issues = []
         if not active:
             issues.append("无 pending（下一期没有任何预测）")
@@ -76,22 +87,24 @@ def check_pending_freshness():
                 issues.append(f"目标期号 {targets} ≠ 本地最新期+1({latest + 1})")
             # 出号注数期望值按彩种分流（2026-09-13）：数字型固定 5 注；
             # 乐透型名义 100 注、启用低重叠剪枝后可能更少 → 只守"每策略保底"下限。
-            # ★ 期望取**生成时刻**的快照（pending["目标注数"]，2026-09-20 修）：
-            #   此前直接读实时 resolve_groups——夜间流水线先出号、后结算，
-            #   结算时动态滑轨会调整配置，体检再拿新值当期望 → 旧批次被误报
-            #   「出号 N 注（期望 M）」（福彩3D 连续两晚 25/27、35/37 均属此类）。
+            # ★ 期望取**同一条有效批**在生成时刻的快照（pending["目标注数"]，
+            #   2026-09-20 修）：此前直接读实时 resolve_groups——夜间流水线先出号、
+            #   后结算，结算时动态滑轨会调整配置，体检再拿新值当期望 → 旧批次被
+            #   误报（福彩3D 连续两晚 25/27、35/37 均属此类）。11-05 再修：不再取
+            #   `declared[0]`（数组顺序里的**最旧一批**），必须与 groups 同一批。
             #   旧 pending 无目标注数字段时回退实时配置（容忍旧数据）。
             if name in ("福彩3D", "排列3", "排列5"):
-                declared = [p.get("目标注数") for p in active
-                            if isinstance(p.get("目标注数"), int) and p.get("目标注数") > 0]
-                expected = declared[0] if declared else resolve_groups(name)
+                declared = (current or {}).get("目标注数")
+                expected = (declared if isinstance(declared, int) and declared > 0
+                            else resolve_groups(name))
                 if groups != expected:
                     issues.append(f"数字型出号 {groups} 注（期望 {expected}）")
             elif groups < PRUNE_MIN_PER_STRATEGY:
                 issues.append(
                     f"乐透型出号仅 {groups} 注（低于每策略保底 {PRUNE_MIN_PER_STRATEGY}）")
         out.append({"彩种": name, "本地最新期": latest, "pending条数": len(active),
-                    "研究批条数": research_n,
+                    "研究批条数": research_n, "生产批数": len(active),
+                    "重出批数": other_n, "重出批注数": other_groups,
                     "目标期": targets, "出号注数": groups, "问题": issues})
     return out
 
@@ -274,6 +287,17 @@ def main(push: bool = True):
     L.append("|---|---|---|---|---|")
     for p in pending:
         L.append(f"| {p['彩种']} | {p['本地最新期']} | {p['目标期']} | {p['出号注数']} | {'; '.join(p['问题']) or '✅'} |")
+    # ★ 口径披露：`出号注数` 是当期有效批（最新生产批），不是同期全部 pending 之和。
+    #   重出批仍按各自批次结算，必须显式列出，不许静默从分母里消失。
+    L.append("")
+    L.append("> 注：「出号注数」为**当期有效批**（最新生产批）口径，与展示 / 推送 / "
+             "组数核对 / 预算闸门一致；重出批按各自批次结算，不计入本列。")
+    extras = [p for p in pending if p.get("重出批数")]
+    if extras:
+        L.append("> 另有重出批：" + "；".join(
+            f"{p['彩种']} {p['重出批数']} 批 / {p['重出批注数']} 注" for p in extras) + "。")
+    else:
+        L.append("> 本期无重出批。")
     L.append("")
     L.append("## 4. 关键字段完整度")
     for f in fields:
