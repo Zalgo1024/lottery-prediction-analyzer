@@ -182,17 +182,17 @@ def test_shadow_is_append_only(tmp_path):
 
 
 def test_offline_modules_not_imported_by_production():
-    """研究通道不许渗进生产出号 / 结算 / 看板。"""
-    targets = [ROOT / d for d in ("prediction", "web", "pipeline", "data")]
-    targets += [ROOT / "run.py", ROOT / "cli.py"]
-    for base in targets:
-        files = [base] if base.is_file() else list(base.rglob("*.py"))
-        for f in files:
-            text = f.read_text(encoding="utf-8", errors="replace")
-            for bad in ("ev.prefix_curve", "ev.order_freeze", "ev.prefix_shadow",
-                        "from ev import prefix_curve", "from ev import order_freeze",
-                        "from ev import prefix_shadow"):
-                assert bad not in text, f"生产路径 {f.name} 引入了离线研究模块：{bad}"
+    """研究通道不许渗进生产出号 / 结算 / 看板。
+
+    ★ 2026-11-06 接线起，判定收敛到 `tests/_import_guard.py` 单一真源：
+      研究 / 验证模块只允许出现在编排层 `ev/shadow_bridge.py`；
+      编排层只允许被 `cli.py` / `web/utils.py` 两个出号入口调用。
+      三处护栏各自独立调用真源（真源被放宽时会由白名单最小性用例兜住）。
+    """
+    from tests._import_guard import RESEARCH_MODULES, violations
+    assert "ev.prefix_curve" in RESEARCH_MODULES   # 本文件负责的模块仍在清单里
+    bad = violations()
+    assert bad == [], f"生产路径引入研究/验证模块：{bad}"
 
 
 def test_no_forbidden_narrative_words_in_new_modules():

@@ -1331,6 +1331,34 @@ def run_auto_pipeline_core(lottery_name: str, params: dict, task_id: Optional[st
                 except Exception as e:                        # noqa: BLE001
                     logger.warning(f"影子三臂记录失败（不影响出号）: {e}")
 
+            # ③c 前缀影子冻结（2026-11-06，开关见 config/prefix_shadow.json）
+            #   与上面「影子三臂」是两件事：三臂做同预算对照；前缀影子冻结**票序**，
+            #   为前缀口径提供「开奖前冻结」的证据。开关关闭时编排层直接返回「不适用」
+            #   并写原因 —— 缺席≠通过，不记为通过。
+            #   ★ 编排层在四包之外（ev/shadow_bridge.py），这是唯一被放行的接线点；
+            #     任何失败都只告警：证据层永不影响真钱出号链路。
+            if _record_pending(params):
+                try:
+                    from ev.shadow_bridge import freeze_after_predict as _freeze
+                    from datetime import datetime as _dtnow
+                    _psb_now = _dtnow.now().isoformat(timespec="seconds")
+                    _psb = _freeze(
+                        lottery=lottery_name, issue=target_issue,
+                        tickets=predictions, K=len(predictions),
+                        target_date=pred.get("预测日期"),
+                        batch_time=_psb_now, register_time=_psb_now,
+                        strategy_version=str(pred.get("预测模式") or "fresh"),
+                        renumber=_rn,
+                    )
+                    if _psb.get("状态") == "已登记":
+                        steps.append(f"前缀影子冻结 n={_psb.get('n')}"
+                                     f" {str(_psb.get('票序哈希'))[:8]}")
+                    elif _psb.get("状态") == "失败":
+                        logger.warning(
+                            f"前缀影子冻结失败（不影响出号）：{_psb.get('原因')}")
+                except Exception as e:                        # noqa: BLE001
+                    logger.warning(f"前缀影子冻结接入异常（不影响出号）: {e}")
+
     # ③b 前瞻 A/B 对照实验（NetPayout WP3）
     #   先结算已开奖期次（开奖数据刚在①更新），再为下一期记录 A/B 两组号码。
     #   ⚠️ 只积累证据、不参与出号：任何失败一律降级，绝不阻塞主流水线。

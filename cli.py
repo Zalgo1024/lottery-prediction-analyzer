@@ -1145,6 +1145,31 @@ def _cmd_auto(args):
                     print(f"  预测日期 {pred['预测日期']}，{pred['号码组数']} 组，已保存 {path}")
                     steps.append(f"预测: {pred['预测日期']} {pred['号码组数']}组")
                     log_lines.append(f"[{name}] 预测: {pred['预测日期']} {pred['号码组数']}组 ({args.mode})")
+                    # 前缀影子冻结（2026-11-06，开关见 config/prefix_shadow.json）
+                    # ★ 内层独立 try：冻结属于证据层，失败绝不能把出号判成失败
+                    #   （外层 except 会置 any_failed=True）。
+                    if not args.no_record:
+                        try:
+                            from ev.shadow_bridge import freeze_after_predict as _freeze
+                            from datetime import datetime as _dtnow
+                            _psb_now = _dtnow.now().isoformat(timespec="seconds")
+                            _psb_batch = str(pred.get("生成时间") or _psb_now)
+                            _psb = _freeze(
+                                lottery=name, issue=target_issue,
+                                tickets=predictions, K=len(predictions),
+                                target_date=pred.get("预测日期"),
+                                batch_time=_psb_batch, register_time=_psb_now,
+                                strategy_version=str(args.mode),
+                                renumber=_rn,
+                            )
+                            if _psb.get("状态") == "已登记":
+                                steps.append(f"前缀影子冻结 n={_psb.get('n')}"
+                                             f" {str(_psb.get('票序哈希'))[:8]}")
+                            elif _psb.get("状态") == "失败":
+                                print(f"  ⚠️ 前缀影子冻结失败（不影响出号）："
+                                      f"{_psb.get('原因')}")
+                        except Exception as _psb_e:               # noqa: BLE001
+                            print(f"  ⚠️ 前缀影子冻结异常（不影响出号）：{_psb_e}")
                 except Exception as e:
                     err = f"预测失败: {e}"
                     print(f"  ⚠️ {err}")

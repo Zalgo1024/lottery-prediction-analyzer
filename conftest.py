@@ -76,6 +76,13 @@ _TARGETS = (
     # 本模块仍读真实 logs/ ⇒ 用例会污染影子台账 / 冻结快照池。
     ("ev.prefix_shadow", "SHADOW_PATH", "prefix_shadow.jsonl"),
     ("ev.prefix_shadow", "FREEZE_DIR", "order_freeze"),
+    # 影子编排层（2026-11-06 接线）。两个常量都是**独立拼接**的绝对路径，
+    # 不由上面任何模块派生：不隔离的话，一次 `freeze_after_predict()` 就会读真实
+    # `config/prefix_shadow.json`（线上是 `启用=true`）并把快照写进真实
+    # `logs/order_freeze/` —— 测试会直接污染生产证据池。
+    # 指到 tmp 后文件不存在 ⇒ 开关按「缺失=未启用」处理 ⇒ 默认零副作用。
+    ("ev.shadow_bridge", "CONFIG_PATH", "prefix_shadow.json"),
+    ("ev.shadow_bridge", "SCHEDULE_PATH", "draw_schedule.json"),
 )
 
 

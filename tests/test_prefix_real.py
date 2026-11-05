@@ -363,14 +363,11 @@ def test_report_lottery_list_comes_from_files_not_literal():
 
 
 def test_offline_module_not_imported_by_production():
-    targets = [ROOT / d for d in ("prediction", "web", "pipeline", "data")]
-    targets += [ROOT / "run.py", ROOT / "cli.py"]
-    for base in targets:
-        files = [base] if base.is_file() else list(base.rglob("*.py"))
-        for f in files:
-            text = f.read_text(encoding="utf-8", errors="replace")
-            for bad in ("ev.prefix_real", "from ev import prefix_real"):
-                assert bad not in text, f"生产路径 {f.name} 引入了离线研究模块：{bad}"
+    """生产四包不许 import 前缀实测 / 研究模块（判定见 tests/_import_guard.py）。"""
+    from tests._import_guard import RESEARCH_MODULES, violations
+    assert "ev.prefix_real" in RESEARCH_MODULES
+    bad = violations()
+    assert bad == [], f"生产路径引入离线研究模块：{bad}"
 
 
 def test_no_forbidden_narrative_words_in_new_modules():
