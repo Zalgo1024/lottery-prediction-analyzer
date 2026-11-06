@@ -56,6 +56,8 @@ MAIN_N = 3
 BASE_DIR = Path(__file__).resolve().parents[1]
 CONFIG_PATH = BASE_DIR / "config" / "prefix_shadow.json"
 SCHEDULE_PATH = BASE_DIR / "config" / "draw_schedule.json"
+# 批次性质预注册（判据，入库）。缺失 ⇒ 全按探索批（不冒充评估批）。
+RULES_PATH = BASE_DIR / "config" / "prefix_shadow_rules.json"
 
 DEFAULTS: Dict[str, Any] = {
     "启用": False,
@@ -107,6 +109,85 @@ def _resolve(base: Path, rel: Any) -> Path:
     return p if p.is_absolute() else (base / p)
 
 
+def load_rules(path: Optional[Path] = None) -> Dict[str, Any]:
+    """读「批次性质预注册」规则。缺失 / 损坏 ⇒ 返回无起始日期的默认值（按探索批）。"""
+    p = Path(path) if path is not None else RULES_PATH
+    if not p.exists():
+        return {"版本": "未提供", "评估批起始日期": None,
+                "_缺失": True, "_路径": str(p)}
+    try:
+        doc = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return {"版本": "未提供", "评估批起始日期": None,
+                "_损坏": f"{type(exc).__name__}: {exc}"}
+    if not isinstance(doc, dict):
+        return {"版本": "未提供", "评估批起始日期": None,
+                "_损坏": f"顶层非对象：{type(doc).__name__}"}
+    out = {"版本": "未提供", "评估批起始日期": None}
+    out.update(doc)
+    return out
+
+
+def batch_kind_for(batch_time: Any, rules: Dict[str, Any]) -> Dict[str, Any]:
+    """按**事先锁定**的规则决定这批算「探索批」还是「独立评估批」。
+
+    ★ 缺规则 ⇒ 探索批。这是保守方向：探索批不参与判决，不会被误算成证据；
+      反过来（默认评估批）会让未验证的流程直接进判决底账，那是不可逆的污染。
+    ★ 只用调用方注入的 `batch_time`，不读系统时间。
+    """
+    start = (rules or {}).get("评估批起始日期")
+    ver = (rules or {}).get("版本") or "未提供"
+    if not start:
+        why = "无「评估批起始日期」"
+        if (rules or {}).get("_缺失"):
+            why += f"（规则文件不存在：{rules.get('_路径')}）"
+        elif (rules or {}).get("_损坏"):
+            why += f"（规则文件不可用：{rules.get('_损坏')}）"
+        return {"性质": PS.BATCH_EXPLORE, "依据": why + " ⇒ 按探索批登记", "版本": ver}
+    try:
+        b = datetime.fromisoformat(str(batch_time))
+        s = str(start)
+        s_dt = (datetime.fromisoformat(s + "T00:00:00") if len(s) == 10
+                else datetime.fromisoformat(s))
+    except (ValueError, TypeError):
+        return {"性质": PS.BATCH_EXPLORE, "依据": "批次时间或起始日期不可解析 ⇒ 按探索批",
+                "版本": ver}
+    if b >= s_dt:
+        return {"性质": PS.BATCH_EVAL,
+                "依据": f"批次时间 {batch_time} ≥ 评估批起始 {start}（规则 {ver}）",
+                "版本": ver}
+    return {"性质": PS.BATCH_EXPLORE,
+            "依据": f"批次时间 {batch_time} < 评估批起始 {start} ⇒ 探索期（规则 {ver}）",
+            "版本": ver}
+
+
+def settle_after_draw(*, settle_time: Any,
+                      shadow_path: Optional[Path] = None,
+                      snapshot_dir: Optional[Path] = None,
+                      switch_path: Optional[Path] = None) -> Dict[str, Any]:
+    """编排层代理的**结算入口**（生产只允许调这个，不许直接 import `ev.shadow_settle`）。
+
+    为什么要有这层：`tests/_import_guard` 把研究模块的 import 收敛到编排层，
+    生产四包（含 `web/utils.py`）只能碰 `ev.shadow_bridge`。结算属于研究侧，
+    所以在编排层包一层 —— 否则接线只能靠「放宽护栏」，那是拿护栏换功能。
+
+    ★ 开关关闭 / 缺失 ⇒ 返回 `启用=False` 并写原因，**不结算、不记为通过**。
+    """
+    sw = is_enabled(switch_path)
+    if not sw.get("启用"):
+        return {"启用": False, "原因": str(sw.get("原因") or "影子开关未开启"),
+                "扫描": 0, "已结算": 0, "跳过": 0, "失败": 0, "明细": []}
+    try:
+        from ev.shadow_settle import settle_pending
+        out = settle_pending(settle_time=settle_time, shadow_path=shadow_path,
+                             snapshot_dir=snapshot_dir)
+        return dict(out, 启用=True)
+    except Exception as exc:                                   # noqa: BLE001
+        logger.warning(f"影子结算失败（不阻断出号）：{type(exc).__name__}: {exc}")
+        return {"启用": True, "原因": f"{type(exc).__name__}: {exc}",
+                "扫描": 0, "已结算": 0, "跳过": 0, "失败": 0, "明细": []}
+
+
 def derive_seed(lottery: str, issue: Any) -> int:
     """确定性派生 seed（与 `prediction.engine._stable_seed` 同构：crc32）。
 
@@ -128,6 +209,7 @@ def freeze_after_predict(
         n: int = MAIN_N,
         schedule_path: Optional[Path] = None,
         evidence_path: Optional[Path] = None,
+        rules_path: Optional[Path] = None,
         switch_path: Optional[Path] = None,
         snapshot_dir: Optional[Path] = None,
         shadow_path: Optional[Path] = None,
@@ -198,6 +280,9 @@ def freeze_after_predict(
             _rn = int(renumber or 0)
         except (TypeError, ValueError):
             _rn = 0
+        # 批次性质由**事先锁定的规则**决定（探索批 / 独立评估批），不在这里现挑。
+        rules = load_rules(rules_path)
+        kind = batch_kind_for(batch_time, rules)
         snap = OF.build_snapshot(
             lottery=lottery, issue=issue, tickets=tks,
             strategy_version=str(strategy_version),
@@ -215,6 +300,9 @@ def freeze_after_predict(
                 "外部证据条数": len(ev_rows),
                 "外部证据校验": "无矛盾" if not bound["矛盾"] else "声明值被证据否定",
                 "时刻表核验状态": sched["核验状态"],
+                "批次性质": kind["性质"],
+                "批次性质依据": kind["依据"],
+                "批次规则版本": kind["版本"],
                 "时刻表来源": sched["来源"],
                 "种子性质": "标识用（crc32(彩种|期号)）；主路径随机性来自系统微秒，"
                             "seed 不能复现票序，复现以票序哈希为准",
@@ -227,11 +315,12 @@ def freeze_after_predict(
         # ---- 4. 登记前 n 注（登记行不含任何开奖读数）----
         reg = PS.register_prefix(snap, n=int(n), draw_time=draw_time,
                                  register_time=str(register_time),
-                                 path=shadow_path)
+                                 batch_kind=kind["性质"], path=shadow_path)
         return dict(base, 状态=STATUS_OK, 原因="", 开奖时间=draw_time,
                     快照路径=str(path), n=int(n),
                     票序哈希=snap["票序哈希"], 策略哈希=snap["策略哈希"],
                     登记时间=str(register_time), 批次时间=str(batch_time),
+                    批次性质=kind["性质"], 批次性质依据=kind["依据"],
                     披露=[
                         "开奖时刻是声明值（直播开始时刻）而非实测；它只提供可比基准，"
                         "不构成对开奖时刻的证明。",

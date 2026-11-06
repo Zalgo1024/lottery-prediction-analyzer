@@ -1093,7 +1093,8 @@ def _cmd_auto(args):
             # 每期出号按彩种分流（数字型 5 / 乐透型 100）：--groups 显式给出时优先
             # ★ 2026-10-30：这里是人跑 CLI，来源记 `manual` —— 闸门会夹取（额度是硬约束）
             #   但允许超过基线；`auto`（≤基线、永不自动加注）只留给调度器/web worker。
-            groups_eff = resolve_groups(name, args.groups, source="manual")
+            groups_eff = resolve_groups(name, args.groups, source="manual",
+                                        reserve=not args.no_record)
             # 智能跳过：下一期若已有 pending 预测则不重复生成
             target_issue = _next_issue(name)
             # ★ 只看生产批：研究台账批后写且 200 注，被当成「已有预测」复用会让整期
@@ -1600,7 +1601,8 @@ def _cmd_predict(args):
     result = predict(
         lottery_name=args.lottery,
         groups=resolve_groups(args.lottery, args.groups,
-                              source=("research" if research else "manual")),
+                              source=("research" if research else "manual"),
+                              reserve=record),
         mode=args.mode,
         record_pending=record,
     )

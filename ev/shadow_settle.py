@@ -74,6 +74,65 @@ def _find_record(lottery: str, issue: Any,
     return None
 
 
+def _reg_key(row: Dict[str, Any]) -> tuple:
+    """登记/结算的配对键（与台账去重口径同构：期号 + 冻结版本 + 策略哈希 + n）。"""
+    return (str(row.get("期号")), str(row.get("冻结版本")),
+            str(row.get("策略哈希")), int(row.get("n") or 0))
+
+
+def settle_pending(*, settle_time: Any,
+                   shadow_path: Optional[Path] = None,
+                   snapshot_dir: Optional[Path] = None,
+                   records_by_lottery: Optional[Dict[str, Sequence[Any]]] = None
+                   ) -> Dict[str, Any]:
+    """扫描台账，把「已登记未结算」且**已开奖**的登记行结算掉。
+
+    设计约束：
+      · 只结算**已有开奖记录**的期 —— 没开奖就跳过并写原因，绝不写成通过；
+      · 已结算过的键跳过（`settle_prefix` 本身也幂等，这里先筛是为了日志清晰）；
+      · 每条失败互相隔离：一条出错不影响其余；
+      · 不读系统时间（`settle_time` 由调用方注入）。
+
+    返回 `{扫描, 待结算, 已结算, 跳过, 失败, 明细}`，**永不抛出**。
+    """
+    out: Dict[str, Any] = {"扫描": 0, "待结算": 0, "已结算": 0,
+                           "跳过": 0, "失败": 0, "明细": []}
+    try:
+        loaded = PS.load_shadow(shadow_path)
+    except Exception as exc:                                   # noqa: BLE001
+        return dict(out, 错误=f"台账读取失败：{type(exc).__name__}: {exc}")
+    rows = loaded.get("行") or []
+    regs = [r for r in rows if r.get("阶段") == PS.KIND_REGISTER]
+    done = {_reg_key(r) for r in rows if r.get("阶段") == PS.KIND_SETTLE}
+    todo = [r for r in regs if _reg_key(r) not in done]
+    out["扫描"] = len(regs)
+    out["待结算"] = len(todo)
+
+    cache: Dict[str, Sequence[Any]] = dict(records_by_lottery or {})
+    for reg in todo:
+        lot = str(reg.get("彩种") or "")
+        if lot and lot not in cache:
+            try:
+                from data.loader import load_lottery
+                cache[lot] = load_lottery(lot).records or []
+            except Exception:                                  # noqa: BLE001
+                cache[lot] = []
+        res = settle_from_register(reg, settle_time=settle_time,
+                                   snapshot_dir=snapshot_dir,
+                                   shadow_path=shadow_path,
+                                   records=cache.get(lot))
+        st = res.get("状态")
+        if st == STATUS_OK:
+            out["已结算"] += 1
+        elif st == STATUS_SKIP:
+            out["跳过"] += 1
+        else:
+            out["失败"] += 1
+        out["明细"].append({"彩种": reg.get("彩种"), "期号": reg.get("期号"),
+                            "n": reg.get("n"), "状态": st, "原因": res.get("原因")})
+    return out
+
+
 def settle_from_register(register_row: Dict[str, Any], *, settle_time: Any,
                          snapshot_dir: Optional[Path] = None,
                          shadow_path: Optional[Path] = None,

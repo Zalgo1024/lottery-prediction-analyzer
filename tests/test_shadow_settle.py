@@ -101,6 +101,42 @@ def test_never_raises_on_broken_snapshot(tmp_path):
     assert got["状态"] == SS.STATUS_FAIL
 
 
+# ------------------------------------------------- 批量结算（接流水线用的入口）
+def test_settle_pending_on_missing_ledger_is_zero(tmp_path):
+    got = SS.settle_pending(settle_time=SETTLE,
+                            shadow_path=tmp_path / "nope.jsonl",
+                            snapshot_dir=tmp_path / "snap")
+    assert got["扫描"] == 0 and got["待结算"] == 0
+    assert got["已结算"] == 0 and got["失败"] == 0
+
+
+def test_settle_pending_skips_unsettled_when_no_draw(tmp_path):
+    """已登记但**还没开奖** ⇒ 跳过并写原因，绝不能算成「已结算/通过」。"""
+    snap = _snap_ok()
+    OF.save_snapshot(snap, directory=tmp_path / "snap")
+    PS.register_prefix(snap, n=3, draw_time="2026-11-08T21:15:00",
+                       register_time="2026-11-08T12:00:05",
+                       path=tmp_path / "shadow.jsonl")
+
+    got = SS.settle_pending(settle_time=SETTLE,
+                            shadow_path=tmp_path / "shadow.jsonl",
+                            snapshot_dir=tmp_path / "snap",
+                            records_by_lottery={"双色球": []})
+    assert got["扫描"] == 1 and got["待结算"] == 1
+    assert got["已结算"] == 0 and got["跳过"] == 1
+    assert got["明细"][0]["状态"] == SS.STATUS_SKIP
+    assert "不写成通过" in (got["明细"][0]["原因"] or "")
+
+
+def test_settle_pending_never_raises_on_broken_ledger(tmp_path):
+    p = tmp_path / "shadow.jsonl"
+    p.write_text("{broken\n", encoding="utf-8")
+    got = SS.settle_pending(settle_time=SETTLE, shadow_path=p,
+                            snapshot_dir=tmp_path / "snap")
+    # 坏行由 load_shadow 计数，不静默丢弃；本函数只保证不抛
+    assert isinstance(got, dict) and "已结算" in got
+
+
 def test_module_does_not_read_system_time():
     src = (SS.SETTLE_VERSION and
            __import__("pathlib").Path(SS.__file__).read_text(encoding="utf-8"))

@@ -56,6 +56,9 @@ _TARGETS = (
     #   · SPEND_PATH 是「本月已投」台账 —— 写脏会让当晚真实出号误以为额度耗尽而停发。
     ("ev.budget_gate", "LIMIT_PATH", "budget_aggregate.json"),
     ("ev.budget_gate", "SPEND_PATH", "budget_spend.json"),
+    # 额度预占（2026-11-06，修 TOCTOU）。不隔离的话，用例调 `clamp(reserve=True)`
+    # 会写真实 config/budget_reserve.json，把真实出号的可用额度占掉 10 分钟。
+    ("ev.budget_gate", "RESERVE_PATH", "budget_reserve.json"),
     # 逐期账本（2026-10-31 新增任务 1）。不隔离的话，用例 rebuild 会把真实
     # training/ledger/*.jsonl 覆盖成「只有测试彩种、只有若干期」的残本，
     # 而那正是复盘时唯一的成本/净盈亏证据。
@@ -83,6 +86,7 @@ _TARGETS = (
     # 指到 tmp 后文件不存在 ⇒ 开关按「缺失=未启用」处理 ⇒ 默认零副作用。
     ("ev.shadow_bridge", "CONFIG_PATH", "prefix_shadow.json"),
     ("ev.shadow_bridge", "SCHEDULE_PATH", "draw_schedule.json"),
+    ("ev.shadow_bridge", "RULES_PATH", "prefix_shadow_rules.json"),
     # 方案 B 的外部开奖证据（2026-11-06）。只追加不改写，但写脏了会让后续所有
     # 期次的「下界交叉校验」读到测试数据 ⇒ 必须隔离。
     ("ev.draw_evidence", "EVIDENCE_PATH", "draw_evidence.jsonl"),
@@ -116,13 +120,15 @@ def _seed_ticket_size_store():
             "dynamic": dict(_TEST_TICKET_DYNAMIC),
             "current": dict(_TEST_TICKET_DYNAMIC),
             # ★ 上限必须与 `data/ticket_size.py::DEFAULT_LIMITS` 同口径：
-            #   2026-11-02 起统一（500），2026-11-04 用户要求提到 **1000**。
+            #   2026-11-02 统一 500 → 2026-11-04 统一 1000 →
+            #   **2026-11-06 分彩种：除 福彩3D / 排列3 外全部 10000，那两个保持 1000**
+            #   （直选全空间只有 1000，再高只是重复投注）。
             #   这里曾是「逐彩种 500/400/100/200/200/300/500/100」的镜像，
             #   于是代码改了上限、测试还在用旧刻度 —— 断言读到的是这份种子而不是新默认，
-            #   表现为「明明改了却还有测试说 400」（本轮实踩）。
-            "limits": {"双色球": 1000, "大乐透": 1000, "排列5": 1000,
-                       "福彩3D": 1000, "排列3": 1000, "七星彩": 1000,
-                       "七乐彩": 1000, "快乐8": 1000},
+            #   表现为「明明改了却还有测试说 400」（本轮实踩）。**第二真源，必须同步。**
+            "limits": {"双色球": 10000, "大乐透": 10000, "排列5": 10000,
+                       "福彩3D": 1000, "排列3": 1000, "七星彩": 10000,
+                       "七乐彩": 10000, "快乐8": 10000},
             "锁定": True,
         }, ensure_ascii=False), encoding="utf-8")
     except OSError:

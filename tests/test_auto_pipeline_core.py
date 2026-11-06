@@ -124,7 +124,7 @@ class AutoPipelineCoreTests(unittest.TestCase):
 
         seen = []
 
-        def _fake_resolve(lottery, requested=None):
+        def _fake_resolve(lottery, requested=None, **kwargs):
             seen.append((requested, _RENUMBER_VAR.get()))
             return 100
 
@@ -161,7 +161,7 @@ class AutoPipelineCoreTests(unittest.TestCase):
 
     def test_explicit_groups_differs_from_slide_warns(self):
         """显式注数 ≠ 看板滑轨 → 必须留痕（日志 + 步骤），避免静默覆盖。"""
-        def _fake_resolve(lottery, requested=None):
+        def _fake_resolve(lottery, requested=None, **kwargs):
             return 200 if requested is None else requested   # 滑轨 200 / 显式原样
 
         with patch.object(utils_mod, "resolve_groups", side_effect=_fake_resolve), \
@@ -173,7 +173,7 @@ class AutoPipelineCoreTests(unittest.TestCase):
 
     def test_slide_groups_does_not_warn(self):
         """走滑轨（不传 groups）时不应出现「≠ 滑轨」提示。"""
-        def _fake_resolve(lottery, requested=None):
+        def _fake_resolve(lottery, requested=None, **kwargs):
             return 200
 
         with patch.object(utils_mod, "resolve_groups", side_effect=_fake_resolve):

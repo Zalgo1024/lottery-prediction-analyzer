@@ -221,26 +221,61 @@ def record_spend(lottery: str, *, 目标期号: Any, 注数: int,
     price = float(ticket_price(lottery) if 单价 is None else 单价)
     n = max(0, int(注数))
     p = Path(path) if path is not None else SPEND_PATH
-    doc = load_spend(path=p, now=now)
-    month = doc["月份"]
-    try:
-        _rn = int(重出批号 or 0)
-    except (TypeError, ValueError):
-        _rn = 0
-    rec = {"月份": month, "彩种": lottery, "目标期号": str(目标期号),
-           "档位": str(档位 or "一般"), "台账域": str(台账域 or "生产"),
-           "注数": n, "单价": price, "金额": round(n * price, 2),
-           "时间": (now or datetime.now()).isoformat(timespec="seconds")}
-    if _rn:
-        rec["重出批号"] = _rn          # 首出批不写该字段（老记录形态不变）
-    key = _rec_key(rec)
-    kept = [r for r in doc["记录"] if _rec_key(r) != key]
-    kept.append(rec)
-    doc["记录"] = kept
-    doc["已投"] = round(sum(float(r.get("金额") or 0.0) for r in kept), 2)
-    _atomic_write(p, doc)
+    # ★★ 2026-11-06：「读-改-写」必须整体加锁。
+    #   事故证据：11-06 09:01:24 与 09:01:27 两笔各 1,102 元，第二笔在额度已归零时
+    #   仍按旧账算出了 551 注 ⇒ 两个进程都基于「已投 60,228」各自算数，各自记账。
+    #   加锁只解决「互相覆盖 / 丢记录」，**不能**解决「都基于旧账算注数」——
+    #   那需要原子预占（见函数末尾的残留风险说明）。
+    from data.file_lock import file_lock
+    with file_lock(p):
+        doc = load_spend(path=p, now=now)
+        month = doc["月份"]
+        try:
+            _rn = int(重出批号 or 0)
+        except (TypeError, ValueError):
+            _rn = 0
+        rec = {"月份": month, "彩种": lottery, "目标期号": str(目标期号),
+               "档位": str(档位 or "一般"), "台账域": str(台账域 or "生产"),
+               "注数": n, "单价": price, "金额": round(n * price, 2),
+               "时间": (now or datetime.now()).isoformat(timespec="seconds")}
+        if _rn:
+            rec["重出批号"] = _rn          # 首出批不写该字段（老记录形态不变）
+        key = _rec_key(rec)
+        kept = [r for r in doc["记录"] if _rec_key(r) != key]
+        kept.append(rec)
+        doc["记录"] = kept
+        doc["已投"] = round(sum(float(r.get("金额") or 0.0) for r in kept), 2)
+
+        # ★ 超额检测（锁内做，标记与账本同一次落盘，不会出现「标记了但账没更新」）。
+        #   超额是**已发生的事实**，不回滚、不静默：票已经出了，只能记录 + 告警。
+        over = 0.0
+        try:
+            lim = enabled_limit()
+            if lim and doc["已投"] > float(lim["月度总额"]) + 1e-9:
+                over = round(doc["已投"] - float(lim["月度总额"]), 2)
+        except Exception:                                     # noqa: BLE001
+            over = 0.0
+        if over:
+            doc["超额元"] = over
+            doc["超额说明"] = (
+                f"本月已投 {doc['已投']} 超过月度总额，超出 {over} 元。"
+                "成因通常是并发出号时两个进程基于同一份旧账各算注数（TOCTOU）；"
+                "票已出，不回滚，需人工核对并考虑停发。")
+        _atomic_write(p, doc)
+
+        # ★ 记账即释放本键的额度预占（2026-11-06 原子预占的配套）。
+        #   不释放的话，这笔预留会继续占 10 分钟（TTL），期间其它彩种被多扣一次。
+        #   释放失败不影响记账本身 —— 预占有 TTL 兜底，最坏是多扣一会儿。
+        try:
+            release_reserve(彩种=lottery, 目标期号=目标期号, 档位=档位,
+                            台账域=台账域, 重出批号=_rn, now=now)
+        except Exception as exc:                               # noqa: BLE001
+            logger.warning(f"释放额度预留失败（不影响记账，将在 TTL 后自动失效）：{exc}")
+
+    if over:
+        logger.error(f"预算超额 {over} 元（已投 {doc['已投']}）：{doc['超额说明']}")
     return {"月份": month, "已投": doc["已投"], "本条金额": rec["金额"],
-            "记录数": len(kept)}
+            "记录数": len(kept), "超额元": over}
 
 
 def spent_this_month(*, path: Optional[Path] = None,
@@ -250,6 +285,118 @@ def spent_this_month(*, path: Optional[Path] = None,
 
 
 # ------------------------------------------------------------------ 夹取
+# ------------------------------------------------------------------ 额度预占
+# ★★ 2026-11-06：修 TOCTOU（`clamp` 与 `record_spend` 之间隔着整个出号过程）。
+#   事故证据：11-06 09:01:24 / 09:01:27 两笔各 1,102 元 —— 两个进程都基于
+#   「已投 60,228」各算 551 注，第二笔在额度归零后仍然出号。
+#   `record_spend()` 的文件锁只能防「互相覆盖」，防不住「都按旧账算数」。
+#   根治办法：`clamp(reserve=True)` 在锁内把「即将花掉的钱」**先占住**，
+#   后来者算额度时把它一起扣掉；出号成功后由 `record_spend()` 释放。
+#
+#   ★ 默认 `reserve=False`（保持纯查询）：界面预览 / 报告 / 试算都会调 `clamp()`，
+#     那些场景写盘会凭空占用额度 —— 这正是早期把这项搁置的原因。
+#   ★ 预留有 TTL：出号十几秒，给 10 分钟余量；进程崩溃留下的预留会自动失效，
+#     不会永久吃掉额度。
+RESERVE_PATH = _BASE_DIR / "config" / "budget_reserve.json"
+RESERVE_TTL_SEC = 600.0
+
+
+def _reserve_row(lottery: str, *, 目标期号: Any, 档位: Any, 台账域: Any,
+                 重出批号: Any, 金额: float, now: Optional[datetime] = None
+                 ) -> Dict[str, Any]:
+    """预留记录：键字段与 `_rec_key` 同构（释放时才能一一对上）。"""
+    return {"月份": (now or datetime.now()).strftime("%Y-%m"),
+            "目标期号": str(目标期号 or ""),
+            "档位": str(档位 or "一般"),
+            "台账域": str(台账域 or "生产"),
+            "彩种": str(lottery or ""),
+            "重出批号": int(重出批号 or 0),
+            "金额": round(float(金额), 2),
+            "时间": (now or datetime.now()).isoformat(timespec="seconds")}
+
+
+def load_reserves(*, path: Optional[Path] = None,
+                  now: Optional[datetime] = None) -> List[Dict[str, Any]]:
+    """读**未过期**的预留。文件坏 / 结构坏 ⇒ 按无预留处理（只记日志，不炸出号）。"""
+    p = Path(path) if path is not None else RESERVE_PATH
+    if not p.exists():
+        return []
+    try:
+        doc = json.loads(p.read_text(encoding="utf-8"))
+    except Exception as exc:                                   # noqa: BLE001
+        logger.error(f"额度预留文件不可读，本次按「无预留」处理：{p}：{exc}")
+        return []
+    rows = doc.get("预留") if isinstance(doc, dict) else None
+    if not isinstance(rows, list):
+        return []
+    now_ts = (now or datetime.now()).timestamp()
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        try:
+            ts = datetime.fromisoformat(str(r.get("时间") or "")).timestamp()
+        except (ValueError, TypeError):
+            continue
+        if now_ts - ts <= RESERVE_TTL_SEC:      # 过期预留自动失效（崩溃不留永久占额）
+            out.append(r)
+    return out
+
+
+def _write_reserves(rows: Sequence[Dict[str, Any]], *,
+                    path: Optional[Path] = None) -> None:
+    p = Path(path) if path is not None else RESERVE_PATH
+    p.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write(p, {"预留": list(rows)})
+
+
+def reserved_total(*, path: Optional[Path] = None, now: Optional[datetime] = None,
+                   exclude: Optional[tuple] = None) -> float:
+    """全部有效预留金额之和；`exclude` 指定的键不计（避免自己扣自己）。"""
+    total = 0.0
+    for r in load_reserves(path=path, now=now):
+        if exclude is not None and _rec_key(r) == exclude:
+            continue
+        try:
+            total += float(r.get("金额") or 0.0)
+        except (TypeError, ValueError):
+            continue
+    return round(total, 2)
+
+
+def claim_reserve(lottery: str, *, 目标期号: Any, 注数: int,
+                  档位: str = "一般", 台账域: str = "生产", 重出批号: Any = 0,
+                  单价: Optional[float] = None,
+                  path: Optional[Path] = None,
+                  now: Optional[datetime] = None) -> Dict[str, Any]:
+    """占住一笔额度（同键覆盖）。**调用方必须已持锁**（见 `clamp(reserve=True)`）。"""
+    price = float(ticket_price(lottery) if 单价 is None else 单价)
+    row = _reserve_row(lottery, 目标期号=目标期号, 档位=档位, 台账域=台账域,
+                       重出批号=重出批号, 金额=int(注数) * price, now=now)
+    key = _rec_key(row)
+    rows = [r for r in load_reserves(path=path, now=now) if _rec_key(r) != key]
+    rows.append(row)
+    _write_reserves(rows, path=path)
+    return {"键": key, "金额": row["金额"]}
+
+
+def release_reserve(*, 彩种: str, 目标期号: Any, 档位: str = "一般",
+                    台账域: str = "生产", 重出批号: Any = 0,
+                    path: Optional[Path] = None,
+                    now: Optional[datetime] = None) -> float:
+    """释放一笔预留（出号记账后调用）。返回被释放的金额（无则 0）。"""
+    row = _reserve_row(彩种, 目标期号=目标期号, 档位=档位, 台账域=台账域,
+                       重出批号=重出批号, 金额=0.0, now=now)
+    key = _rec_key(row)
+    rows = load_reserves(path=path, now=now)
+    hit = [r for r in rows if _rec_key(r) == key]
+    if not hit:
+        _write_reserves(rows, path=path)       # 顺手清掉已过期的
+        return 0.0
+    _write_reserves([r for r in rows if _rec_key(r) != key], path=path)
+    return round(sum(float(r.get("金额") or 0.0) for r in hit), 2)
+
+
 def _renumber_of(rec: Dict[str, Any]) -> int:
     """记录里的「重出批号」（缺字段 = 0 = 首出批）。"""
     try:
@@ -296,6 +443,7 @@ def _rebate_amount(doc: Dict[str, Any], lottery: str, issue: Any,
 def clamp(lottery: str, want: int, *, baseline: Optional[int] = None,
           source: str = "auto", 目标期号: Any = None,
           renumber: Optional[Any] = None,
+          reserve: bool = False,
           path: Optional[Path] = None, now: Optional[datetime] = None) -> Dict[str, Any]:
     """把「想买多少注」夹成「可以买多少注」。
 
@@ -311,6 +459,17 @@ def clamp(lottery: str, want: int, *, baseline: Optional[int] = None,
     ★ `renumber`：本次出号的「重出批号」（0/None = 首出批）。不传时读
       `data.feedback._RENUMBER_VAR`（与记账同源）。它决定「退哪一条的钱」：
       退错批 ⇒ 可用额度凭空多一批。见模块 docstring。
+
+    ★★ TOCTOU 已修（2026-11-06）：`reserve=True` 时本函数在文件锁内完成
+      「读台账 → 算注数 → 写预留」，后来者算额度时会把别人**未释放的预留**一并扣掉，
+      不再各自按旧账算数。事故背景：11-06 09:01:24 / 09:01:27 两笔各 1,102 元，
+      第二笔在额度归零后仍然出号。
+      ★ 默认 `reserve=False` 保持纯查询语义（界面预览 / 报告 / 试算一律不写盘）；
+        只有真正要出号的调用点（`cli.py` / `web/utils.py`）才传 True。
+      ★ 预占有 TTL（`RESERVE_TTL_SEC`）：进程崩溃留下的预留会自动失效，
+        不会永久吃掉额度；`record_spend()` 记账时按同键释放。
+      ★ 残留：`clamp()` 拿不到「档位 / 台账域」，预留按 `record_spend()` 的默认值
+        （一般 / 生产）建键；若某调用点真用了别的档位，该预留对不上、只能等 TTL 过期。
     """
     if source not in SOURCES:
         raise ValueError(f"未知来源 {source!r}（只能是 {SOURCES}）")
@@ -339,30 +498,54 @@ def clamp(lottery: str, want: int, *, baseline: Optional[int] = None,
                     月度总额=None, 单期上限=None, 已投元=None, 剩余额度元=None)
 
     monthly, cap = float(lim["月度总额"]), float(lim["单期上限"])
-    doc = load_spend(path=path, now=now)
-    spent = float(doc.get("已投") or 0.0)
 
-    # ★ 重生成不递缩：本次将要覆盖的那条记录本来就会被覆盖 ⇒ 先把它的金额加回可用额度。
-    #   ★★ 键必须**精确**：早期实现写成「目标期号 is None 就豁免最近一条」，
-    #   等于给每个彩种开了一个无上限额度（最近那条的金额永远被加回来），
-    #   而且不会报错 —— 故缺省时先解析出「本次要出的那一期」，解析不到就不豁免。
-    #   ★★ 2026-11-04 再收一层：还必须匹配**重出批号**。只按「期号相同的最近一条」
-    #   退额度时，同期第 2 批（重出批号=1）会把第 1 批（=0）的钱退回来，而第 1 批
-    #   其实**不会被覆盖**（键不同）⇒ 可用额度凭空多一批，且每重出一次再放大一次。
-    issue = 目标期号
-    if issue is None:
-        try:
-            from data.feedback import _next_issue
-            issue = _next_issue(lottery)
-        except Exception:                                     # noqa: BLE001
-            issue = None
-    rn = _current_renumber() if renumber is None else _renumber_of({"重出批号": renumber})
-    rebate = _rebate_amount(doc, lottery, issue, rn)
+    # ★ 原子预占（2026-11-06）：reserve=True 时把「读台账 → 算注数 → 占额度」
+    #   整体放进文件锁。否则两个并发出号会各自读到同一份旧账、各算一份注数，
+    #   合计超支 —— 11-06 09:01 那两笔 551 注就是这么来的。
+    #   默认 False 保持**纯查询**：界面预览 / 报告 / 试算一律不写盘。
+    #   ★ 档位 / 台账域取 `record_spend()` 的默认值：`clamp()` 拿不到它们；
+    #     万一与记账时的键对不上，预留会按 TTL 自然过期，不会永久吃额度。
+    import contextlib
+    _档位, _台账域 = "一般", "生产"
+    _lock_cm = contextlib.nullcontext()
+    if reserve:
+        from data.file_lock import file_lock
+        _lock_cm = file_lock(Path(path) if path is not None else SPEND_PATH)
 
-    remaining = max(0.0, monthly - spent + rebate)
-    n_month = int(remaining // price) if price > 0 else 0
-    n_cap = int(cap // price) if price > 0 else 0
-    n = min(w, n_month, n_cap)
+    with _lock_cm:
+        doc = load_spend(path=path, now=now)
+        spent = float(doc.get("已投") or 0.0)
+
+        # ★ 重生成不递缩：本次将要覆盖的那条记录本来就会被覆盖 ⇒ 先把它的金额加回可用额度。
+        #   ★★ 键必须**精确**：早期实现写成「目标期号 is None 就豁免最近一条」，
+        #   等于给每个彩种开了一个无上限额度（最近那条的金额永远被加回来），
+        #   而且不会报错 —— 故缺省时先解析出「本次要出的那一期」，解析不到就不豁免。
+        #   ★★ 2026-11-04 再收一层：还必须匹配**重出批号**。只按「期号相同的最近一条」
+        #   退额度时，同期第 2 批（重出批号=1）会把第 1 批（=0）的钱退回来，而第 1 批
+        #   其实**不会被覆盖**（键不同）⇒ 可用额度凭空多一批，且每重出一次再放大一次。
+        issue = 目标期号
+        if issue is None:
+            try:
+                from data.feedback import _next_issue
+                issue = _next_issue(lottery)
+            except Exception:                                 # noqa: BLE001
+                issue = None
+        rn = _current_renumber() if renumber is None else _renumber_of({"重出批号": renumber})
+        rebate = _rebate_amount(doc, lottery, issue, rn)
+
+        # ★ 别人未释放的预留同样占额度；排除本键，否则自己扣自己（重复 clamp 会越夹越小）。
+        _mine = _rec_key(_reserve_row(lottery, 目标期号=issue, 档位=_档位,
+                                      台账域=_台账域, 重出批号=rn, 金额=0.0, now=now))
+        reserved = reserved_total(now=now, exclude=_mine) if reserve else 0.0
+
+        remaining = max(0.0, monthly - spent + rebate - reserved)
+        n_month = int(remaining // price) if price > 0 else 0
+        n_cap = int(cap // price) if price > 0 else 0
+        n = min(w, n_month, n_cap)
+
+        if reserve and n > 0:
+            claim_reserve(lottery, 目标期号=issue, 注数=n, 档位=_档位,
+                          台账域=_台账域, 重出批号=rn, 单价=price, now=now)
 
     why: List[str] = []
     if n < w:

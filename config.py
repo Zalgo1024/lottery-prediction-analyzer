@@ -349,7 +349,7 @@ TRIAL_ARMS = 100
 TICKET_SIZE_CONTROL_ENABLED = True
 
 
-def resolve_groups(lottery, requested=None, *, source="auto"):
+def resolve_groups(lottery, requested=None, *, source="auto", reserve=False):
     """取"每期出号组数"（**经过预算闸门夹取**）。
 
     优先级（自高到低）：
@@ -385,7 +385,10 @@ def resolve_groups(lottery, requested=None, *, source="auto"):
 
     try:
         from ev.budget_gate import clamp
-        return int(clamp(lottery, want, baseline=int(base), source=source)["注数"])
+        # ★ `reserve=True` 只在**真要出号**的调用点传（见 docstring）：它会在锁内
+        #   占住额度，防止并发出号各自按旧账算数。界面预览 / 报告 / 试算保持 False。
+        return int(clamp(lottery, want, baseline=int(base), source=source,
+                         reserve=reserve)["注数"])
     except Exception as e:                                   # noqa: BLE001
         from ev import budget_gate as _BG
         if isinstance(e, _BG.GateConfigError):

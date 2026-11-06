@@ -45,9 +45,17 @@ class SanitizeTests(unittest.TestCase):
             self.assertEqual(cfg["fixed"][lot], 5)
 
     def test_clamp_digital_and_lotto_upper_bounds(self):
-        cfg = ts.sanitize({"mode": "fixed", "fixed": {"双色球": 9999, "福彩3D": 9999}})
+        """数字型与乐透型各自夹到**自己的**上限（2026-11-06 起两者上限不同）。
+
+        ★ 原来用 9999 触发夹取 —— 但双色球上限已提到 10000，9999 不再越界，
+          这条会退化成「什么都没测」。改用远超上限的值，并显式断言两条不同刻度。
+        """
+        cfg = ts.sanitize({"mode": "fixed",
+                           "fixed": {"双色球": 999999, "福彩3D": 999999}})
         self.assertEqual(cfg["fixed"]["双色球"], ts.max_tickets("双色球"))
         self.assertEqual(cfg["fixed"]["福彩3D"], ts.max_tickets("福彩3D"))
+        self.assertEqual(cfg["fixed"]["双色球"], 10000)
+        self.assertEqual(cfg["fixed"]["福彩3D"], 1000)
 
     def test_upper_bound_is_configurable(self):
         """★ 上限必须可配（原实现硬编码 数字50/乐透200，而生产 fixed 恰好等于上限
@@ -68,31 +76,53 @@ class SanitizeTests(unittest.TestCase):
         self.assertGreater(ts.max_tickets("双色球"), 200)
         self.assertGreater(ts.max_tickets("排列3"), 50)
 
-    def test_limits_are_uniform_1000_for_every_lottery(self):
-        """所有彩种上限统一 1000（2026-11-04 用户要求：由 500 提到 1000）。
+    def test_limits_follow_per_lottery_policy(self):
+        """上限按彩种给：除 福彩3D / 排列3 外 **10000**，那两个保持 **1000**。
 
-        为什么值得一条测试：上限曾逐彩种给（500/400/300/200/100），卡片上五种刻度；
-        后来统一 500，2026-11-04 又整体提到 1000。只要有人「按彩种的理由」再调一个
-        回去，滑轨又会变成参差不齐 —— 而这是**操作成本**，不是安全收益
-        （真正的硬约束是 `ev/budget_gate` 的月度总额/单期上限）。
+        2026-11-06 用户要求。演变史：逐彩种（500/400/300/200/100）→ 统一 500 →
+        统一 1000 → **现在分两档**，所以不能再断言「所有值都相等」。
 
-        ★ 上限是**承诺**：能拖到 1000 就必须真出得了 1000 注。数字型/乐透型的空间
-          都够（排列3/3D 直选空间正好 1000）；双色球的**贪心覆盖**在 cap=3 + 池 8000
-          下实测只到约 649 注，超出部分走 `_pad_to_groups` 的随机补齐
-          （票面仍是 1000 张，只是覆盖优化退化成随机补），这条只管「数字一致」。
+        ★ 为什么 3D / 排列3 不跟着抬：这两个是**直选空间恰好 1000** 的玩法
+          （000–999），1000 注 = 全空间覆盖，再高只是重复投注同一批号 ——
+          纯加钱不加覆盖面。**这条断言就是防止以后有人「顺手统一」。**
+
+        ★ 上限是**承诺**：能拖到 10000 就必须真出得了 10000 注。双色球的贪心覆盖
+          在 cap=3 + 池 8000 下实测只到约 649 注，超出部分走 `_pad_to_groups`
+          随机补齐（票面仍是 10000 张，只是覆盖优化退化成随机补）。这条只管「数字一致」。
         ★ 上限必须 ≤ `HARD_CAP`，否则 `_resolve_limits` 会静默夹回去。
         """
         from config import LOTTERY_CONFIG
 
-        self.assertEqual(set(ts.DEFAULT_LIMITS.values()), {1000},
-                         f"默认上限不统一：{ts.DEFAULT_LIMITS}")
-        for lot in LOTTERY_CONFIG:
-            self.assertEqual(ts.max_tickets(lot), 1000, f"{lot} 上限不是 1000")
-        # 兜底值也要跟着统一，否则新接入的彩种会掉回旧刻度
+        high = {"双色球", "大乐透", "七星彩", "排列5", "七乐彩", "快乐8"}
+        low = {"福彩3D", "排列3"}
+        # 分母纪律：两档必须**恰好**覆盖全部彩种，漏一个就等于新增彩种掉进兜底
+        self.assertEqual(high | low, set(LOTTERY_CONFIG), "两档未覆盖全部彩种")
+        self.assertFalse(high & low, "同一个彩种不能同时属于两档")
+
+        for lot in high:
+            self.assertEqual(ts.DEFAULT_LIMITS[lot], 10000, f"{lot} 默认上限应为 10000")
+            self.assertEqual(ts.max_tickets(lot), 10000, f"{lot} 生效上限不是 10000")
+        for lot in low:
+            self.assertEqual(ts.DEFAULT_LIMITS[lot], 1000,
+                             f"{lot} 是直选全空间 1000，不许跟着抬")
+            self.assertEqual(ts.max_tickets(lot), 1000, f"{lot} 生效上限不是 1000")
+
+        # 兜底仍保持 1000（新接入彩种走兜底时取保守值，不自动放宽）
         self.assertEqual(ts._FALLBACK_LIMIT_LOTTO, 1000)
         self.assertEqual(ts._FALLBACK_LIMIT_DIGITAL, 1000)
         # ★ 默认值不得超过绝对上限（超过就会被静默夹回，表现为「改了没生效」）
         self.assertLessEqual(max(ts.DEFAULT_LIMITS.values()), ts.HARD_CAP)
+
+    def test_hard_cap_above_every_default(self):
+        """★ `HARD_CAP` 必须 ≥ 所有默认上限，否则「改了默认值却还是旧上限」。
+
+        2026-11-06 把 6 个彩种提到 10000 时，`HARD_CAP` 若仍停在 1000，
+        `_resolve_limits` 会把它们静默夹回 1000 —— 界面上看起来「没改成功」。
+        这条单独钉住这个陷阱。
+        """
+        self.assertGreaterEqual(ts.HARD_CAP, max(ts.DEFAULT_LIMITS.values()))
+        for lot, v in ts.DEFAULT_LIMITS.items():
+            self.assertLessEqual(v, ts.HARD_CAP, f"{lot} 默认上限超过 HARD_CAP")
 
     def test_lower_bound_is_one(self):
         cfg = ts.sanitize({"mode": "fixed", "fixed": {"双色球": 0, "福彩3D": -5}})

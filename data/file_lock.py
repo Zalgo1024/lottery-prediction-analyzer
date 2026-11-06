@@ -52,8 +52,22 @@ class _WindowsLock(_LockBase):
         import msvcrt
 
         self.lock_file.parent.mkdir(parents=True, exist_ok=True)
-        self._fh = open(self.lock_file, "a+")
         start = time.time()
+        # ★★ 2026-11-06：`open(..., "a+")` 本身也会失败，必须放进重试窗口。
+        #   Windows 下多个进程几乎同时以 "a+" 打开同一个锁文件会偶发
+        #   `PermissionError: [Errno 13]`（打开阶段就冲突，还没到 msvcrt.locking）。
+        #   原实现把 open 写在 try 外面、且不重试 ⇒ 并发一来直接抛，锁形同虚设。
+        #   （推送组锁当初踩的是同一个坑，只是那次是同进程第二线程。）
+        while True:
+            try:
+                self._fh = open(self.lock_file, "a+")
+                break
+            except PermissionError:
+                if time.time() - start > self.timeout:
+                    self._fh = None
+                    raise TimeoutError(
+                        f"打开锁文件超时（并发占用）: {self.lock_file}")
+                time.sleep(0.05)
         while True:
             try:
                 # 锁定整个文件（1 字节即可，独占）
@@ -87,8 +101,18 @@ class _PosixLock(_LockBase):
         import fcntl
 
         self.lock_file.parent.mkdir(parents=True, exist_ok=True)
-        self._fh = open(self.lock_file, "a+")
         start = time.time()
+        # 与 Windows 分支同理：open 阶段也可能失败（权限 / 并发），放进重试窗口
+        while True:
+            try:
+                self._fh = open(self.lock_file, "a+")
+                break
+            except PermissionError:
+                if time.time() - start > self.timeout:
+                    self._fh = None
+                    raise TimeoutError(
+                        f"打开锁文件超时（并发占用）: {self.lock_file}")
+                time.sleep(0.05)
         while True:
             try:
                 fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)

@@ -104,6 +104,10 @@ config/*
 # ★ 注意：`config/prefix_shadow.json`（影子开关）**故意不**放行 —— 它是本机运行时
 #   开关，缺失即等于关闭，比入库一份「启用=true」安全。公开仓库克隆后默认不写证据。
 !config/draw_schedule.json
+# 影子验证的批次性质预注册（2026-11-06）—— 同样是**判据**：它决定哪一批算
+# 「独立评估批」（参与判决）、哪一批算「探索批」（只跑流程）。判据必须事先锁定并入库，
+# 否则「事后挑一批好看的算评估批」无法被外部核对。不含密钥。
+!config/prefix_shadow_rules.json
 logs/flask_stdout.log
 logs/run_supervisor.log
 

@@ -14,9 +14,15 @@ from datetime import date
 
 import pytest
 
+from pathlib import Path
+
 from ev import order_freeze as OF
+from ev import prefix_shadow as PS
 from ev import shadow_bridge as SB
 from tests import _import_guard as G
+
+ROOT = Path(__file__).resolve().parents[1]
+ROOT_RULES = ROOT / "config" / "prefix_shadow_rules.json"
 
 # 2026-11-08 是周日 ⇒ 双色球开奖日（draw_days=[1,3,6]，0=周一）
 DRAW_DATE = date(2026, 11, 8)
@@ -47,6 +53,8 @@ def _freeze(tmp_path, **over):
               target_date=DRAW_DATE, batch_time=BATCH, register_time=REG,
               switch={"启用": True},
               schedule_path=_schedule(tmp_path),
+              # 默认给一个**不存在**的规则文件 ⇒ 一律探索批，避免用例依赖现场规则
+              rules_path=tmp_path / "no_rules.json",
               snapshot_dir=tmp_path / "snap",
               shadow_path=tmp_path / "shadow.jsonl")
     kw.update(over)
@@ -151,6 +159,76 @@ def test_switch_true_but_only_literal_true(tmp_path):
     p = tmp_path / "s.json"
     p.write_text(json.dumps({"启用": "true"}), encoding="utf-8")
     assert SB.is_enabled(p)["启用"] is False      # 字符串 "true" 不算开启
+
+
+# ------------------------------------------- 批次性质（必须事先锁定，不能事后挑）
+def test_batch_kind_without_rules_is_explore(tmp_path):
+    """缺规则 ⇒ 探索批。保守方向：探索批不参与判决，绝不会被误算成证据。"""
+    got = SB.batch_kind_for(BATCH, {"评估批起始日期": None, "_缺失": True,
+                                    "_路径": str(tmp_path / "nope.json")})
+    assert got["性质"] == PS.BATCH_EXPLORE
+    assert "不存在" in got["依据"]
+
+
+def test_batch_kind_before_start_is_explore():
+    got = SB.batch_kind_for("2026-11-20T12:00:00",
+                            {"评估批起始日期": "2026-12-01", "版本": "t"})
+    assert got["性质"] == PS.BATCH_EXPLORE and "探索期" in got["依据"]
+
+
+def test_batch_kind_on_or_after_start_is_eval():
+    got = SB.batch_kind_for("2026-12-01T00:00:00",
+                            {"评估批起始日期": "2026-12-01", "版本": "t"})
+    assert got["性质"] == PS.BATCH_EVAL
+    got2 = SB.batch_kind_for("2027-01-05T12:00:00",
+                             {"评估批起始日期": "2026-12-01", "版本": "t"})
+    assert got2["性质"] == PS.BATCH_EVAL
+
+
+def test_batch_kind_unparseable_start_is_explore():
+    """起始日期写坏 ⇒ 探索批（不 fail-open 成评估批）。"""
+    got = SB.batch_kind_for(BATCH, {"评估批起始日期": "下个月"})
+    assert got["性质"] == PS.BATCH_EXPLORE
+    assert "不可解析" in got["依据"]
+
+
+def test_batch_kind_uses_injected_time_not_system_clock():
+    """判定只看注入的 batch_time —— 同一条规则下改时间就能翻转结论。"""
+    rules = {"评估批起始日期": "2026-12-01", "版本": "t"}
+    assert SB.batch_kind_for("2026-11-30T23:59:59", rules)["性质"] == PS.BATCH_EXPLORE
+    assert SB.batch_kind_for("2026-12-01T00:00:00", rules)["性质"] == PS.BATCH_EVAL
+
+
+def test_real_rules_file_is_locked_and_has_start():
+    """现场规则文件必须存在、锁定、且给出起始日期 —— 否则评估批永远攒不起来。"""
+    rules = SB.load_rules(ROOT_RULES)
+    assert not rules.get("_缺失"), "config/prefix_shadow_rules.json 不存在"
+    assert rules.get("锁定") is True
+    assert rules.get("评估批起始日期"), "缺「评估批起始日期」⇒ 全按探索批，永不可开判"
+
+
+def test_freeze_records_batch_kind_in_snapshot_and_ledger(tmp_path):
+    """冻结时必须把批次性质同时写进快照备注与台账登记行。"""
+    rules = tmp_path / "rules.json"
+    rules.write_text(json.dumps({"版本": "t", "评估批起始日期": "2026-11-01",
+                                 "锁定": True}, ensure_ascii=False), encoding="utf-8")
+    r = _freeze(tmp_path, rules_path=rules)
+    assert r["状态"] == "已登记", r
+    assert r["批次性质"] == PS.BATCH_EVAL
+    snap = json.loads(next((tmp_path / "snap").glob("*.json")).read_text(encoding="utf-8"))
+    assert snap["备注"]["批次性质"] == PS.BATCH_EVAL
+    assert snap["备注"]["批次规则版本"] == "t"
+    row = json.loads((tmp_path / "shadow.jsonl").read_text(
+        encoding="utf-8").splitlines()[0])
+    assert row["批次性质"] == PS.BATCH_EVAL
+
+
+def test_freeze_without_rules_registers_explore(tmp_path):
+    """规则缺失时冻结照常进行，但只能登记为探索批（不冒充评估批）。"""
+    r = _freeze(tmp_path, rules_path=tmp_path / "nope.json")
+    assert r["状态"] == "已登记", r
+    assert r["批次性质"] == PS.BATCH_EXPLORE
+    assert "不存在" in r["批次性质依据"]
 
 
 # ---------------------------------------------------------------- 成功路径

@@ -1005,7 +1005,8 @@ def run_predict_task(task_id: str, lottery_name: str, params: dict):
     with renumber_scope(_rn):
         result = predict(
             lottery_name=lottery_name,
-            groups=resolve_groups(lottery_name, params.get("groups")),
+            groups=resolve_groups(lottery_name, params.get("groups"),
+                                  reserve=_record_pending(params)),
             mode=params.get("mode", "fresh"),
             # 验证/试算出号：必须只算不落库，避免用任意 groups 覆盖生产 pending
             record_pending=_record_pending(params),
@@ -1231,7 +1232,8 @@ def run_auto_pipeline_core(lottery_name: str, params: dict, task_id: Optional[st
         # 没有这道闸门就会为同一目标期号写入多份 pending，污染后续反馈结算。
         from data.feedback import _next_issue, load_pending, latest_production_pending
         target_issue = _next_issue(lottery_name)
-        groups_eff = resolve_groups(lottery_name, params.get("groups"))
+        groups_eff = resolve_groups(lottery_name, params.get("groups"),
+                                    reserve=_record_pending(params))
         # ★ 2026-10-18：显式注数 ≠ 看板滑轨时留痕（验证出号会覆盖生产 pending 的入口）
         if params.get("groups") is not None:
             _slide_groups = resolve_groups(lottery_name)
@@ -1266,7 +1268,9 @@ def run_auto_pipeline_core(lottery_name: str, params: dict, task_id: Optional[st
             #   的注数（可能为 0 = 停发，engine 有对应的停发分支）。
             if _rn:
                 with renumber_scope(_rn):
-                    groups_eff = resolve_groups(lottery_name, params.get("groups"))
+                    groups_eff = resolve_groups(
+                        lottery_name, params.get("groups"),
+                        reserve=_record_pending(params))
             if existing:
                 steps.append(f"重新生成(下期{target_issue}已有预测"
                              f"{len(existing.get('预测号码') or [])}组 ≠ 出号数量{groups_eff})"
@@ -1358,6 +1362,28 @@ def run_auto_pipeline_core(lottery_name: str, params: dict, task_id: Optional[st
                             f"前缀影子冻结失败（不影响出号）：{_psb.get('原因')}")
                 except Exception as e:                        # noqa: BLE001
                     logger.warning(f"前缀影子冻结接入异常（不影响出号）: {e}")
+
+            # ③d 前缀影子结算（2026-11-06）：把「已登记且已开奖」的期结算掉。
+            #   放在出号之后是因为①已更新开奖数据；没开奖的期由 settle_pending 跳过
+            #   并写原因（**不写成通过**）。任何失败只告警，不影响出号与推送。
+            if _record_pending(params):
+                try:
+                    # ★ 只调编排层的代理入口，**不直接 import 研究侧的结算模块**：
+                    #   研究模块的 import 被 `tests/_import_guard` 收敛到编排层，
+                    #   走代理才能既接线又不放宽护栏（连注释里写模块名都会命中扫描）。
+                    from ev.shadow_bridge import settle_after_draw as _settle
+                    from datetime import datetime as _dtnow2
+                    _ss = _settle(settle_time=_dtnow2.now().isoformat(
+                        timespec="seconds"))
+                    if _ss.get("启用") and (_ss.get("已结算") or _ss.get("失败")):
+                        steps.append(
+                            f"影子结算 已结算 {_ss.get('已结算')} / "
+                            f"跳过 {_ss.get('跳过')} / 失败 {_ss.get('失败')}")
+                    for _d in (_ss.get("明细") or []):
+                        if _d.get("状态") == "失败":
+                            logger.warning(f"影子结算失败：{_d}")
+                except Exception as e:                        # noqa: BLE001
+                    logger.warning(f"前缀影子结算接入异常（不影响出号）: {e}")
 
     # ③b 前瞻 A/B 对照实验（NetPayout WP3）
     #   先结算已开奖期次（开奖数据刚在①更新），再为下一期记录 A/B 两组号码。

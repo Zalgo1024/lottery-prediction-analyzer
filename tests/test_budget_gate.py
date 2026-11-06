@@ -338,3 +338,82 @@ def test_empty_tickets_without_marker_still_record(tmp_fb):
     record_pending_prediction("排列5", rec)
     assert len(load_pending("排列5")) == 1
     assert BG.load_spend()["停发"] == []
+
+
+# ---------------------------------------------------------------- ⑦ 原子预占（TOCTOU）
+# 事故背景：2026-11-06 09:01:24 / 09:01:27 两笔各 1,102 元 —— 两个进程都基于
+# 「已投 60,228」各算 551 注，第二笔在额度归零后仍然出号。
+# `record_spend()` 的文件锁只能防「互相覆盖」，防不住「都按旧账算数」。
+def test_reserve_false_is_pure_query():
+    """★ 默认 reserve=False 必须**不写盘**：界面预览 / 报告 / 试算都会调 clamp()。"""
+    _write_limit(月度总额=10000, 单期上限=10000)
+    BG.clamp("双色球", 1000, baseline=1000, source="auto")
+    assert not BG.RESERVE_PATH.exists(), "纯查询不该产生预留文件"
+
+
+def test_without_reserve_all_three_get_full_count():
+    """★ 反证：不开预占时三个彩种都按同一份旧账算出满额 ⇒ 合计超支（修复前的行为）。"""
+    _write_limit(月度总额=4000, 单期上限=10000)     # 4000 元只够 2000 注
+    got = [BG.clamp(lot, 1000, baseline=1000, source="auto")["注数"]
+           for lot in ("双色球", "大乐透", "排列5")]
+    assert got == [1000, 1000, 1000], "这是 bug 的现场：合计 3000 注 > 额度"
+    assert not BG.RESERVE_PATH.exists()
+
+
+def test_reserve_shrinks_later_lotteries():
+    """★ 修复后：预占让后来者看到前面的钱，第三个彩种被夹到 0。"""
+    _write_limit(月度总额=4000, 单期上限=10000)
+    a = BG.clamp("双色球", 1000, baseline=1000, source="auto", reserve=True)
+    b = BG.clamp("大乐透", 1000, baseline=1000, source="auto", reserve=True)
+    c = BG.clamp("排列5", 1000, baseline=1000, source="auto", reserve=True)
+    assert (a["注数"], b["注数"]) == (1000, 1000)
+    assert c["注数"] == 0 and c.get("停发") is True
+    assert BG.reserved_total() == 4000.0
+
+
+def test_record_spend_releases_reserve():
+    """记账即释放：否则这笔预占会继续吃 10 分钟（TTL）。"""
+    _write_limit(月度总额=4000, 单期上限=10000)
+    a = BG.clamp("双色球", 1000, baseline=1000, source="auto", reserve=True)
+    assert BG.reserved_total() == 2000.0
+    BG.record_spend("双色球", 目标期号=a["目标期号"], 注数=1000)
+    assert BG.reserved_total() == 0.0
+    # 释放后按「已投」算额度：4000 - 2000 = 2000 元 ⇒ 还能出 1000 注
+    nxt = BG.clamp("大乐透", 1000, baseline=1000, source="auto", reserve=True)
+    assert nxt["注数"] == 1000
+
+
+def test_expired_reserve_is_ignored():
+    """崩溃留下的预占必须按 TTL 自动失效，不能永久吃额度。"""
+    _write_limit(月度总额=4000, 单期上限=10000)
+    BG._write_reserves([{"月份": "2026-11", "目标期号": "1", "档位": "一般",
+                         "台账域": "生产", "彩种": "双色球", "重出批号": 0,
+                         "金额": 9999.0, "时间": "2000-01-01T00:00:00"}])
+    assert BG.reserved_total() == 0.0
+    assert BG.clamp("双色球", 1000, baseline=1000, source="auto",
+                    reserve=True)["注数"] == 1000
+
+
+def test_broken_reserve_file_does_not_break_clamp():
+    """预留文件坏掉不能拖垮出号：按「无预留」处理。"""
+    _write_limit(月度总额=4000, 单期上限=10000)
+    BG.RESERVE_PATH.write_text("{坏掉的 json", encoding="utf-8")
+    assert BG.load_reserves() == []
+    assert BG.clamp("双色球", 1000, baseline=1000, source="auto",
+                    reserve=True)["注数"] == 1000
+
+
+def test_release_twice_is_idempotent():
+    _write_limit(月度总额=4000, 单期上限=10000)
+    a = BG.clamp("双色球", 1000, baseline=1000, source="auto", reserve=True)
+    BG.release_reserve(彩种="双色球", 目标期号=a["目标期号"])
+    assert BG.release_reserve(彩种="双色球", 目标期号=a["目标期号"]) == 0.0
+
+
+def test_reserve_does_not_double_count_itself():
+    """同一个键反复 clamp 不能越夹越小（自己扣自己）。"""
+    _write_limit(月度总额=4000, 单期上限=10000)
+    first = BG.clamp("双色球", 1000, baseline=1000, source="auto", reserve=True)["注数"]
+    again = BG.clamp("双色球", 1000, baseline=1000, source="auto", reserve=True)["注数"]
+    assert first == again == 1000
+    assert BG.reserved_total() == 2000.0        # 同键覆盖，不是叠加
