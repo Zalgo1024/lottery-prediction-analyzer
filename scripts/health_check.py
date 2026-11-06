@@ -183,6 +183,24 @@ def check_write_guard():
                      else f"⚠️ 写保护异常（路径判定={path_ok}, 拦截={blocked}）——生产数据可能被测试覆盖")}
 
 
+def check_period_cap():
+    """第 7 项：单期上限 C2/C3 口径（2026-11-07）。**只读**，不夹注数、不阻断出号。
+
+    C2① 拆两档：真实约束（逐单彩种单批）违反才计入 `真实问题`；
+    同期合计是**规模对照读数**，只写进报告文字，不计入真实问题 —— 否则按 C1①
+    的实现语义，体检会天天把「同日 8 彩种合计」误报成超支。
+    C3①：重出批不约束，但逐期累计 / 批次数 / 倍数必须可见，空白不等于没人看过。
+    """
+    from ev.budget_period_cap import check
+
+    try:
+        return check()
+    except Exception as e:                                   # noqa: BLE001
+        return {"适用": False, "原因": f"检查不可用：{type(e).__name__}: {e}"
+                                      "（不记为通过）",
+                "真实问题": [], "对照告警": [], "披露": []}
+
+
 def _quarantined(tag: str, hist: list, pend: list) -> bool:
     """判断某条审计问题是否落在「已隔离记录」上。
 
@@ -247,6 +265,7 @@ def main(push: bool = True):
     fields = check_key_fields()
     pipeline = check_pipeline_freshness()
     guard = check_write_guard()
+    period_cap = check_period_cap()
 
     real_problems = (
         [(p["彩种"], "|".join(p["问题"])) for p in pending if p["问题"]]
@@ -256,13 +275,15 @@ def main(push: bool = True):
         + [(p["彩种"], f"流水线快照落后 {p['落后']} 期")
            for p in pipeline if p.get("落后")]
         + ([("系统", guard["说明"])] if not guard["可用"] else [])
+        + [("预算", s) for s in (period_cap.get("真实问题") or [])]
     )
 
     stamp = f"{today:%Y%m%d}"
     (BASE / "logs" / f"项目体检_{stamp}.json").write_text(
         json.dumps({"日期": str(today), "完整性": integrity, "记录审计": record_issues,
                     "pending": pending, "关键字段": fields, "流水线": pipeline,
-                    "写保护": guard, "真实问题": real_problems},
+                    "写保护": guard, "单期上限口径": period_cap,
+                    "真实问题": real_problems},
                    ensure_ascii=False, indent=2, default=str), encoding="utf-8")
 
     L = [f"# 项目数据体检 {today}", "",
@@ -312,6 +333,39 @@ def main(push: bool = True):
     L.append("")
     L.append("## 6. 写保护自检")
     L.append(f"- {guard['说明']}")
+    L.append("")
+    L.append("## 7. 单期上限口径（C1① / C2① / C3①）")
+    pc = period_cap
+    if not pc.get("适用"):
+        L.append(f"- **不适用**：{pc.get('原因') or '未给出原因'}（缺席≠通过）")
+    else:
+        t = pc.get("台账") or {}
+        hard = pc.get("真实约束") or {}
+        cmp = pc.get("同期合计对照") or {}
+        c3 = pc.get("C3读数") or {}
+        L.append(f"- 单期上限 {pc['单期上限元']:.0f} 元 / 月度总额 "
+                 f"{pc['月度总额元']:.0f} 元；口径 = {pc.get('C1')}。")
+        L.append(f"- 台账 {t.get('记录数', 0)} 行，参与求和 {t.get('参与求和条数', 0)} 行，"
+                 f"金额未知 {t.get('金额未知条数', 0)} 行、日期未记录 "
+                 f"{t.get('日期未记录条数', 0)} 行（均显式计数，{t.get('分母口径')}）。")
+        L.append(f"- **真实约束**：逐单彩种单批核 {hard.get('受检批数', 0)} 批，"
+                 f"违反 {hard.get('违反批数', 0)} 批"
+                 f"（判据：{hard.get('判据')}）。")
+        L.append(f"- **同期合计（只报不罚）**：同日最大 "
+                 f"{cmp.get('同日最大合计元', 0):.0f} 元，"
+                 f"越过单期上限的天数 {cmp.get('同日越过单期上限的天数', 0)}；"
+                 f"含重出批的期数 {cmp.get('含重出批的期数', 0)}。")
+        L.append(f"- **C3**：{pc.get('C3')}；重出批 "
+                 f"{c3.get('重出批次数', 0)} 次、涉及 {c3.get('涉及期数', 0)} 期，"
+                 f"约束重出批={c3.get('约束重出批')}。")
+        for i in (c3.get("逐期累计") or [])[:12]:
+            L.append(f"  - {i['彩种']} 期{i['目标期号']}：{i['批次数']} 批（重出 "
+                     f"{i['重出批数']} 批）/ 累计 {i['金额']:.0f} 元 / "
+                     f"相对单期上限 {i['相对单期上限倍数']} 倍")
+        for w in (pc.get("对照告警") or []):
+            L.append(f"- ⚠ {w}")
+    for note in (pc.get("披露") or []):
+        L.append(f"> {note}")
     if real_problems:
         L.append("")
         L.append("## ⚠️ 真实待处理问题")

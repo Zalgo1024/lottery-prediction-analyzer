@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>前缀影子验证 · 状态</title>
+<style>
+  :root{
+    --bg:#f5f7fa; --card:#ffffff; --line:#e3e8ef; --text:#1f2937;
+    --muted:#64748b; --accent:#2563eb; --amber:#b45309; --amber-bg:#fffbeb;
+    --green:#15803d; --green-bg:#f0fdf4; --gray-bg:#f1f5f9;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+       font-family:"Microsoft YaHei","PingFang SC",system-ui,-apple-system,sans-serif;
+       font-size:14px;line-height:1.6}
+  .wrap{max-width:1080px;margin:0 auto;padding:28px 20px 60px}
+  header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap}
+  h1{font-size:22px;margin:0 0 6px;font-weight:700}
+  .sub{color:var(--muted);font-size:13px}
+  .btn{border:1px solid var(--line);background:var(--card);color:var(--text);
+       padding:8px 14px;border-radius:8px;cursor:pointer;font-size:13px}
+  .btn:hover{border-color:var(--accent);color:var(--accent)}
+  .banner{margin:20px 0;padding:14px 18px;border-radius:10px;border:1px solid var(--amber-bg);
+          background:#fef3c7;color:#78350f;font-weight:600;font-size:15px}
+  .banner.gray{background:var(--gray-bg);border-color:var(--line);color:var(--muted)}
+  .banner.ok{background:var(--green-bg);border-color:#bbf7d0;color:var(--green)}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin:18px 0}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px 18px}
+  .card .k{color:var(--muted);font-size:12px;margin-bottom:6px}
+  .card .v{font-size:26px;font-weight:700;letter-spacing:.5px}
+  .card .n{color:var(--muted);font-size:12px;margin-top:4px}
+  section{background:var(--card);border:1px solid var(--line);border-radius:10px;
+          padding:18px 20px;margin:16px 0}
+  h2{font-size:16px;margin:0 0 12px;font-weight:700}
+  h2 .tag{font-size:11px;font-weight:400;color:var(--muted);margin-left:8px}
+  ul{margin:0;padding-left:20px}li{margin:5px 0}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line)}
+  th{color:var(--muted);font-weight:600;background:#fafbfc}
+  tr:last-child td{border-bottom:none}
+  .muted{color:var(--muted)}
+  .pill{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;
+        background:var(--gray-bg);color:var(--muted);margin-right:6px}
+  .pill.on{background:var(--green-bg);color:var(--green)}
+  .pill.off{background:#fef2f2;color:#b91c1c}
+  .warn{background:var(--amber-bg);border-left:3px solid #f59e0b;padding:10px 14px;
+        border-radius:6px;margin:12px 0;color:#78350f}
+  .foot{color:var(--muted);font-size:12px;margin-top:26px;text-align:center}
+  .na{color:var(--muted)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>前缀影子验证 · 状态</h1>
+      <div class="sub" id="sub">读取中…</div>
+    </div>
+    <button class="btn" id="refresh">刷新快照</button>
+  </header>
+
+  <div id="banner" class="banner gray">正在读取 <code>/static/data/shadow_status.json</code>…</div>
+
+  <div class="grid" id="cards"></div>
+
+  <section>
+    <h2>门槛可行性 <span class="tag">把「还需 N 期」翻译成年限</span></h2>
+    <div id="feas"></div>
+  </section>
+
+  <section>
+    <h2>快照分母与方案 B 证据 <span class="tag">分母不缩水 · 未参与显式计数</span></h2>
+    <div id="evidence"></div>
+  </section>
+
+  <section>
+    <h2>未开判原因 <span class="tag">缺席≠通过</span></h2>
+    <ul id="reasons"></ul>
+  </section>
+
+  <section>
+    <h2>最近登记 <span class="tag">只展示，不回改</span></h2>
+    <div id="recent"></div>
+  </section>
+
+  <section>
+    <h2>纪律与局限</h2>
+    <ul id="notes"></ul>
+  </section>
+
+  <div class="foot">本页只读 · 不产生新读数、不做判决 · 数据由 <code>scripts/shadow_status.py</code> 生成</div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var DASH = "—";
+  function v(x) { return (x === null || x === undefined || x === "") ? DASH : String(x); }
+  function num(x) {
+    if (x === null || x === undefined || x === "") return DASH;
+    if (typeof x === "number") return x.toLocaleString("zh-CN");
+    return String(x);
+  }
+  function esc(s) {
+    return v(s).replace(/[&<>"']/g, function (c) {
+      return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];
+    });
+  }
+  function ul(items) {
+    if (!items || !items.length) return '<p class="muted">无（须回到预注册判据另行判决）</p>';
+    return "<ul>" + items.map(function (x) { return "<li>" + esc(x) + "</li>"; }).join("") + "</ul>";
+  }
+  function card(k, val, note) {
+    return '<div class="card"><div class="k">' + esc(k) + '</div><div class="v">' +
+           num(val) + '</div><div class="n">' + esc(note) + '</div></div>';
+  }
+  function table(headers, rows) {
+    if (!rows || !rows.length) return '<p class="muted">暂无记录</p>';
+    return "<table><thead><tr>" + headers.map(function (h) {
+      return "<th>" + esc(h) + "</th>";
+    }).join("") + "</tr></thead><tbody>" + rows.map(function (r) {
+      return "<tr>" + r.map(function (c) { return "<td>" + esc(c) + "</td>"; }).join("") + "</tr>";
+    }).join("") + "</tbody></table>";
+  }
+  function render(d) {
+    if (!d || d.适用 === false) {
+      document.getElementById("banner").className = "banner gray";
+      document.getElementById("banner").textContent =
+        "状态不可用：" + v(d && d.原因) + "（不记为通过）";
+      document.getElementById("sub").textContent = "生成时刻 " + v(d && d.生成时刻);
+      return;
+    }
+    var s = d.影子状态 || {}, a = d.快照体检 || {}, e = d.方案B证据 || {},
+        f = d.门槛可行性 || {}, sw = d.开关 || {}, rule = d.批次性质预注册 || {};
+    document.getElementById("sub").textContent =
+      "生成时刻 " + v(d.生成时刻) + " · 编排版本 " + v(d.编排版本) +
+      " · 开关 " + (sw.启用 ? "已启用" : "关闭") + " · " + v(sw.模式);
+
+    var b = document.getElementById("banner");
+    if (s.可开判 === true) {
+      b.className = "banner ok";
+      b.textContent = "可开判（须回到预注册判据另行判决，本页不代判）";
+    } else {
+      b.className = "banner";
+      b.textContent = "当前状态：" + v(s.状态) +
+        " —— 不是失败，更不是通过；只表示已测维度在该样本量下还没有可判证据，不构成证明。";
+    }
+
+    var ev = s.独立评估批 || {};
+    document.getElementById("cards").innerHTML = [
+      card("登记期数", s.登记期数, "开奖前冻结的前 n 注"),
+      card("结算期数", s.结算期数, "有开奖记录后才结算"),
+      card("独立评估批·结算", ev.结算期数, "只有它计入开判门槛"),
+      card("还需期数", s.还需期数, "门槛 " + num((s.门槛 || {}).门槛期数) + " 期"),
+      card("快照分母", a.文件总数, "合格 " + num(a.合格数) + " / 不合格 " + num(a.不合格数)),
+      card("方案 B 证据", e.行数, "坏行 " + num(e.坏行数) + " · 逐彩种 8/8 覆盖")
+    ].join("");
+
+    var fh = "";
+    if (f.可用 === false) {
+      fh = ul(f.原因);
+    } else {
+      fh = '<div class="warn">按现有开奖节奏，主口径（' + esc(f.门槛彩种) +
+           '）约需 <strong>' + num(f.主口径预计年数) + ' 年</strong>；逐彩种最快 ' +
+           num(f.最快预计年数) + ' 年、最慢 ' + num(f.最慢预计年数) +
+           ' 年。「还需 ' + num(s.还需期数) +
+           ' 期」是账面差额，不等于「再攒攒就能开判」。</div>' +
+           table(["彩种", "每年期数", "预计年数", "备注"],
+                 (f.逐彩种 || []).map(function (r) {
+                   return [r.彩种, r.每年期数, r.预计年数, r.原因 || "—"];
+                 })) + ul(f.披露);
+    }
+    document.getElementById("feas").innerHTML = fh;
+
+    var cross = e.交叉校验 || {};
+    document.getElementById("evidence").innerHTML =
+      "<p><span class='pill " + (sw.启用 ? "on" : "off") + "'>开关 " +
+      (sw.启用 ? "启用" : "关闭") + "</span>" +
+      "<span class='pill'>外部源 " + esc(sw.外部源) + "</span>" +
+      "<span class='pill'>评估批起始 " + esc(rule.评估批起始日期) + "</span></p>" +
+      "<p>冻结快照：总数 <strong>" + num(a.文件总数) + "</strong> 份，具备登记资格 " +
+      num(a.合格数) + " 份，不合格 " + num(a.不合格数) +
+      " 份。分母口径：" + esc(a.分母口径) + "</p>" +
+      "<p>外部证据 " + num(e.行数) + " 条、坏行 " + num(e.坏行数) +
+      " 条；交叉校验参与 " + num(cross.参与校验) + " 期、未参与 " +
+      num(cross.未参与) + " 期、矛盾 " + num(cross.矛盾) + " 期。</p>" +
+      table(["彩种", "证据条数", "参与校验", "矛盾"],
+            (e.逐彩种条数 ? Object.keys(e.逐彩种条数).map(function (k) {
+              var row = (cross.逐彩种 || []).filter(function (x) { return x.彩种 === k; })[0] || {};
+              return [k, e.逐彩种条数[k], row.参与校验, row.矛盾];
+            }) : [])) +
+      "<div class='warn'>" + esc(e.披露) + "</div>" +
+      "<p class='muted'>" + esc(a.开奖先后) + "</p>";
+
+    document.getElementById("reasons").innerHTML =
+      (s.未开判原因 || []).map(function (x) { return "<li>" + esc(x) + "</li>"; }).join("") ||
+      "<li class='muted'>无（须回到预注册判据另行判决）</li>";
+
+    document.getElementById("recent").innerHTML = table(
+      ["彩种", "期号", "n", "批次性质", "批次时间", "开奖时间"],
+      (d.最近登记 || []).map(function (r) {
+        return [r.彩种, r.期号, r.n, r.批次性质, r.批次时间, r.开奖时间];
+      }));
+
+    var notes = (d.纪律 || []).concat(["数据接口：/api/shadow/status（需重启后可用）；" +
+      "本静态快照无需重启。"]);
+    document.getElementById("notes").innerHTML = ul(notes);
+  }
+  function load() {
+    fetch("/static/data/shadow_status.json?t=" + Date.now(), {cache: "no-store"})
+      .then(function (r) { if (!r.ok) { throw new Error("HTTP " + r.status); } return r.json(); })
+      .then(render)
+      .catch(function (err) {
+        document.getElementById("banner").className = "banner gray";
+        document.getElementById("banner").textContent =
+          "快照读取失败：" + err.message + " ⇒ 状态未知（不记为通过）。请先运行 scripts/shadow_status.py";
+      });
+  }
+  document.getElementById("refresh").addEventListener("click", load);
+  load();
+})();
+</script>
+</body>
+</html>

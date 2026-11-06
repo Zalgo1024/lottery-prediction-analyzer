@@ -357,6 +357,93 @@ def opening_gate(verdict: Dict[str, Any]) -> Dict[str, Any]:
             "来源": "prefix_curve.verdict_curve() 的 n*_保守（解析上界与实测 Δ 取大）"}
 
 
+def annual_periods(*, lotteries: Optional[List[str]] = None) -> Dict[str, Any]:
+    """从本地开奖数据算「每年开奖期数」的**中位数**（丢首尾不完整年）。
+
+    ★ 不读系统时间：完整年 = 把所有出现过的年份排序后去掉第一年和最后一年，
+      再取中位数。这样回放 / 单测都能复现，不需要知道「今天是哪年」。
+      数据不可读 ⇒ 写 `None` + 原因，绝不填一个看着合理的默认值。
+    """
+    import statistics
+    from collections import defaultdict
+
+    from config import LOTTERY_CONFIG
+    from data.loader import load_lottery
+
+    out: Dict[str, Any] = {}
+    for lot in (lotteries if lotteries is not None else list(LOTTERY_CONFIG)):
+        try:
+            recs = load_lottery(lot).records or []
+        except Exception as e:                                 # noqa: BLE001
+            out[lot] = {"每年期数": None, "原因": f"开奖数据不可读：{type(e).__name__}"}
+            continue
+        per_year: Dict[str, int] = defaultdict(int)
+        for r in recs:
+            d = str(r.get("开奖日期") if isinstance(r, dict)
+                    else getattr(r, "开奖日期", ""))[:10]
+            if len(d) == 10 and d[4:5] == "-" and d[:4].isdigit():
+                per_year[d[:4]] += 1
+        years = sorted(per_year)
+        full = years[1:-1] if len(years) >= 3 else []
+        if not full:
+            out[lot] = {"每年期数": None, "原因": "完整年份不足 1 年，无法估算"}
+            continue
+        vals = [per_year[y] for y in full]
+        out[lot] = {"每年期数": int(round(statistics.median(vals))),
+                    "完整年数": len(full), "最少": min(vals), "最多": max(vals),
+                    "逐年": {y: per_year[y] for y in full}}
+    return out
+
+
+def feasibility(gate: Dict[str, Any], *, annual: Optional[Dict[str, Any]] = None
+                ) -> Dict[str, Any]:
+    """把「还需 N 期」翻译成「按现有开奖节奏要等多少年」的可行性披露。
+
+    ★ 为什么必须写这一段：`还需 17,141 期` 看起来像「再攒攒就行」，但在每日 /
+      每周 2–3 期的开奖节奏下是**几十年到上百年**；不写出来，报告会把一个
+      实际上不可达的门槛包装成待办清单。这不是判决，只是把量级摆出来。
+    ★ 门槛读数是 ssq（双色球）离线三臂回放的 `n*_保守`，判决单位是「门」
+      不是「彩种」 ⇒ 8 个彩种**不能**叠加计数来缩短年限。
+    """
+    need = gate.get("门槛期数") if isinstance(gate, dict) else None
+    if not gate.get("可用") or need is None:
+        return {"可用": False, "原因": (gate or {}).get("原因")
+                or ["门槛不可用 ⇒ 无法估算（缺席≠通过）"],
+                "披露": [NOT_OPEN_NOTE]}
+    ap = annual if annual is not None else annual_periods()
+    primary = "双色球"       # 判决读数文件名带 ssq；见下方披露
+    rows: List[Dict[str, Any]] = []
+    for lot, v in ap.items():
+        n = (v or {}).get("每年期数")
+        rows.append({"彩种": lot, "每年期数": n,
+                     "预计年数": (round(need / float(n), 1) if n else None),
+                     "原因": (v or {}).get("原因")})
+    finite = [r["预计年数"] for r in rows if r["预计年数"] is not None]
+    by_lot = {r["彩种"]: r for r in rows}
+    return {
+        "可用": True,
+        "门槛期数": need,
+        "门槛彩种": primary,
+        "主口径每年期数": (by_lot.get(primary) or {}).get("每年期数"),
+        "主口径预计年数": (by_lot.get(primary) or {}).get("预计年数"),
+        "最快预计年数": min(finite) if finite else None,
+        "最慢预计年数": max(finite) if finite else None,
+        "逐彩种": rows,
+        "披露": [
+            "门槛来自 ssq（双色球）离线三臂回放的 `n*_保守`；判决单位是「门」不是"
+            "「彩种」⇒ 8 个彩种不能叠加计数来缩短年限，本表逐彩种分别估。",
+            f"按本地开奖数据的完整年份中位数估算，主口径约需 "
+            f"{(by_lot.get(primary) or {}).get('预计年数')} 年；"
+            "这是量级粗估，不是承诺，也不构成证明。",
+            "「还需 N 期」是账面差额，不等于「再等 N 期就能开判」：批次性质默认"
+            "探索批，且独立评估批起始日期是事先锁定的判据，不能事后追认。",
+            "若想在可及时间内得到结论，只能重新预注册一个更弱、样本量更低的问题；"
+            "那会改变判决口径，须显式授权并公开披露改了哪一条，本报告不代判。",
+            NOT_OPEN_NOTE,
+        ],
+    }
+
+
 def shadow_status(*, verdict: Optional[Dict[str, Any]] = None,
                   path: Optional[Path] = None) -> Dict[str, Any]:
     """影子验证当前状态：只判「能不能开判」，**不做 BH、不写检出**。

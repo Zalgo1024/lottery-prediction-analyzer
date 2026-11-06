@@ -108,6 +108,11 @@ config/*
 # 「独立评估批」（参与判决）、哪一批算「探索批」（只跑流程）。判据必须事先锁定并入库，
 # 否则「事后挑一批好看的算评估批」无法被外部核对。不含密钥。
 !config/prefix_shadow_rules.json
+# 单期上限 C1/C2/C3 口径判据（2026-11-07）——与预注册同类：口径必须先定后锁，
+# 不入库的话「同期合计算不算违规」会被事后改口径。不含密钥。
+!config/budget_period_cap.json
+# 影子状态快照是运行时展示产物（由 scripts/shadow_status.py 生成），不入库
+web/static/data/shadow_status.json
 logs/flask_stdout.log
 logs/run_supervisor.log
 

@@ -2,7 +2,7 @@
 
 > **把「看起来有效」和「真的有效」分开。** 一套可复现的检验框架，用 8 个彩种、数万期公开开奖数据当压力测试场。
 
-![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB) ![Tests](https://img.shields.io/badge/pytest-2922%20passed-3B6D11) ![Lotteries](https://img.shields.io/badge/%E5%BD%A9%E7%A7%8D-8-854F0B) ![License](https://img.shields.io/badge/License-AGPL--3.0-blue)
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB) ![Tests](https://img.shields.io/badge/pytest-2994%20passed-3B6D11) ![Lotteries](https://img.shields.io/badge/%E5%BD%A9%E7%A7%8D-8-854F0B) ![License](https://img.shields.io/badge/License-AGPL--3.0-blue)
 
 ## 0. 30 秒读懂
 
@@ -110,7 +110,7 @@ python run.py                # 看门狗模式，访问 http://127.0.0.1:5000
 # 3. 或者只用 CLI
 python cli.py --help
 
-# 4. 跑测试套件（全量 2922 例）
+# 4. 跑测试套件（全量 2994 例）
 pytest -q                    # 约 15–20 分钟（慢点集中在真实 predict 全流程的契约测试）
 ```
 
@@ -157,7 +157,7 @@ python scripts/audit_records.py              # 命中记录审计（清单由注
 
 > 正确读法：**未检出**只表示「在现有样本与检验功效下看不到稳定偏差」，既不是「已证明不存在」，也不是「多买就能中」。真正可动的只有覆盖设计、实得优化与 Rollover 时机。
 
-数字型的玩法口径是**显式缺口**：EV 层只建模直选，排列3 / 福彩3D 的组选3、组选6 在 `data/prize_table.py` 有奖金（结算认得），但没有概率口径所以进不了 EV。前提是生产票面为直选；改玩法前必须先扩 `grade_table`。
+数字型玩法：排列3 / 福彩3D 的**直选 / 组选3 / 组选6** 现在都有概率口径（`ev/profit/digit_group.py` 的组合计数，不传 `play` 时仍是直选）。组选票中奖不要求位置对上，一张票覆盖 3 / 6 个有序开奖结局，所以没有塞进按「命中位数」建表的 `(h,j)` 二元格——那样会给直方图类下游一个形状正确、含义全错的数。显式传 `play="组选3"/"组选6"` 才走组选规则与概率；**生产票面仍是直选**，组选层是「若改玩法」的反事实口径，不接生产选号、不改注数、不占预算。三种玩法返奖率同一水位（约 52%），换玩法不改变「无可证明优势（不参与）」的判决。豹子（三同）形态没有组选票，只有直选能中；10 + 270 + 720 = 1000 把开奖结局空间恰好分完。
 
 **受规则约束档**（七乐彩一~三等、快乐8 全部 39 档）的单注金额按期由官方公布，既不是固定奖也不是奖池浮动奖。展示层 `data/prize_table.py::prize_payout` 与判级 / 结算层共用 `ev/profit/amounts.grade_amount` 这一条取值链：当期实测优先；只有名义值时只作展示、不进金额合计；读不到任何当期数据时按「金额未知」单独计数并由界面披露，**不按 0 元计**。命中历史的「N 等奖及以上」筛选对这套按玩法命名的奖级不适用，被排除的注数会显式给出，不静默漏计。
 
@@ -175,8 +175,16 @@ python scripts/audit_records.py              # 命中记录审计（清单由注
 | `scripts/collect_draw_evidence.py` | 外部证据采集，**只读**：8/8 彩种覆盖，不写 CSV / pending / 台账 / 预算 |
 | `web/evidence_schedule.py` | 采集频率单一真源：窗口 21:05–21:45、每 2 分钟、单轮超时 110s |
 | `config/prefix_shadow_rules.json` | 预注册：`评估批起始 = 2026-12-01`；缺文件绝不默认评估批 |
+| `scripts/shadow_status.py` | **只读状态快照**：写 `web/static/data/shadow_status.json`，无需重启即可看 |
+| `web/static/shadow.html` | 影子验证看板：`http://127.0.0.1:5000/static/shadow.html` |
+| `web/routes/ev.py::/api/shadow/status` | 同一份状态的 JSON 接口（新增路由，下次自然重启后生效） |
+| `ev/prefix_shadow.py::feasibility()` | 把「还需 N 期」翻译成年限，不读系统时间、不做判决 |
 
 采集只接进 Flask 内置调度器（`web/scheduler.py::_tick`），**不装系统计划任务**（`schtasks.exe` 被本机安全策略列入黑名单，不做绕过）；代价是**只有服务在跑才采**。手动补采：`python scripts/collect_evidence_window.py --once`（或 `--window` / `--status`）。
+
+**结算不再依赖「今天有没有出号」**：调度器 22:30 后每天轻扫一次（`web/scheduler.py::_maybe_settle_shadow`），结算层 append-only + 幂等，没开奖的期跳过并写原因（不写成通过）。CLI 用 `python cli.py shadow --settle`，只看状态用 `python cli.py shadow`（`--json` 供脚本消费）。
+
+**为什么看板走静态文件**：新增 API 路由必须重启 Flask 才生效，而重启会触发启动自愈的 `ensure_pending_groups()` —— 当前滑轨已到 10000 注、pending 还停在 1000~2000 注，重启会真的补出号。静态 JSON 由 Flask 自带 `/static/` 路由每次请求现读，所以 `python scripts/shadow_status.py` 一跑，现有进程立刻能看到最新状态，完全不碰出号链路。下次自然重启后 `/api/shadow/status` 也可用。
 
 `tests/_import_guard.py` 用两档白名单锁住边界：研究模块只准出现在编排层，编排层只准被那两处生产入口调用；连注释里出现模块名也会被拦。`conftest._TARGETS` 同步隔离落盘路径，测试不会写进真身台账。
 
@@ -190,8 +198,11 @@ python scripts/audit_records.py              # 命中记录审计（清单由注
 | 登记 / 结算 | 台账按「阶段」分别计数，两条记录各自只追加、不回改；结算必须引用已登记的票序哈希 |
 | 批次性质 | 默认探索批；`评估批起始 = 2026-12-01` 起才算独立评估批，缺规则文件绝不默认评估批 |
 | 当前判决 | **未开判**，门槛 17,141 期（真源 `prefix_curve.verdict_curve()` 的 n\*_保守）；探索批只作描述，不能充当确认批 |
+| 门槛可行性 | 按本地开奖数据完整年份中位数粗估：主口径（双色球约 153 期/年）约 **112 年**，逐彩种最快约 48 年；判决单位是「门」不是彩种，**8 彩种不能叠加计数** |
 
-> 上表给的是**口径**，不是快照数字：服务每轮出号都会追加快照与登记，具体期数持续变化，请以重算报告为准。带时间戳的一次重算（2026-11-06 23:11）为 438 份快照 / 24 期登记 / 8 期结算 / 独立评估批 0 期，全部为探索批。
+> 上表给的是**口径**，不是快照数字：服务每轮出号都会追加快照与登记，具体期数持续变化，请以重算报告为准。带时间戳的一次重算（2026-11-07 03:01）为 445 份快照（其中 414 份是回放模拟、31 份是生产出号前冻结）/ 31 期登记 / 8 期结算 / 独立评估批 0 期，全部为探索批；待结算行均为**尚未开奖**的期，结算层逐条写「跳过 + 原因」，不写成通过。
+>
+> **「还需 17,141 期」不是待办清单。** 报告新增 §4b 把期数翻译成年限：按现有开奖节奏，这条门槛在一个人的时间尺度内不可达；而且批次性质默认探索批、评估批起始是事先锁定的判据，不能事后追认。要在可及时间内出结论，只能重新预注册一个更弱、样本量更低的问题——那会改变判决口径，须显式授权并公开披露改了哪一条，本项目不代判。当前影子验证的可用产物是**开奖前冻结的可复核留证与反事实读数**，不是判决。
 >
 > **登记不等于通过，0 期也不等于通过。** 现在不做 BH、不写「检出」、不接生产选号。缺口在证据侧（未来真实开奖 + 独立评估批），不在统计侧。历史回放一律不具登记资格，不许拿它冒充开奖前的确认力。
 
@@ -204,6 +215,8 @@ python scripts/audit_records.py              # 命中记录审计（清单由注
 
 **预算闸门**（`ev/budget_gate.py` + `config/budget_aggregate.json`）：`月度总额` 与 `单期上限` 由 `load_limit()` 热读，改配置无需重启。额度是**系统出号的假设成本上限，不是用户真实投入**（用户实际通常只取清单前几注，主口径假设 n=3）；`单期上限` 的语义是**单彩种 · 单批**，没有跨彩种或跨批聚合，跨彩种合计由月度总额约束。记账幂等键含重出批号；真出号路径用原子预占（带 TTL）杜绝并发超支；额度用尽 ⇒ 注数夹 0 ⇒ 界面直接写「本期会停发」。口径与调整留痕见 `logs/budget_period_cap_audit.md`、`logs/budget_adjust_window.md`。
 
+**C2 / C3 已拍板**（`config/budget_period_cap.json`，入库锁定）：C2① 在 `scripts/health_check.py` 第 7 节补检查，但拆两档——逐 `(彩种, 期号, 重出批号)` 核「单批 ≤ 单期上限」才是真实约束（违反计入真实待处理问题）；同日 / 单彩种同期合计只是**规模对照读数，只报不罚**，因为 C1① 下跨彩种合计本来就不受这一行约束，直接判超限会天天报假警。C3① 重出批**不受同期累计约束**（重出 = 用户主动再加一套票，累计叠加是设计如此），不拒绝重出、不夹注数，但逐期批次数 / 累计金额 / 相对上限倍数必须在体检与重出接口回包里可见；② 的纯函数分支也已实现并覆盖测试，切过去等价于把语义换成 C1③，需重新授权。金额未知 / 日期未记录的行显式计数、不静默从分母里消失。
+
 **消息推送**（`data/push_notify.py`）：每个彩种一组「组头 → 开奖 → 中奖 → 号码」，组内用进程内锁 + 跨进程文件锁互斥；企业微信机器人只有 markdown / image、没有 caption，所以诚实声明画进图里。失败分「全成功 / 部分失败 / 全部失败」，不把丢条当成功。
 
 ## 10. CLI 与 Web 速查
@@ -215,8 +228,11 @@ python cli.py stats 双色球           # 频率 / 冷热号 / 遗漏
 python cli.py gap all --out PATH     # 机制缝隙四轨测量
 python cli.py payout 快乐8 --nums ... --play 选九   # 实得口径表
 python scripts/shadow_report.py           # 影子三臂观察点报告（只读）
-python scripts/prefix_shadow_report.py    # 影子接线状态（只读，不写台账）
+python cli.py shadow                    # 影子验证只读状态（--settle 顺带结算 / --json）
+python scripts/prefix_shadow_report.py    # 影子接线状态 + 门槛可行性（只读，不写台账）
+python scripts/shadow_status.py           # 刷新 Web 静态看板快照（无需重启 Flask）
 python scripts/prefix_real_report.py      # 真实生产票序前缀读数（离线）
+python scripts/health_check.py --no-push  # 数据体检：第 7 节 = 单期上限 C2/C3 读数
 python scripts/budget_monitor.py          # 预算闸门只读调额决策表
 python scripts/collect_evidence_window.py --status  # 证据采集状态
 ```
@@ -230,12 +246,13 @@ python scripts/collect_evidence_window.py --status  # 证据采集状态
 | 命中历史 / 策略战绩 | `/hits` `/records` | 单注奖金、批次与票序标注、前瞻对照 |
 | 期望时机 / 盈利账本 | `/ev` `/ledger` | Rollover 信号、成本与净盈亏、三臂影子对照 |
 | **测量与证据看板** / 鲁棒性 | `/audit` `/robustness` | 九块只读指标，每卡带口径与诚实边界 |
+| 前缀影子验证状态 | `/static/shadow.html` | 登记 / 结算 / 快照分母 / 方案 B 证据 / 门槛年限，无需重启 |
 
 ## 11. 测试、维护与备份
 
 ```bash
-pytest -q              # 2922 passed（全量；含奖金表、写保护与分区归一化、批次契约、出号数量、消息推送、休市日历、机制缝隙四轨、影子接线与证据时间方向、预算并发预占、采集频率、文档维护护栏等）
-pytest tests/          # 2913 passed（仅 tests/ 目录；另有 9 例在 scripts/ 下，故用 pytest -q 跑全量）
+pytest -q              # 2994 passed（全量；含奖金表、写保护与分区归一化、批次契约、出号数量、消息推送、休市日历、机制缝隙四轨、影子接线与证据时间方向、预算并发预占、采集频率、文档维护护栏等）
+pytest tests/          # 2985 passed（仅 tests/ 目录；另有 9 例在 scripts/ 下，故用 pytest -q 跑全量）
 ```
 
 本机跑全量需 `PYTEST_DEBUG_TEMPROOT=E:/707_backup_p5_2200/pytest_tmp PYTHONUTF8=1`；`pytest.ini` 用 `--strict-markers` 注册 `realdata` / `statsmodels` / `winfont` 等标记，避免选错测试集却不报错。
@@ -255,7 +272,7 @@ python scripts/prune_logs.py            # 预览可清理旧日志（加 --apply
 
 ## 12. 深入阅读
 
-本机 `logs/` 下按专题留有过程与判据文档（**不随仓库分发**，见 §4 说明）：`logs/prefix_shadow_wiring.md`（接线）、`logs/prefix_shadow_b_plan.md`（方案 B 与采集频率）、`logs/prefix_shadow_status_report.md`（当前状态）、`logs/budget_period_cap_audit.md`（单期上限语义）、`logs/budget_adjust_window.md`、`logs/prefix_real_all_s5_report.md`（真实票序前缀读数）、`logs/prefix_curve_formal_ssq_K100_p360_s5_report.md`（离线判决）。
+本机 `logs/` 下按专题留有过程与判据文档（**不随仓库分发**，见 §4 说明）：`logs/prefix_shadow_wiring.md`（接线）、`logs/prefix_shadow_b_plan.md`（方案 B 与采集频率）、`logs/prefix_shadow_status_report.md`（当前状态 + 门槛可行性）、`logs/prefix_shadow_live.md`（Web 看板同源快照）、`logs/budget_period_cap_audit.md`（单期上限语义与 C2/C3 拍板）、`logs/budget_adjust_window.md`、`logs/prefix_real_all_s5_report.md`（真实票序前缀读数）、`logs/prefix_curve_formal_ssq_K100_p360_s5_report.md`（离线判决）。
 
 克隆仓库后可用脚本重算其中可再生的部分，例如 `python scripts/prefix_shadow_report.py` 会生成 `logs/prefix_shadow_status.json` 与 `logs/prefix_shadow_status_report.md`；历史过程记录不在版本控制内，需从本机备份取回。
 

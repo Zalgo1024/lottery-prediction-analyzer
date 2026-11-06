@@ -84,26 +84,29 @@ def test_dlt_ticket_price_reflects_addon():
     assert R.rules_for("双色球").avg_ticket_price == pytest.approx(2.0)
 
 
-def test_digit_group_plays_unmodelled_but_same_return_rate():
-    """数字型的**概率层**只建直选；组选3/组选6 **未建模**，但三者返奖率同一水位。
+def test_digit_group_plays_modelled_and_same_return_rate():
+    """2026-11-07：组选3/组选6 的**概率层已建**（`ev/profit/digit_group.py`）。
 
-    这条不是"证明模型对"，而是把「未建模」这件事**量化**成人能复核的数：
-      ① 概率层（`grade_probabilities` / `grade_table`）只有直选 —— 缺口是显式的；
-      ② 奖金层其实认得组选（`grades` 里有，历史结算不会落「未知奖级」），
-         只是没有概率口径，所以进不了 EV；
-      ③ 若把组选建进概率层，返奖率与直选差 ≤0.2pp ⇒「无可证明优势（不参与）」
-         的判决不会因为换玩法而翻转，不值得为它另建两套奖级。
-    ★ 前提是**生产票面就是直选**。哪天票面改成组选，必须先把 `grade_table`
-      从 (位宽, 0)→直选 扩成多玩法，概率口径也要从「10^k 可重复」改成组选的
-      组合计数 —— 否则会按直选赔率算组选票（不会报错的错数）。
+    守住的分层：
+      ① 默认规则仍是**直选**：`grade_probabilities(name)` / `grade_table` 零改动，
+         因为下游大量按「命中位数」做直方图，不能把组选塞进 (h,j) 二元格；
+      ② 组选概率要**显式传 play** 才生效，走独立组合计数（1/3/6 个有序结局）；
+      ③ 奖金层本来就认得组选（`grades` 里有），现在概率层也认得，EV 可逐玩法复核；
+      ④ 三种玩法返奖率同一水位 ⇒「无可证明优势（不参与）」的判决不因换玩法翻转。
+    ★ 前提仍是**生产票面就是直选**：组选层是反事实口径、不接生产选号。
+      详见 `tests/test_digit_group_prob.py` 的逐条组合计数锁。
     """
     from data.prize_table import FIXED_PAYOUT
+    from ev.profit import digit_group as DG
 
     for name in ("排列3", "福彩3D"):
         r = R.rules_for(name)
-        assert set(grade_probabilities(name)) == {"直选"}      # ① 概率层只有直选
+        assert set(grade_probabilities(name)) == {"直选"}      # ① 默认零改动
         assert set(r.grade_table) == {(3, 0)}
-        assert {"组选3", "组选6"} <= set(r.grades)             # ② 奖金层认得组选
+        assert {"组选3", "组选6"} <= set(r.grades)             # ③ 奖金层认得
+        assert grade_probabilities(name, play="组选3")["组选3"] == pytest.approx(3 / 1000)
+        assert grade_probabilities(name, play="组选6")["组选6"] == pytest.approx(6 / 1000)
+        assert R.rules_for(name, play="组选3").model == "digit_group"
 
     cost = 2.0
 

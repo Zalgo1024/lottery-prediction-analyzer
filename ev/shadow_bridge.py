@@ -161,6 +161,104 @@ def batch_kind_for(batch_time: Any, rules: Dict[str, Any]) -> Dict[str, Any]:
             "版本": ver}
 
 
+VERDICT_PATH = BASE_DIR / "logs" / "prefix_curve_formal_ssq_K100_p360_s5.json"
+EVIDENCE_PATH = DE.EVIDENCE_PATH
+
+
+def _load_verdict_doc(path: Optional[Path] = None) -> Dict[str, Any]:
+    """读判决层读数。缺文件 / 坏结构 ⇒ 返回 `_缺失`，由 `shadow_status` 判未开判。"""
+    p = Path(path) if path is not None else VERDICT_PATH
+    if not p.is_file():
+        return {"_缺失": f"判决读数文件不存在：{p}"}
+    try:
+        doc = json.loads(p.read_text(encoding="utf-8"))
+    except Exception as e:                                     # noqa: BLE001
+        return {"_缺失": f"判决读数解析失败：{type(e).__name__}: {e}"}
+    if not isinstance(doc, dict):
+        return {"_缺失": "判决读数顶层不是对象"}
+    return doc.get("判决") if isinstance(doc.get("判决"), dict) else doc
+
+
+def status_snapshot(*, as_of: Any = None,
+                    verdict_path: Optional[Path] = None,
+                    freeze_dir: Optional[Path] = None,
+                    shadow_path: Optional[Path] = None,
+                    evidence_path: Optional[Path] = None,
+                    rules_path: Optional[Path] = None,
+                    switch_path: Optional[Path] = None,
+                    schedule_path: Optional[Path] = None,
+                    annual: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """影子验证**只读状态快照**（供 CLI / Web / 看板共用的单一真源）。
+
+    ★ 不读系统时间：`as_of` 由调用方注入；缺了就写「未提供」，不代填 now。
+    ★ 不产生新读数、不做 BH、不判优势：只把台账 / 快照 / 证据 / 门槛 / 可行性
+      摊开给人看。任何一项读不到都写原因，绝不记为通过（缺席≠通过）。
+    """
+    sw = is_enabled(switch_path)
+    rules = load_rules(rules_path)
+    verdict = _load_verdict_doc(verdict_path)
+    status = PS.shadow_status(verdict=verdict, path=shadow_path)
+    audit = PS.audit_freeze_dir(freeze_dir) if freeze_dir else PS.audit_freeze_dir()
+    feas = PS.feasibility(status["门槛"], annual=annual)
+
+    ev_doc = DE.load_evidence(path=evidence_path)
+    by_lot: Dict[str, int] = {}
+    cross = {"参与校验": 0, "未参与": 0, "矛盾": 0, "逐彩种": []}
+    try:
+        from config import LOTTERY_CONFIG
+        sched_file = Path(schedule_path) if schedule_path else SCHEDULE_PATH
+        sched_doc = DS.load_schedule(sched_file)
+        for lot in LOTTERY_CONFIG:
+            rows = DE.for_lottery(lot, path=evidence_path)
+            by_lot[lot] = len(rows)
+            try:
+                c = DE.cross_check_schedule(
+                    rows, lambda d, _l=lot: DS.build_draw_time(_l, d, sched_doc))
+                cross["参与校验"] += int(c.get("参与校验") or 0)
+                cross["未参与"] += int(c.get("未参与") or 0)
+                cross["矛盾"] += int(c.get("矛盾") or 0)
+                cross["逐彩种"].append({"彩种": lot, "证据条数": len(rows),
+                                        "参与校验": c.get("参与校验"),
+                                        "矛盾": c.get("矛盾")})
+            except Exception as e:                             # noqa: BLE001
+                cross["逐彩种"].append({"彩种": lot, "证据条数": len(rows),
+                                        "原因": f"{type(e).__name__}: {e}"})
+    except Exception as e:                                     # noqa: BLE001
+        cross["原因"] = f"时刻表/彩种清单不可读：{type(e).__name__}: {e}"
+
+    loaded = PS.load_shadow(shadow_path)
+    regs = [r for r in loaded.get("行") or [] if r.get("阶段") == PS.KIND_REGISTER]
+    recent = [{"彩种": r.get("彩种"), "期号": r.get("期号"), "n": r.get("n"),
+               "批次性质": r.get("批次性质"), "批次时间": r.get("批次时间"),
+               "开奖时间": r.get("开奖时间")} for r in regs[-10:]]
+
+    return {
+        "生成时刻": str(as_of) if as_of is not None else "未提供（调用方未注入）",
+        "编排版本": BRIDGE_VERSION,
+        "开关": {"启用": sw.get("启用"), "原因": sw.get("原因"),
+                 "模式": (sw.get("配置") or {}).get("模式"),
+                 "外部源": (sw.get("配置") or {}).get("外部源"),
+                 "时刻表来源": (sw.get("配置") or {}).get("时刻表来源")},
+        "批次性质预注册": {"版本": rules.get("版本"),
+                           "评估批起始日期": rules.get("评估批起始日期"),
+                           "缺失": bool(rules.get("_缺失")),
+                           "损坏": bool(rules.get("_损坏"))},
+        "影子状态": status,
+        "快照体检": {k: audit.get(k) for k in
+                     ("目录", "文件总数", "合格数", "不合格数", "分母口径",
+                      "开奖先后", "时间点性质分布", "原因分布")},
+        "方案B证据": {"路径": ev_doc.get("路径"), "存在": ev_doc.get("存在"),
+                      "行数": ev_doc.get("行数"), "坏行数": ev_doc.get("坏行数"),
+                      "逐彩种条数": by_lot, "交叉校验": cross,
+                      "披露": "未发现矛盾只表示在已测期次未见异常，不构成对开奖时刻的证明。"},
+        "门槛可行性": feas,
+        "最近登记": recent,
+        "纪律": [PS.NOT_OPEN_NOTE, PS.STOP_RULE_NOTE, PS.NO_VERDICT_NOTE,
+                 PS.COUNTERFACTUAL_NOTE, PS.NOT_PURCHASED_NOTE,
+                 PS.TERMINOLOGY_NOTE],
+    }
+
+
 def settle_after_draw(*, settle_time: Any,
                       shadow_path: Optional[Path] = None,
                       snapshot_dir: Optional[Path] = None,
@@ -244,12 +342,25 @@ def freeze_after_predict(
         declared_time = DS.build_draw_time(lottery, target_date, sched_doc)
 
         # ---- 1b. 方案 B：用同彩种**历史各期**证据交叉校验这张时刻表 ----
+        #   开关里写了「外部源」就以它为准；没写 ⇒ 用证据模块默认路径。
+        #   ★ 显式声明了却读不到文件 ⇒ 本期**不登记**并写原因，绝不把「没有证据」
+        #     静默当成「没有矛盾」（缺席≠通过）。
+        ev_path = evidence_path
+        if ev_path is None:
+            ext = (sw.get("配置") or {}).get("外部源")
+            if ext:
+                ev_path = _resolve(BASE_DIR, ext)
+                if not Path(ev_path).is_file():
+                    return dict(base, 状态=STATUS_NA,
+                                原因=f"开关声明的外部证据源不存在：{ev_path}"
+                                     "（本期不登记；不记为通过）",
+                                披露=["证据缺失不等于未发现矛盾，缺席≠通过。"])
         #   ★ 不能只按「目标期号」过滤：目标期还没开奖，永远取不到证据，
         #     那样高频采来的证据根本进不了判据。声明时刻是按彩种固定的排班属性，
         #     历史期一旦出现矛盾 ⇒ 整张表不再可信，本期保守拒登。
         #   声明值（直播开始）是下界；证据的「首次可观测时刻」是上界，
         #   上界只能否定下界，不能取代它。
-        ev_rows = DE.for_lottery(lottery, path=evidence_path)
+        ev_rows = DE.for_lottery(lottery, path=ev_path)
         cross = DE.cross_check_schedule(
             ev_rows, lambda d: DS.build_draw_time(lottery, d, sched_doc))
         if not cross["可用"]:
@@ -258,7 +369,7 @@ def freeze_after_predict(
                         证据条数=len(ev_rows), 交叉校验=cross,
                         披露=cross["披露"])
         # 目标期自身的证据：若已存在，说明该期结果已可观测 ⇒ 判据更该从严。
-        own_rows = DE.for_issue(lottery, issue, path=evidence_path)
+        own_rows = DE.for_issue(lottery, issue, path=ev_path)
         bound = DE.derive_draw_lower_bound(declared_time, own_rows)
         if not bound["可用"]:
             return dict(base, 状态=STATUS_FAIL,

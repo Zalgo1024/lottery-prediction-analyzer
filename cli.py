@@ -770,6 +770,16 @@ def main():
         help="评估期数（默认 100）",
     )
 
+    # ----- 前缀影子验证（只读状态 / 开奖后结算）-----
+    shadow_parser = subparsers.add_parser(
+        "shadow", help="前缀影子验证：只读状态快照 / 开奖后结算（不产出新读数、不判决）")
+    shadow_parser.add_argument("--settle", action="store_true",
+                               help="顺带做一次开奖后结算（append-only 幂等，没开奖的期跳过）")
+    shadow_parser.add_argument("--json", action="store_true", dest="as_json",
+                               help="只输出 JSON（供脚本消费），不打印人类可读摘要")
+    shadow_parser.add_argument("--out", default=None,
+                               help="同时把状态快照写到该 JSON 路径")
+
     args = parser.parse_args()
 
     # 全局 --verbose
@@ -874,6 +884,50 @@ def _dispatch(args):
         _cmd_robustness(args)
     elif args.command == "gap":
         _cmd_gap(args)
+    elif args.command == "shadow":
+        _cmd_shadow(args)
+
+
+def _cmd_shadow(args):
+    """前缀影子验证：只读状态 + 可选开奖后结算。
+
+    ★ 编排层是生产侧唯一被放行的接入点；本函数不产生新读数、不做 BH、不判优势。
+      状态读不到时按「不适用 + 原因」输出，不写成通过（缺席≠通过）。
+    """
+    import json as _json
+    from datetime import datetime as _dt
+    from pathlib import Path as _Path
+
+    from ev.shadow_bridge import settle_after_draw, status_snapshot
+
+    now = _dt.now().isoformat(timespec="seconds")
+    settle = (settle_after_draw(settle_time=now) if args.settle else None)
+    doc = status_snapshot(as_of=now)
+    doc["本次结算"] = settle
+    if args.out:
+        p = _Path(args.out)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(_json.dumps(doc, ensure_ascii=False, indent=2, default=str),
+                     encoding="utf-8")
+    if args.as_json:
+        print(_json.dumps(doc, ensure_ascii=False, indent=2, default=str))
+        return
+    s = doc.get("影子状态") or {}
+    f = doc.get("门槛可行性") or {}
+    a = doc.get("快照体检") or {}
+    print(f"影子状态：{s.get('状态')}（可开判={s.get('可开判')}）")
+    print(f"  登记 {s.get('登记期数')} 期 / 结算 {s.get('结算期数')} 期 / "
+          f"独立评估批结算 {(s.get('独立评估批') or {}).get('结算期数')} 期")
+    print(f"  快照分母 {a.get('文件总数')} 份，具备登记资格 {a.get('合格数')} 份")
+    print(f"  还需 {s.get('还需期数')} 期；按现有节奏主口径约需 "
+          f"{f.get('主口径预计年数')} 年（量级粗估，不构成证明）")
+    for why in s.get("未开判原因") or []:
+        print(f"  - {why}")
+    if settle is not None:
+        print(f"本次结算：已结算 {settle.get('已结算', 0)} / "
+              f"跳过 {settle.get('跳过', 0)} / 失败 {settle.get('失败', 0)}")
+    print("  静止结论：这不是「未检出」，更不是通过；只表示已测维度在该样本量下"
+          "还没有可判证据，不构成证明。")
 
 
 def _cmd_gap(args):

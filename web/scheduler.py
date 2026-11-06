@@ -493,6 +493,41 @@ class AutoScheduler:
             logger.warning(f"证据采集调度判定异常（降级）: {e}")
             return False
 
+    # 前缀影子结算：一天最多一次（进程内去重，重启后再扫一次是幂等的）。
+    _shadow_settle_day = None
+
+    def _maybe_settle_shadow(self, now=None) -> bool:
+        """独立于出号的开奖后结算轻扫（22:30 之后每天一次）。
+
+        ★ 为什么需要它：原先结算只挂在「出号之后」，某天没有出号 / 出号失败时，
+          已开奖的登记行就一直挂着没人结算。结算层 append-only + 幂等，
+          没开奖的期跳过并写原因（不写成通过），重复扫不会造出假证据。
+        ★ 只调 `web.utils` 的桥接入口，本文件不碰任何研究模块（import 护栏）。
+        """
+        try:
+            cur = now or datetime.now()
+            if cur.hour * 60 + cur.minute < 22 * 60 + 30:
+                return False
+            day = cur.date().isoformat()
+            if AutoScheduler._shadow_settle_day == day:
+                return False
+            AutoScheduler._shadow_settle_day = day
+            from web.utils import shadow_refresh_static, shadow_settle_tick
+            r = shadow_settle_tick(settle_time=cur.isoformat(timespec="seconds"))
+            if r.get("启用"):
+                logger.info(f"影子结算日扫：已结算 {r.get('已结算', 0)} / "
+                            f"跳过 {r.get('跳过', 0)} / 失败 {r.get('失败', 0)}")
+            else:
+                logger.info(f"影子结算日扫未启用：{r.get('原因')}")
+            # 顺手刷新静态看板数据源（/static/ 每次请求现读，无需重启）
+            w = shadow_refresh_static(as_of=cur.isoformat(timespec="seconds"))
+            if not w.get("ok"):
+                logger.warning(f"影子静态快照刷新失败：{w.get('原因')}")
+            return True
+        except Exception as e:                                # noqa: BLE001
+            logger.warning(f"影子结算日扫异常（不影响主流程）: {e}")
+            return False
+
     def _settle_profit_ledger(self, lottery: str):
         """开奖后结算钩子：把某彩种影子台账里『已记录、未结算』的历史期回填。
 
@@ -588,6 +623,8 @@ class AutoScheduler:
                     self._daily_digest()
                     # 方案 B 证据采集：贴着开奖时刻每 2 分钟采一次，窗口外零副作用。
                     self._maybe_collect_evidence(now)
+                    # 前缀影子结算：不依赖「今天有没有出号」，22:30 后每天轻扫一次。
+                    self._maybe_settle_shadow(now)
             except Exception as e:
                 logger.warning(f"调度器循环异常: {e}")
             self._stop.wait(60)

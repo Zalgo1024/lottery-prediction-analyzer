@@ -52,3 +52,15 @@ def api_ev_advice(lottery):
     """当前期购买建议"""
     data = load_lottery(lottery)
     return jsonify(current_period_advice(lottery, data))
+
+
+@bp.route("/api/shadow/status")
+@api_error_handler
+def api_shadow_status():
+    """前缀影子验证的**只读状态**（登记 / 结算 / 快照分母 / 门槛可行性 / 方案 B 证据）。
+
+    ★ 不做判决、不产生新读数；状态读不到时编排层会写「不适用 + 原因」，
+      前端必须按 `适用=false` 显示「—」，不能把 null 显示成 0 或「已通过」。
+    """
+    from web.utils import shadow_status_snapshot
+    return jsonify(shadow_status_snapshot())

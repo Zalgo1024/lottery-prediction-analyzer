@@ -84,9 +84,12 @@ class LotteryRules:
     avg_ticket_price: float = COST
     until_issue: Optional[str] = None      # ★ 带默认值 ⇒ 不破坏现有构造
     # ---- 2026-11-01 快乐8 接入新增（全部带默认值，既有 6 彩种零改动）----
-    model: str = "binary_cell"             # "binary_cell"（二元命中格）| "hypergeom"（一维超几何）
+    model: str = "binary_cell"             # "binary_cell" | "hypergeom" | "digit_group"
     draw_size: Optional[int] = None        # 开奖摇出数；None ⇒ 等于 outer_width
     play: str = ""                         # 玩法名（快乐8 选一~选十）；非玩法彩种为 ""
+    # 票面空间（可买的不同注数）。binary_cell 由 outer_size 推出，故留空；
+    # digit_group 的票面空间是 90 / 120，与「10^3 可重复」几何无关，必须显式给。
+    ticket_space: Optional[int] = None
 
     @property
     def draw_count(self) -> int:
@@ -241,18 +244,52 @@ def _rules_qxc() -> LotteryRules:
     )
 
 
-# ★ 数字型的**概率层**只建「直选」一个奖级。组选3 / 组选6 的**奖金**其实已经在
-#   `data/prize_table.FIXED_PAYOUT` 里（所以历史结算认得它们），但没有概率/格表口径
-#   ⇒ 进不了 EV（`grade_table` 只有 (位宽, 0) → 直选）。
-#   这不是遗漏，是判决无关：三种玩法在 2 元票价上的返奖率实质相同：
-#     直选  1040 元 × 1/1000 = 1.040 元 ÷ 2 = 52.0%
-#     组选3  346 元 × 3/1000 = 1.038 元 ÷ 2 = 51.9%
-#     组选6  173 元 × 6/1000 = 1.038 元 ÷ 2 = 51.9%
-#   ⇒ 「换玩法」不改变「无可证明优势（不参与）」的判决，故不为此另建两套奖级。
-#   ★ 但这句话有前提：**生产票面是直选**。若哪天改成组选，必须把 `grade_table`
-#     扩成多玩法表（概率口径也要从「10^k 可重复」改成组选的组合计数），
-#     否则 EV 会按直选赔率算组选票 —— 一个不会报错的错数。
-DIGIT_PLAY_GAP = "；★ 概率层只建模直选，组选3/组选6 未建模（返奖率同为 ~52%，不改变判决）"
+# ★ 2026-11-07：数字型的「组选3 / 组选6」概率层已建在
+#   `ev/profit/digit_group.py`（组合计数，不是 (h,j) 二元格）。
+#   为什么不能塞进 `grade_table`：那张表的 h 是**按位命中数**，组选票中奖不要求
+#   位置对上，且一张票覆盖 3 / 6 个有序开奖结局；硬塞会让所有按命中位数做直方图
+#   的下游拿到形状相同、含义全错的数（不会报错的错数）。
+#   ⇒ 默认规则（`play=""`）保持直选不变，既有调用点零改动；要看组选必须**显式**
+#   传 `play="组选3"/"组选6"`，由 `digit_play_rules()` 给出独立规则对象，
+#   概率由 `ev/payout.grade_probabilities(..., play=...)` 从组合模型取。
+#   三种玩法返奖率同一水位（约 52%），换玩法不改变「无可证明优势（不参与）」的判决；
+#   建模的价值是堵死「按直选赔率算组选票」，并让 EV 可逐玩法复核。
+#   ★ 前提仍是：**生产票面是直选**，组选层是反事实口径、不接生产选号。
+DIGIT_PLAY_NOTE = ("；概率层含直选/组选3/组选6（组合计数，见 ev/profit/digit_group.py）；"
+                   "生产票面为直选，组选层不接生产选号")
+# 旧名保留为别名，避免既有引用静默失效；语义已由「缺口」变成「已建模」。
+DIGIT_PLAY_GAP = DIGIT_PLAY_NOTE
+
+
+def digit_play_rules(lottery: str, play: str) -> LotteryRules:
+    """组选3 / 组选6 的**独立规则对象**（不进 `_RULES` 默认表）。
+
+    `grade_table` 的键 `(3, 0)` 在这里**不是「命中 3 位」**，而是「形态匹配」的
+    占位；`model="digit_group"` 会让 `outcome_size` / `outer_universe` 显式拒绝枚举，
+    避免下游拿 10³ 的位几何去算组选票。概率一律走 `digit_group` 模块。
+    """
+    from ev.profit.digit_group import DIGIT_GROUP_LOTTERIES, play_geometry
+
+    if lottery not in DIGIT_GROUP_LOTTERIES:
+        raise KeyError(f"{lottery} 没有组选玩法")
+    g = play_geometry(play)
+    if g["玩法"] == "直选":
+        return _rules_digit(lottery, 3)
+    grade = _build_grades(lottery).get(play)
+    if grade is None:
+        raise KeyError(f"{lottery} 奖金表缺玩法 {play}")
+    return LotteryRules(
+        name=lottery, cost=COST, outer_label="数字集合", outer_width=3,
+        outer_range=(0, 9), outer_choose=False,
+        inner_size=1, inner_multiplicity={0: 1},
+        grade_table={(3, 0): play}, grades={play: grade},
+        rule_version=f"{lottery}-{play}-fixed", effective_from="2004-01-01",
+        source=("《排列3/福彩3D 游戏规则》组选玩法；概率为组合计数（反事实），"
+                + DIGIT_PLAY_NOTE),
+        avg_ticket_price=2.0,
+        model="digit_group", play=play,
+        ticket_space=int(g["票面空间"]),
+    )
 
 
 def _rules_digit(name: str, width: int) -> LotteryRules:
@@ -262,7 +299,7 @@ def _rules_digit(name: str, width: int) -> LotteryRules:
         inner_size=1, inner_multiplicity={0: 1},
         grade_table={(width, 0): "直选"}, grades=_build_grades(name),
         rule_version=f"{name}-fixed", effective_from="2004-01-01",
-        source="固定赔率玩法（直选），不涉及奖池与分摊" + DIGIT_PLAY_GAP,
+        source="固定赔率玩法（直选），不涉及奖池与分摊" + DIGIT_PLAY_NOTE,
         avg_ticket_price=2.0,
     )
 
@@ -436,7 +473,12 @@ def rules_for(lottery: str, issue: Any = None, *, play: Any = None) -> LotteryRu
     `play`：快乐8 的玩法（选一~选十），None ⇒ 默认选十。其余彩种忽略。
     ★ issue 的版本循环**只在单一玩法内**进行：若跨玩法取值，会拿「选十」的规则
       去结算「选五」的票 —— 两者奖级表完全不同，而且结果不会报错。
+    ★ 2026-11-07 起：排列3 / 福彩3D 显式传 `play="组选3"/"组选6"` 时，返回
+      `digit_play_rules()` 的独立规则对象（model=digit_group，拒绝位枚举）。
+      **不传 / 传 "直选"** 仍是原来的直选规则，既有调用点零改动。
     """
+    if lottery in ("排列3", "福彩3D") and play in ("组选3", "组选6", "直选"):
+        return digit_play_rules(lottery, str(play))
     pid = _play_of(lottery, play)
     vs = _RULES[(lottery, pid)]
     if issue is None:
@@ -506,6 +548,7 @@ def avg_ticket_price(lottery: str, *, play: Any = None) -> float:
 __all__ = [
     "CAP_DEFAULT", "COST", "DLT_ADDON_SHARE", "DLT_AVG_PRICE", "GradeRule",
     "KL8_PLAYS", "LotteryRules", "PLAYS", "RuleVersionError", "SUPPORTED",
-    "avg_ticket_price", "grade_of_hits", "grade_rank_names", "kl8_grade_name",
+    "avg_ticket_price", "digit_play_rules", "DIGIT_PLAY_NOTE", "grade_of_hits",
+    "grade_rank_names", "kl8_grade_name",
     "kl8_play_of_width", "outcome_size", "rule_versions", "rules_by_version", "rules_for",
 ]

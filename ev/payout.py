@@ -143,10 +143,18 @@ def grade_probabilities(lottery: str, ticket=None, *,
     ⚠️ 概率与具体号码无关（任一合法注相同）——这里保留 ticket 形参仅为将来
        支持"复式/多注"等改变概率的玩法，当前忽略。
     version=None ⇒ 该彩种的**现行版本**（大乐透=最近一段，其余忽略）。
-    play：快乐8 的玩法（选一~选十）。版本名自带玩法命名空间（kl8-x10-2020），
-          故缓存键 (彩种, 版本) 仍然唯一，不需要把 play 塞进键里。
+    play：快乐8 的玩法（选一~选十）；排列3 / 福彩3D 的 `组选3` / `组选6`
+          （组合计数概率层，见 ev/profit/digit_group.py）。
+          ★ 不传 play 时数字型仍是**直选**，既有调用点零改动。
+          版本名自带玩法命名空间（kl8-x10-2020 / default:组选3），
+          故缓存键 (彩种, 版本) 仍然唯一，不需要改缓存结构。
     """
     ver = version or _default_version(lottery, play)
+    # ★ 显式 version="default" + play="组选3" 也必须走玩法命名空间，否则会命中
+    #   已被直选填过的 ("排列3","default") 缓存格，静默返回直选概率。
+    #   数字型只有一个规则版本，故此处覆盖 version 不改变版本语义。
+    if lottery in ("排列3", "福彩3D") and play in ("组选3", "组选6"):
+        ver = f"default:{play}"
     key = (lottery, ver)
     if key in _PROB_CACHE:
         return _PROB_CACHE[key]
@@ -159,6 +167,11 @@ def _default_version(lottery: str, play: Optional[str] = None) -> str:
     if lottery in ("大乐透", "七乐彩", "快乐8"):
         from ev.profit.rules import rules_for
         return rules_for(lottery, play=play).rule_version
+    # ★ 数字型组选玩法靠 `default:<玩法>` 进缓存键：不这么做的话，
+    #   直选 / 组选3 / 组选6 会共用 ("排列3","default") 一个键，先算的那个
+    #   把概率原样喂给另外两个玩法 —— 不报错，但全是错数。
+    if lottery in ("排列3", "福彩3D") and play in ("组选3", "组选6"):
+        return f"default:{play}"
     return "default"
 
 
@@ -254,6 +267,13 @@ def _grade_probabilities_impl(lottery: str, version: str = "default",
     if lottery == "快乐8":
         return _probs_kl8(version)
     if lottery in ("排列3", "福彩3D"):
+        # 组选3 / 组选6 走独立组合计数概率层；不指定玩法时仍是直选（零改动）。
+        _play = play
+        if not _play and version.startswith("default:"):
+            _play = version.split(":", 1)[1]
+        if _play in ("组选3", "组选6"):
+            from ev.profit.digit_group import grade_probabilities as _dg
+            return _dg(str(_play))
         return {"直选": 1 / 1000}
     if lottery == "排列5":
         return {"直选": 1 / 100000}

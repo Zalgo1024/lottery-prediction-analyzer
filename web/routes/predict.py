@@ -101,6 +101,17 @@ def api_predict_regenerate():
     prev = latest_production_pending(load_pending(lottery), target_issue=issue)
     rn = next_renumber(lottery, issue)
 
+    # C3①（2026-11-07）：重出批**不受**同期累计约束，但口径读数必须随回包给出，
+    # 否则「同期累计又叠了一批」这件事在界面上完全不可见。只读，不夹注数、不拒绝。
+    try:
+        from ev.budget_period_cap import regenerate_gate
+        from data import ticket_size as _ts
+        _want = int(saved_n if saved_n is not None else _ts.effective_count(lottery))
+        cap_notice = regenerate_gate(lottery, issue, 注数=_want)
+    except Exception as e:                                   # noqa: BLE001
+        cap_notice = {"适用": False,
+                      "原因": f"口径读数不可用：{type(e).__name__}: {e}（不记为通过）"}
+
     task_id = start_predict(lottery, {
         "groups": None,                 # → resolve_groups（用滑轨当前生效值）
         "mode": "fresh",
@@ -117,6 +128,7 @@ def api_predict_regenerate():
         "已保存出号数量": saved_n,
         "出号数量来源": ("卡片当前值（已落盘）" if saved_n is not None
                         else "配置生效值（本次未提交卡片值）"),
+        "单期上限口径": cap_notice,
         "说明": ("旧批保留（开奖后照常结算）；当前展示与推送优先用新批。"
                  if prev else "本期此前没有生产批，本次即首出。"),
     })

@@ -22,7 +22,7 @@ import math
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -79,7 +79,8 @@ def _load_verdict(path: Path) -> Dict[str, Any]:
 
 
 def render(audit: Dict[str, Any], status: Dict[str, Any],
-           *, verdict_path: Path, verdict: Dict[str, Any]) -> str:
+           *, verdict_path: Path, verdict: Dict[str, Any],
+           feasibility: Optional[Dict[str, Any]] = None) -> str:
     pre = PC.PREREGISTRATION
     L: List[str] = []
     L.append("# 前缀口径 · 影子验证接线状态（离线研究，不接生产）")
@@ -198,6 +199,33 @@ def render(audit: Dict[str, Any], status: Dict[str, Any],
          ["还需期数", status["还需期数"]],
          ["门槛来源", gate.get("来源")]]))
     L.append("")
+    if feasibility:
+        L.append("## 4b. 门槛可行性（把「还需 N 期」翻译成年限）")
+        L.append("")
+        f = feasibility
+        if not f.get("可用"):
+            for why in f.get("原因") or []:
+                L.append(f"- {why}")
+        else:
+            L.extend(_table(
+                ["项", "值"],
+                [["门槛期数", f["门槛期数"]],
+                 ["门槛读数彩种", f["门槛彩种"]],
+                 ["该彩种每年期数（完整年中位数）", f["主口径每年期数"]],
+                 ["主口径预计年数", f["主口径预计年数"]],
+                 ["逐彩种最快 / 最慢", f"{f['最快预计年数']} / {f['最慢预计年数']}"],
+                 ["数据缺年份数", len([r for r in f["逐彩种"]
+                                     if r["每年期数"] is None])]]))
+            L.append("")
+            L.append("**逐彩种粗估**（判决单位是「门」不是彩种，不能相加）：")
+            L.append("")
+            L.extend(_table(["彩种", "每年期数", "预计年数", "备注"],
+                            [[r["彩种"], r["每年期数"], r["预计年数"],
+                              r.get("原因") or "—"] for r in f["逐彩种"]]))
+            L.append("")
+        for note in f.get("披露") or []:
+            L.append(f"> {note}")
+        L.append("")
     L.append(f"> {PS.NO_VERDICT_NOTE}")
     L.append("> `∞` 表示该档空间上界为 0，无论攒多少期都不可判；"
              "它不阻断开判，但必须单独披露，不许读成「期数不够再攒攒就行」。")
@@ -241,13 +269,17 @@ def render(audit: Dict[str, Any], status: Dict[str, Any],
     return "\n".join(L) + "\n"
 
 
-def build(*, verdict_path: Path, freeze_dir: Path, shadow_path: Path) -> Dict[str, Any]:
+def build(*, verdict_path: Path, freeze_dir: Path, shadow_path: Path,
+          annual: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     verdict = _load_verdict(verdict_path)
     audit = PS.audit_freeze_dir(freeze_dir)
     status = PS.shadow_status(verdict=verdict, path=shadow_path)
-    text = render(audit, status, verdict_path=verdict_path, verdict=verdict)
+    feas = PS.feasibility(status["门槛"], annual=annual)
+    text = render(audit, status, verdict_path=verdict_path, verdict=verdict,
+                  feasibility=feas)
     return {"预注册": dict(PC.PREREGISTRATION), "判决读数": verdict,
-            "快照体检": audit, "影子状态": status, "报告": text}
+            "快照体检": audit, "影子状态": status, "门槛可行性": feas,
+            "报告": text}
 
 
 def main() -> int:

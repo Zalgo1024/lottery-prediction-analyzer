@@ -87,6 +87,10 @@ _TARGETS = (
     ("ev.shadow_bridge", "CONFIG_PATH", "prefix_shadow.json"),
     ("ev.shadow_bridge", "SCHEDULE_PATH", "draw_schedule.json"),
     ("ev.shadow_bridge", "RULES_PATH", "prefix_shadow_rules.json"),
+    # 2026-11-07 影子状态快照：判决读数 / 证据路径是编排层**独立拼接**的常量，
+    # 不随上面两个模块的重定向走；不补这两条，单测会去读真实 logs/ 下的证据。
+    ("ev.shadow_bridge", "VERDICT_PATH", "prefix_curve_formal_ssq_K100_p360_s5.json"),
+    ("ev.shadow_bridge", "EVIDENCE_PATH", "draw_evidence.jsonl"),
     # 方案 B 的外部开奖证据（2026-11-06）。只追加不改写，但写脏了会让后续所有
     # 期次的「下界交叉校验」读到测试数据 ⇒ 必须隔离。
     ("ev.draw_evidence", "EVIDENCE_PATH", "draw_evidence.jsonl"),

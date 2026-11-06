@@ -1739,3 +1739,67 @@ def get_training_honesty(lottery_name: str) -> dict:
         "note": sev.get("significance_note", ""),
     }
 
+
+# ------------------------------------------------------------------ 影子验证（只读入口）
+def shadow_status_snapshot(*, as_of=None) -> dict:
+    """给 Web / CLI 共用的**只读**影子状态快照（失败不抛，写原因，不记为通过）。
+
+    ★ 这是生产四包里唯一被放行的桥接调用之一（`tests/_import_guard` 白名单）：
+      研究模块只在 `ev/shadow_bridge.py` 里，本文件不直接碰它们。
+    """
+    from datetime import datetime as _dt
+
+    try:
+        from ev.shadow_bridge import status_snapshot
+        return status_snapshot(as_of=as_of or _dt.now().isoformat(timespec="seconds"))
+    except Exception as e:                                    # noqa: BLE001
+        return {"适用": False,
+                "原因": f"影子状态不可用：{type(e).__name__}: {e}（不记为通过）",
+                "披露": ["缺席≠通过：状态读不到时不能显示成「已通过」或全 0。"],
+                "生成时刻": str(as_of or "未提供")}
+
+
+def shadow_settle_tick(*, settle_time=None) -> dict:
+    """独立于出号的**开奖后结算**入口（供调度器每日 22:30 之后轻扫一次）。
+
+    结算是 append-only + 幂等的；没开奖的期由结算层跳过并写原因（不写成通过）。
+    任何异常只返回失败字典，绝不拖垮调度循环、也不阻断出号。
+    """
+    from datetime import datetime as _dt
+
+    try:
+        from ev.shadow_bridge import settle_after_draw
+        return settle_after_draw(
+            settle_time=settle_time or _dt.now().isoformat(timespec="seconds"))
+    except Exception as e:                                    # noqa: BLE001
+        return {"启用": False, "原因": f"影子结算不可用：{type(e).__name__}: {e}",
+                "扫描": 0, "已结算": 0, "跳过": 0, "失败": 0, "明细": []}
+
+
+def shadow_refresh_static(*, out=None, as_of=None) -> dict:
+    """把只读状态快照写成 `/static/data/shadow_status.json`（看板数据源）。
+
+    ★ 为什么写静态文件而不只靠 `/api/shadow/status`：新增路由要重启才生效，
+      而重启会触发启动自愈的注数核对（当前滑轨 10000 / pending 1000~2000 ⇒
+      会真的补出号）。静态文件由 Flask 自带 `/static/` 路由每次请求现读，
+      现有进程无需重启就能看到最新状态。
+    ★ 只写这一个展示产物，不写影子台账 / pending / 预算 / 配置。
+    """
+    from datetime import datetime as _dt
+
+    doc = shadow_status_snapshot(as_of=as_of or _dt.now().isoformat(timespec="seconds"))
+    doc["页面"] = "/static/shadow.html"
+    doc["接口"] = "/api/shadow/status（需重启后可用；本静态快照无需重启）"
+    p = Path(out) if out else Path(__file__).resolve().parent / "static" / "data" / "shadow_status.json"
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(p.suffix + f".tmp{os.getpid()}")
+        tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=2, default=str),
+                       encoding="utf-8")
+        os.replace(tmp, p)
+        return {"ok": True, "路径": str(p), "字节": p.stat().st_size,
+                "状态": (doc.get("影子状态") or {}).get("状态")}
+    except Exception as e:                                    # noqa: BLE001
+        return {"ok": False, "原因": f"静态快照写入失败：{type(e).__name__}: {e}",
+                "路径": str(p)}
+

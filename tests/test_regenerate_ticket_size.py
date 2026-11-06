@@ -221,3 +221,14 @@ def test_frontend_sends_card_value_on_regenerate():
                        js, re.S)
     assert single and "保存为当前生效值" in single.group(1), \
         "确认框没有说明本次会保存卡片值（用户不该被静默改写配置）"
+
+
+def test_regen_response_carries_c3_disclosure(stub):
+    """C3①：不阻断重出，但同期累计口径必须随回包给出（空白≠通过）。"""
+    c, _ = stub
+    d = _post(c, {"出号数量": 100}).get_json()
+    assert d["ok"] is True
+    notice = d.get("单期上限口径")
+    assert isinstance(notice, dict), "回包缺单期上限口径读数"
+    assert notice.get("拒绝") is not True, "C3① 默认不拒绝重出"
+    assert "目标期号" in notice and "同期累计元" in notice
