@@ -3,7 +3,7 @@
 
 方案 B 想解决什么
 -----------------
-方案 A 的开奖时刻是**声明值**（`config/draw_schedule.json` 里写死的 21:15 / 21:25 / 21:30），
+方案 A 的开奖时刻是**声明值**（`config/draw_schedule.json` 里登记的 21:15 / 21:25 / 21:30），
 一旦官方调整时刻而未同步，先后关系会**系统性**判错。方案 B 用独立采集任务
 把「外部源上该期结果首次可被观测到的时刻」记下来，作为实测旁证。
 
@@ -56,6 +56,10 @@ DECLARED_LATE_NOTE = (
     "证据显示该期结果在「声明开奖时刻」之前就已被观测到 ⇒ 实际开奖早于声明值，"
     "声明值不再构成下界（`config/draw_schedule.json` 该彩种时刻可能偏晚）。"
     "本期按保守处理：不具备「开奖前冻结」的判定资格，请核对官方公告后更新时刻表。"
+)
+NO_EVIDENCE_NOTE = (
+    "本次没有任何历史期证据参与交叉校验；只表示未发现矛盾，"
+    "不等于声明时刻已被验证正确，也不构成对开奖时刻的证明。"
 )
 
 
@@ -170,6 +174,122 @@ def for_issue(lottery: str, issue: Any, *, path: Optional[Path] = None) -> List[
     lot, iss = str(lottery), str(issue)
     return [r for r in doc["行"]
             if str(r.get("彩种")) == lot and str(r.get("期号")) == iss]
+
+
+def for_lottery(lottery: str, *, path: Optional[Path] = None) -> List[Dict[str, Any]]:
+    """取某彩种**全部历史期**的合格证据。
+
+    ★ 为什么登记时不能只用 `for_issue(目标期号)`：目标期还没开奖，不可能有证据，
+      那样过滤的结果恒为空 ⇒ 采集来的证据永远进不了判据，高频采集等于白做。
+      声明时刻是**按彩种固定的排班属性**，所以要用同彩种历史各期的证据去
+      交叉校验它；某期出现矛盾 ⇒ 该彩种时刻表整体不可信，后续各期一律保守拒登。
+    """
+    doc = load_evidence(path=path)
+    lot = str(lottery)
+    return [r for r in doc["行"] if str(r.get("彩种")) == lot]
+
+
+def normalize_draw_date(value: Any) -> Optional[str]:
+    """把证据里的开奖日期归一成 ISO `YYYY-MM-DD`；不能解析返回 None。
+
+    500.com 历史页给的是 `d/m/YYYY`（如 `5/11/2026`），`fetch_500` / market
+    通道给的是 `YYYY-MM-DD`。两套口径混存会让「按期号组装声明时刻」失败，
+    进而把该条证据静默排除 —— 这里归一，并保留 None 让调用方显式写原因。
+    """
+    if value is None:
+        return None
+    if hasattr(value, "isoformat") and not isinstance(value, str):
+        try:
+            return value.isoformat()
+        except (TypeError, ValueError):
+            return None
+    s = str(value).strip()
+    if not s:
+        return None
+    try:
+        return datetime.strptime(s, "%Y-%m-%d").date().isoformat()
+    except ValueError:
+        pass
+    try:
+        return datetime.strptime(s, "%d/%m/%Y").date().isoformat()
+    except ValueError:
+        return None
+
+
+def cross_check_schedule(records: Sequence[Dict[str, Any]],
+                         declared_builder: Any, *,
+                         declared_source: str = "config/draw_schedule.json"
+                         ) -> Dict[str, Any]:
+    """用同彩种**历史各期**的证据交叉校验声明时刻表是否偏高。
+
+    `declared_builder(开奖日期ISO)` 返回该期声明下界的 ISO 时间；不可用时抛异常。
+    每条证据都拿**自己那一期**的声明值比较（不能拿别的日期的声明值比，
+    否则跨日比较必然误报）。
+
+    返回 `{可用, 矛盾, 参与校验, 未参与, 明细, 原因, 披露}`：
+      · 任一历史期 `首次可观测 < 该期声明值` ⇒ `可用=False`（保守：整张时刻表
+        不再可信，本期不具备登记资格）；
+      · 无证据 / 证据不可解析 ⇒ `可用=True`，但 `未参与` 逐条写原因，
+        `披露` 明说「未发现矛盾 ≠ 声明值已被验证」（缺席≠通过）。
+    """
+    detail: List[Dict[str, Any]] = []
+    skipped: List[Dict[str, Any]] = []
+    usable = 0
+    contradiction = False
+
+    if not records:
+        # 缺席≠通过：证据池为空必须逐条写明，不能只靠一句笼统披露。
+        skipped.append({"原因": "该彩种没有任何证据行（文件可能不存在或全为坏行）"})
+
+    for rec in records:
+        tag = {"彩种": rec.get("彩种"), "期号": rec.get("期号"),
+               "来源": declared_source}
+        date_iso = normalize_draw_date(rec.get("开奖日期"))
+        if date_iso is None:
+            skipped.append(dict(tag, 原因=f"开奖日期不可归一：{rec.get('开奖日期')!r}"))
+            detail.append(dict(tag, 类别="未参与", 原因="开奖日期不可归一"))
+            continue
+        try:
+            observed = _dt(rec.get("首次可观测时刻"), "首次可观测时刻")
+        except DrawEvidenceError as exc:
+            skipped.append(dict(tag, 原因=str(exc)))
+            detail.append(dict(tag, 类别="未参与", 原因=str(exc)))
+            continue
+        try:
+            declared_raw = declared_builder(date_iso)
+            declared = _dt(declared_raw, "声明开奖时刻")
+        except Exception as exc:                              # noqa: BLE001
+            skipped.append(dict(tag, 原因=f"该期声明时刻不可构造：{type(exc).__name__}: {exc}"))
+            detail.append(dict(tag, 类别="未参与", 原因="该期声明时刻不可构造"))
+            continue
+        if (declared.tzinfo is None) != (observed.tzinfo is None):
+            skipped.append(dict(tag, 原因="声明值与证据时区口径混用"))
+            detail.append(dict(tag, 类别="未参与", 原因="时区口径混用"))
+            continue
+
+        usable += 1
+        bad = observed < declared
+        contradiction = contradiction or bad
+        detail.append({**tag,
+                       "类别": "历史期交叉校验",
+                       "开奖日期": date_iso,
+                       "声明下界": str(declared_raw),
+                       "首次可观测（上界）": str(rec.get("首次可观测时刻")),
+                       "结论": "矛盾：声明值不再是下界" if bad else "不矛盾"})
+
+    notes = [BOUND_NOTE]
+    if usable == 0:
+        notes.append(NO_EVIDENCE_NOTE)
+    else:
+        notes.append("交叉校验只覆盖已有证据的历史期；未发现矛盾只表示"
+                     "在这些期次上未见异常，不构成对开奖时刻的证明。")
+    if contradiction:
+        notes.append(DECLARED_LATE_NOTE)
+    reasons = (["历史证据与声明时刻表矛盾 ⇒ 本彩种声明值不再构成下界，"
+                "本期按保守处理：不具备登记资格。"] if contradiction else [])
+    return {"可用": not contradiction, "矛盾": contradiction,
+            "参与校验": usable, "未参与": skipped, "明细": detail,
+            "披露": notes, "原因": reasons}
 
 
 def derive_draw_lower_bound(declared_time: Any, records: Sequence[Dict[str, Any]], *,

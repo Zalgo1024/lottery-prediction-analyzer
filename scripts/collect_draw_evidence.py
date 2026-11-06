@@ -203,11 +203,20 @@ def main(argv=None) -> int:
             fail.append((lot, f"{type(exc).__name__}: {exc}"))
             print(f"  ✗ {lot}：抓取失败，未写证据（{type(exc).__name__}: {exc}）")
             continue
+        # ★ 两套日期口径（同坑）：500 历史页给 `d/m/YYYY`，fetch_500 / market
+        #   通道给 `YYYY-MM-DD`。不归一的话「按本期开奖日组装声明时刻」会失败，
+        #   该条证据在交叉校验里被静默排除（缺席≠通过）。
+        date_iso = DE.normalize_draw_date(got.get("开奖日期"))
+        if date_iso is None:
+            why = f"开奖日期不可归一：{got.get('开奖日期')!r}"
+            fail.append((lot, why))
+            print(f"  ✗ {lot}：{why}（未写证据）")
+            continue
         rec = {
             "版本": DE.EVIDENCE_VERSION,
             "彩种": lot,
             "期号": got["期号"],
-            "开奖日期": got["开奖日期"],
+            "开奖日期": date_iso,
             "来源": got["来源"],
             "抓取时间": now,
             # ★ 网络抓取：抓到的这一刻就是「本次首次看到该期」；

@@ -181,3 +181,103 @@ def test_module_does_not_read_system_time():
             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
             and n.func.attr in ("now", "today", "utcnow")]
     assert hits == [], f"证据层读了系统时间：{hits}（时间必须由采集器注入）"
+
+
+# ------------------------------------------------ 跨期交叉校验（让高频采集真正进判据）
+def _builder(date_iso):
+    """测试替身：按证据自己的开奖日期组装该期声明下界。"""
+    return f"{date_iso}T21:15:00"
+
+
+def test_for_lottery_returns_all_issues(tmp_path):
+    p = tmp_path / "e.jsonl"
+    DE.append_evidence(_rec(期号="26127", 开奖日期="2026-11-05"), path=p)
+    DE.append_evidence(_rec(期号="26128"), path=p)
+    DE.append_evidence(_rec(彩种="大乐透", 期号="26126"), path=p)
+    assert {r["期号"] for r in DE.for_lottery("双色球", path=p)} == {"26127", "26128"}
+    assert len(DE.for_lottery("大乐透", path=p)) == 1
+
+
+@pytest.mark.parametrize("raw,want", [
+    ("2026-11-08", "2026-11-08"),
+    ("5/11/2026", "2026-11-05"),
+    ("2026-1-5", "2026-01-05"),   # strptime 允许非补零，归一后仍是合法 ISO
+    ("不是日期", None),
+    ("", None),
+    (None, None),
+])
+def test_normalize_draw_date(raw, want):
+    assert DE.normalize_draw_date(raw) == want
+
+
+def test_cross_check_empty_pool_is_explicitly_disclosed():
+    got = DE.cross_check_schedule([], _builder)
+    assert got["可用"] is True and got["参与校验"] == 0
+    assert got["未参与"] and "没有任何证据行" in got["未参与"][0]["原因"]
+    assert any("不等于声明时刻已被验证正确" in n for n in got["披露"])
+
+
+def test_cross_check_no_contradiction_keeps_schedule_usable():
+    got = DE.cross_check_schedule([_rec()], _builder)
+    assert got["可用"] is True and got["矛盾"] is False
+    assert got["参与校验"] == 1 and got["明细"][0]["结论"] == "不矛盾"
+
+
+def test_cross_check_contradiction_blocks_registration():
+    """★ 牙齿：历史期结果在声明值之前就可见 ⇒ 整张时刻表不再可信。"""
+    got = DE.cross_check_schedule(
+        [_rec(首次可观测时刻="2026-11-08T21:10:00")], _builder)
+    assert got["可用"] is False and got["矛盾"] is True
+    assert got["原因"] and "不再构成下界" in got["原因"][0]
+    assert any("不再构成下界" in n for n in got["披露"])
+
+
+def test_cross_check_compares_each_row_to_its_own_date():
+    """跨日不能误报：昨天的期今天才采到，其绝对时刻仍晚于「昨天」的声明值。"""
+    rows = [
+        _rec(期号="26127", 开奖日期="2026-11-05",
+             首次可观测时刻="2026-11-06T09:00:00"),
+        _rec(期号="26128", 开奖日期="2026-11-08",
+             首次可观测时刻="2026-11-08T21:20:00"),
+    ]
+    got = DE.cross_check_schedule(rows, _builder)
+    assert got["参与校验"] == 2 and got["可用"] is True
+
+
+def test_cross_check_skipped_rows_have_reasons():
+    rows = [
+        _rec(期号="A", 开奖日期="5/11/2026",
+             首次可观测时刻="不是时间"),
+        _rec(期号="B", 开奖日期="???",
+             首次可观测时刻="2026-11-08T21:20:00"),
+    ]
+    got = DE.cross_check_schedule(rows, _builder)
+    assert got["参与校验"] == 0
+    assert len(got["未参与"]) == 2
+    assert all("原因" in r for r in got["未参与"])
+
+
+def test_cross_check_builder_failure_is_disclosed():
+    def _broken(_d):
+        raise ValueError("该日不是开奖日")
+
+    got = DE.cross_check_schedule([_rec()], _broken)
+    assert got["参与校验"] == 0 and got["可用"] is True
+    assert "该期声明时刻不可构造" in got["未参与"][0]["原因"]
+
+
+def test_cross_check_timezone_mix_is_skipped_not_crash():
+    got = DE.cross_check_schedule(
+        [_rec()], lambda d: f"{d}T21:15:00+08:00")
+    assert got["参与校验"] == 0
+    assert "时区口径混用" in got["未参与"][0]["原因"]
+
+
+def test_schedule_config_discloses_both_directions():
+    """配置里的方向曾被写反：声明值对开奖事件是下界、对批次时间是上界。"""
+    doc = json.loads((DE.BASE_DIR / "config" / "draw_schedule.json").read_text(
+        encoding="utf-8"))
+    text = doc["口径"]
+    assert "开奖事件时间是下界" in text
+    assert "批次时间是上界" in text
+    assert "开奖事件的上界" in text

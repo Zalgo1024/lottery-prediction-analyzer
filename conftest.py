@@ -90,6 +90,11 @@ _TARGETS = (
     # 方案 B 的外部开奖证据（2026-11-06）。只追加不改写，但写脏了会让后续所有
     # 期次的「下界交叉校验」读到测试数据 ⇒ 必须隔离。
     ("ev.draw_evidence", "EVIDENCE_PATH", "draw_evidence.jsonl"),
+    # 方案 B 采集调度（2026-11-06 频率落地）：状态 / 日志 / 单实例锁都在 logs/。
+    # 不隔离的话，一次 run_once() 会把真身状态改成「今天已采」，让当晚窗口少跑一轮。
+    ("web.evidence_schedule", "STATE_PATH", "evidence_schedule_state.json"),
+    ("web.evidence_schedule", "LOG_PATH", "evidence_collect.log"),
+    ("web.evidence_schedule", "LOCK_PATH", ".evidence_collect.lock"),
 )
 
 
@@ -154,6 +159,20 @@ def _isolate_config_stores(tmp_path):
 
     for mod, attr, old in saved:
         setattr(mod, attr, old)
+
+
+@pytest.fixture(autouse=True)
+def _no_live_evidence_fetch(monkeypatch):
+    """测试进程绝不真的去抓外网：只关调度判定，不关 `run_once()` 本身。
+
+    否则全量回归若恰好跑在 21:05–21:45，内置调度器的钩子会在测试进程里
+    起一个真实采集子进程（慢、且会把证据写进真身 logs/）。
+    """
+    try:
+        from web import evidence_schedule as ES
+    except Exception:
+        return
+    monkeypatch.setattr(ES, "ENABLED", False, raising=False)
 
 
 # ---------------------------------------------------------------- 环境依赖守卫

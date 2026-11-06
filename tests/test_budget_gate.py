@@ -417,3 +417,83 @@ def test_reserve_does_not_double_count_itself():
     again = BG.clamp("双色球", 1000, baseline=1000, source="auto", reserve=True)["注数"]
     assert first == again == 1000
     assert BG.reserved_total() == 2000.0        # 同键覆盖，不是叠加
+
+
+# ---------------------------------------- ⑦ 单期上限必须兑现滑轨上限（2026-11-06）
+def _real_limit_doc():
+    p = config.BASE_DIR / "config" / "budget_aggregate.json"
+    return json.loads(p.read_text(encoding="utf-8"))
+
+
+def test_real_period_cap_is_not_below_slider_ceiling():
+    """★ 能拖到 N 注，闸门就必须真给得出 N 注。
+
+    事故背景：6 个彩种滑轨上限放到 10000，但单期上限仍是 3400 元
+    （n_cap=1700 注）⇒ 预演 8 彩种全部只出 1700 注，界面承诺兑现不了。
+    """
+    from data import ticket_size as ts
+    doc = _real_limit_doc()
+    cap = float(doc["单期上限"])
+    price = float(BG.ticket_price("双色球"))
+    assert price * max(ts.DEFAULT_LIMITS.values()) <= cap, \
+        f"单期上限 {cap} 元不够覆盖最大滑轨 {max(ts.DEFAULT_LIMITS.values())} 注"
+    for lot, want in ts.DEFAULT_LIMITS.items():
+        assert price * want <= cap, f"{lot} 的 {want} 注被单期上限夹住"
+
+
+def test_clamp_gives_full_slider_count_when_budget_allows():
+    """端到端：额度充足时 6 个彩种真能出 10000 注，3D/排列3 仍是 1000。"""
+    _write_limit(月度总额=1000000, 单期上限=20000)
+    for lot in ("双色球", "大乐透", "排列5", "七星彩", "七乐彩", "快乐8"):
+        r = BG.clamp(lot, 10000, baseline=10000, source="manual")
+        assert r["注数"] == 10000, f"{lot}: {r}"
+    for lot in ("福彩3D", "排列3"):
+        r = BG.clamp(lot, 1000, baseline=1000, source="manual")
+        assert r["注数"] == 1000, f"{lot}: {r}"
+
+
+def test_real_config_describes_actual_cap_semantics():
+    """C1①：注释必须与实现一致（单彩种单批、无跨彩种聚合）。"""
+    text = _real_limit_doc()["口径"]["单期上限"]
+    assert "单彩种" in text and "没有跨彩种或跨批聚合" in text
+    assert "月度总额" in text, "必须点明跨彩种合计由月度总额约束"
+
+
+# ---------------------------------------- ⑦ 单期上限必须兑现滑轨上限（2026-11-06）
+def _real_limit_doc():
+    p = config.BASE_DIR / "config" / "budget_aggregate.json"
+    return json.loads(p.read_text(encoding="utf-8"))
+
+
+def test_real_period_cap_is_not_below_slider_ceiling():
+    """★ 能拖到 N 注，闸门就必须真给得出 N 注。
+
+    事故背景：6 个彩种滑轨上限放到 10000，但单期上限仍是 3400 元
+    （n_cap=1700 注）⇒ 预演 8 彩种全部只出 1700 注，界面承诺兑现不了。
+    """
+    from data import ticket_size as ts
+    doc = _real_limit_doc()
+    cap = float(doc["单期上限"])
+    price = float(BG.ticket_price("双色球"))
+    assert price * max(ts.DEFAULT_LIMITS.values()) <= cap, \
+        f"单期上限 {cap} 元不够覆盖最大滑轨 {max(ts.DEFAULT_LIMITS.values())} 注"
+    for lot, want in ts.DEFAULT_LIMITS.items():
+        assert price * want <= cap, f"{lot} 的 {want} 注被单期上限夹住"
+
+
+def test_clamp_gives_full_slider_count_when_budget_allows():
+    """端到端：额度充足时 6 个彩种真能出 10000 注，3D/排列3 仍是 1000。"""
+    _write_limit(月度总额=1000000, 单期上限=20000)
+    for lot in ("双色球", "大乐透", "排列5", "七星彩", "七乐彩", "快乐8"):
+        r = BG.clamp(lot, 10000, baseline=10000, source="manual")
+        assert r["注数"] == 10000, f"{lot}: {r}"
+    for lot in ("福彩3D", "排列3"):
+        r = BG.clamp(lot, 1000, baseline=1000, source="manual")
+        assert r["注数"] == 1000, f"{lot}: {r}"
+
+
+def test_real_config_describes_actual_cap_semantics():
+    """C1①：注释必须与实现一致（单彩种单批、无跨彩种聚合）。"""
+    text = _real_limit_doc()["口径"]["单期上限"]
+    assert "单彩种" in text and "没有跨彩种或跨批聚合" in text
+    assert "月度总额" in text, "必须点明跨彩种合计由月度总额约束"

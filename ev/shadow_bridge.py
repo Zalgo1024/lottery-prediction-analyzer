@@ -18,7 +18,7 @@
    `build_snapshot` 与 `order_freeze` 本来就拒收空时间、不代填 now，本模块沿用。
 2. **不读系统随机**：`seed` 由调用方注入；缺省按 `crc32(彩种|期号)` 确定性派生。
 3. **不写固定注数**：`K` 必须来自调用方（`clamp()` / engine 的生效注数），
-   本模块不决定买多少，也不允许把 K 写死。
+   本模块不决定买多少，也不允许把 K 设成常量。
 4. **不 fail-open**：开关文件缺失 / `启用=false` ⇒ 返回「不适用」并逐条写原因，
    **绝不记为通过**（缺席≠通过）。
 5. **失败不阻断出号**：任何异常都收敛成「失败」返回，让证据层永远不影响真钱链路。
@@ -227,7 +227,7 @@ def freeze_after_predict(
                         原因=str(sw.get("原因") or "影子开关未开启"),
                         披露=["关闭期间不产生任何快照与台账行；不记为通过。"])
 
-        # ---- 1. 开奖时刻（方案 A：声明值，treated as 开奖事件上界）----
+        # ---- 1. 开奖时刻（方案 A：声明值 = 开奖事件的**下界**）----
         # 优先级：显式 schedule_path > 开关里的「时刻表来源」> 默认路径。
         if schedule_path is not None:
             sched_file = Path(schedule_path)
@@ -243,11 +243,23 @@ def freeze_after_predict(
                             sched["未参与"], ensure_ascii=False))
         declared_time = DS.build_draw_time(lottery, target_date, sched_doc)
 
-        # ---- 1b. 方案 B：外部证据只用来**交叉校验下界**，不取代它 ----
-        #   声明值（直播开始）是下界；证据的「首次可观测时刻」是上界。
-        #   若上界 < 声明值 ⇒ 声明值偏高、不再是下界 ⇒ 本期按保守处理，不具备资格。
-        ev_rows = DE.for_issue(lottery, issue, path=evidence_path)
-        bound = DE.derive_draw_lower_bound(declared_time, ev_rows)
+        # ---- 1b. 方案 B：用同彩种**历史各期**证据交叉校验这张时刻表 ----
+        #   ★ 不能只按「目标期号」过滤：目标期还没开奖，永远取不到证据，
+        #     那样高频采来的证据根本进不了判据。声明时刻是按彩种固定的排班属性，
+        #     历史期一旦出现矛盾 ⇒ 整张表不再可信，本期保守拒登。
+        #   声明值（直播开始）是下界；证据的「首次可观测时刻」是上界，
+        #   上界只能否定下界，不能取代它。
+        ev_rows = DE.for_lottery(lottery, path=evidence_path)
+        cross = DE.cross_check_schedule(
+            ev_rows, lambda d: DS.build_draw_time(lottery, d, sched_doc))
+        if not cross["可用"]:
+            return dict(base, 状态=STATUS_FAIL,
+                        原因="开奖时刻表与历史证据矛盾：" + "；".join(cross["原因"]),
+                        证据条数=len(ev_rows), 交叉校验=cross,
+                        披露=cross["披露"])
+        # 目标期自身的证据：若已存在，说明该期结果已可观测 ⇒ 判据更该从严。
+        own_rows = DE.for_issue(lottery, issue, path=evidence_path)
+        bound = DE.derive_draw_lower_bound(declared_time, own_rows)
         if not bound["可用"]:
             return dict(base, 状态=STATUS_FAIL,
                         原因="开奖时刻下界不可用：" + "；".join(bound["原因"]),
@@ -298,7 +310,11 @@ def freeze_after_predict(
                                 "**上界**，只用于交叉校验下界，不单独当判据",
                 "开奖时刻下界": str(draw_time),
                 "外部证据条数": len(ev_rows),
-                "外部证据校验": "无矛盾" if not bound["矛盾"] else "声明值被证据否定",
+                "外部证据校验": "无矛盾" if not (bound["矛盾"] or cross["矛盾"])
+                                else "声明值被证据否定",
+                "交叉校验参与期数": cross["参与校验"],
+                "交叉校验未参与": cross["未参与"],
+                "交叉校验披露": cross["披露"],
                 "时刻表核验状态": sched["核验状态"],
                 "批次性质": kind["性质"],
                 "批次性质依据": kind["依据"],
@@ -324,6 +340,8 @@ def freeze_after_predict(
                     披露=[
                         "开奖时刻是声明值（直播开始时刻）而非实测；它只提供可比基准，"
                         "不构成对开奖时刻的证明。",
+                        f"本次有 {cross['参与校验']} 条历史期证据参与时刻表交叉校验；"
+                        "未发现矛盾只表示在已测期次未见异常，不构成对开奖时刻的证明。",
                         "本登记不构成任何策略优势证据；达门槛前影子验证一律「未开判」。",
                     ])
     except PS.PrefixShadowError as exc:

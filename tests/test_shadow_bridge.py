@@ -310,3 +310,33 @@ def test_never_raises_on_broken_input(tmp_path):
     """任何异常都收敛成「失败」，绝不把异常甩给出号链路。"""
     r = _freeze(tmp_path, batch_time="不是时间")
     assert r["状态"] == "失败"
+
+
+# ------------------------------ 方案 B 历史证据必须真的进判据（不是采了没人读）
+def _history_evidence(tmp_path, observed):
+    from ev import draw_evidence as DE
+    p = tmp_path / "evidence.jsonl"
+    DE.append_evidence({
+        "版本": DE.EVIDENCE_VERSION,
+        "彩种": "双色球", "期号": "26127", "开奖日期": "2026-11-08",
+        "来源": "https://example.invalid/history",
+        "抓取时间": observed, "首次可观测时刻": observed,
+        "开奖号码": {"原始CSV行": ["26127"]},
+    }, path=p)
+    return p
+
+
+def test_historical_evidence_contradiction_blocks_registration(tmp_path):
+    """★ 牙齿：历史期结果在声明值 21:15 之前可见 ⇒ 时刻表不可信 ⇒ 本期拒登。"""
+    p = _history_evidence(tmp_path, "2026-11-08T21:10:00")
+    r = _freeze(tmp_path, evidence_path=p)
+    assert r["状态"] == "失败" and "矛盾" in r["原因"]
+    assert not (tmp_path / "shadow.jsonl").exists(), "拒登时绝不写台账"
+
+
+def test_historical_evidence_without_contradiction_still_registers(tmp_path):
+    """反向：不能因为接了证据就把所有登记都误杀。"""
+    p = _history_evidence(tmp_path, "2026-11-08T21:20:00")
+    r = _freeze(tmp_path, evidence_path=p)
+    assert r["状态"] == "已登记", r
+    assert any("历史期证据参与" in d for d in r["披露"])

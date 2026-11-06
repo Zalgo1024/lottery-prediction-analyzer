@@ -91,6 +91,7 @@ class AutoScheduler:
         self._stop = threading.Event()
         self._digest_running = False
         self._market_thread = None
+        self._evidence_running = False
         self._load()
 
     # ---------- 持久化 ----------
@@ -455,6 +456,43 @@ class AutoScheduler:
 
         threading.Thread(target=_run, name="health-digest", daemon=True).start()
 
+    # ---------- 方案 B 开奖证据采集（21:05–21:45 / 每 2 分钟）----------
+    def _maybe_collect_evidence(self, now=None) -> bool:
+        """窗口内按 2 分钟节拍起一次采集；绝不占住 tick 线程。
+
+        ★ 采集只追加证据文件，不改 CSV / pending / 台账 / 预算；失败只记日志。
+        ★ 频率真源在 `web/evidence_schedule.py`，这里只负责「到点起线程」。
+        ★ ENABLED 由测试夹具关掉，避免跑全量时真的去抓外网。
+        """
+        try:
+            from web import evidence_schedule as ES
+            if not ES.ENABLED or not ES.in_window(now or datetime.now()):
+                return False
+            if self._evidence_running:
+                return False
+            if not ES.is_due(now or datetime.now(), ES.load_state().get("last_run")):
+                return False
+            self._evidence_running = True
+
+            def _work():
+                try:
+                    r = ES.run_once()
+                    if r.get("状态") != "成功":
+                        logger.warning(f"证据采集本轮 {r.get('状态')}："
+                                       f"{r.get('原因') or r.get('汇总')}")
+                except Exception as e:                        # noqa: BLE001
+                    logger.warning(f"证据采集线程异常（不影响主流程）: {e}")
+                finally:
+                    self._evidence_running = False
+
+            ES_run_thread = threading.Thread(
+                target=_work, name="draw-evidence", daemon=True)
+            ES_run_thread.start()
+            return True
+        except Exception as e:                                # noqa: BLE001
+            logger.warning(f"证据采集调度判定异常（降级）: {e}")
+            return False
+
     def _settle_profit_ledger(self, lottery: str):
         """开奖后结算钩子：把某彩种影子台账里『已记录、未结算』的历史期回填。
 
@@ -548,6 +586,8 @@ class AutoScheduler:
                     # 离线体检日报/周检（2026-10-21）：到点才跑，一天只跑一次。
                     # 只在有问题时推送 —— 你不开机的时候，它就是那个替你看着的人。
                     self._daily_digest()
+                    # 方案 B 证据采集：贴着开奖时刻每 2 分钟采一次，窗口外零副作用。
+                    self._maybe_collect_evidence(now)
             except Exception as e:
                 logger.warning(f"调度器循环异常: {e}")
             self._stop.wait(60)

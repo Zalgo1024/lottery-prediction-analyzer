@@ -1,12 +1,40 @@
 @echo off
-rem 一键采集开奖证据（方案 B）。双击即可，或由计划任务调用。
-rem ★ 为什么建议贴着开奖时刻跑：证据里的「首次可观测时刻」越接近开奖，
-rem   交叉校验越灵敏；如果隔几小时才采，「上界」会很松，只能确认「不矛盾」，
-rem   抓不到「声明值写晚」的情况。
-rem 建议时段（福彩 21:15 / 体彩 21:25 / 快乐8 21:30）：21:05 起每 2 分钟，跑到 21:45。
+rem 方案 B 开奖证据采集（一键 / 窗口循环）。
+rem   collect_evidence.bat            手工采一次，结束暂停看结果
+rem   collect_evidence.bat once       手工采一次，不暂停
+rem   collect_evidence.bat window     21:05-21:45 每 2 分钟循环采（供定时调用）
+rem   collect_evidence.bat status     只看状态，不采集
+rem
+rem ★ 频率、窗口、单实例锁、日志的真源是 web/evidence_schedule.py；
+rem   Flask 内置调度器在 21:05-21:45 也会自动按同一节拍采，两者共用锁与状态，
+rem   同时存在不会重复采集。
+rem ★ 采集只读数据源、只追加证据文件；不改 CSV / pending / 台账 / 预算。
 chcp 65001 >nul
 cd /d "%~dp0.."
-echo [采集] %date% %time%
-E:\Python\python.exe scripts\collect_draw_evidence.py --all
+set PY=E:\Python\python.exe
+echo [采集] %date% %time% 模式=%~1
+
+if /I "%~1"=="window" goto WINDOW
+if /I "%~1"=="status" goto STATUS
+if /I "%~1"=="once" goto ONCE
+
+"%PY%" scripts\collect_evidence_window.py --once
 echo [退出码] %ERRORLEVEL%
-if "%~1"=="" pause
+pause
+goto END
+
+:ONCE
+"%PY%" scripts\collect_evidence_window.py --once
+echo [退出码] %ERRORLEVEL%
+goto END
+
+:WINDOW
+"%PY%" scripts\collect_evidence_window.py --window
+echo [退出码] %ERRORLEVEL%
+goto END
+
+:STATUS
+"%PY%" scripts\collect_evidence_window.py --status
+goto END
+
+:END
