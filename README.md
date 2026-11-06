@@ -2,7 +2,7 @@
 
 > **把「看起来有效」和「真的有效」分开。** 一套可复现的检验框架，用 8 个彩种、数万期公开开奖数据当压力测试场。
 
-![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB) ![Tests](https://img.shields.io/badge/pytest-2900%20passed-3B6D11) ![Lotteries](https://img.shields.io/badge/%E5%BD%A9%E7%A7%8D-8-854F0B) ![License](https://img.shields.io/badge/License-AGPL--3.0-blue)
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB) ![Tests](https://img.shields.io/badge/pytest-2911%20passed-3B6D11) ![Lotteries](https://img.shields.io/badge/%E5%BD%A9%E7%A7%8D-8-854F0B) ![License](https://img.shields.io/badge/License-AGPL--3.0-blue)
 
 ## 0. 30 秒读懂
 
@@ -110,7 +110,7 @@ python run.py                # 看门狗模式，访问 http://127.0.0.1:5000
 # 3. 或者只用 CLI
 python cli.py --help
 
-# 4. 跑测试套件（全量 2900 例）
+# 4. 跑测试套件（全量 2911 例）
 pytest -q                    # 约 15–20 分钟（慢点集中在真实 predict 全流程的契约测试）
 ```
 
@@ -158,6 +158,8 @@ python scripts/audit_records.py              # 命中记录审计（清单由注
 > 正确读法：**未检出**只表示「在现有样本与检验功效下看不到稳定偏差」，既不是「已证明不存在」，也不是「多买就能中」。真正可动的只有覆盖设计、实得优化与 Rollover 时机。
 
 数字型的玩法口径是**显式缺口**：EV 层只建模直选，排列3 / 福彩3D 的组选3、组选6 在 `data/prize_table.py` 有奖金（结算认得），但没有概率口径所以进不了 EV。前提是生产票面为直选；改玩法前必须先扩 `grade_table`。
+
+**受规则约束档**（七乐彩一~三等、快乐8 全部 39 档）的单注金额按期由官方公布，既不是固定奖也不是奖池浮动奖。展示层 `data/prize_table.py::prize_payout` 与判级 / 结算层共用 `ev/profit/amounts.grade_amount` 这一条取值链：当期实测优先；只有名义值时只作展示、不进金额合计；读不到任何当期数据时按「金额未知」单独计数并由界面披露，**不按 0 元计**。命中历史的「N 等奖及以上」筛选对这套按玩法命名的奖级不适用，被排除的注数会显式给出，不静默漏计。
 
 ## 8. 影子验证与方案 B（当前状态）
 
@@ -231,8 +233,8 @@ python scripts/collect_evidence_window.py --status  # 证据采集状态
 ## 11. 测试、维护与备份
 
 ```bash
-pytest -q              # 2900 passed（全量；含奖金表、写保护与分区归一化、批次契约、出号数量、消息推送、休市日历、机制缝隙四轨、影子接线与证据时间方向、预算并发预占、采集频率、文档维护护栏等）
-pytest tests/          # 2891 passed（仅 tests/ 目录；另有 9 例在 scripts/ 下，故用 pytest -q 跑全量）
+pytest -q              # 2911 passed（全量；含奖金表、写保护与分区归一化、批次契约、出号数量、消息推送、休市日历、机制缝隙四轨、影子接线与证据时间方向、预算并发预占、采集频率、文档维护护栏等）
+pytest tests/          # 2902 passed（仅 tests/ 目录；另有 9 例在 scripts/ 下，故用 pytest -q 跑全量）
 ```
 
 本机跑全量需 `PYTEST_DEBUG_TEMPROOT=E:/707_backup_p5_2200/pytest_tmp PYTHONUTF8=1`；`pytest.ini` 用 `--strict-markers` 注册 `realdata` / `statsmodels` / `winfont` 等标记，避免选错测试集却不报错。

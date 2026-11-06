@@ -165,8 +165,9 @@ def _qlc_ticket(basic):
 def test_qlc_grade_settlement(basic, grade, h, j):
     """_grade 七乐彩：二元格 (h, j) 判级 + 唯一取值链 grade_amount。
 
-    受规则约束奖级（一~三等）若误走 base_payout/prize_payout 会被判「未中」；
-    这里以 grade_amount 为唯一真值链做回归锁。
+    受规则约束奖级（一~三等）的单注金额按期公布，判级层必须以
+    grade_amount 为唯一真值链（实测优先、名义兜底）；这里做回归锁，
+    展示层 data.prize_table.prize_payout 也复用同一条链。
     """
     g, pay = _grade("七乐彩", _qlc_ticket(basic), QLC_ACTUAL, QLC_SCHEMA, QLC_ISSUE)
     assert g == grade

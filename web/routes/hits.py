@@ -16,9 +16,10 @@
 - `amount_sum` / `amount_sum_unknown`   当前筛选口径：可确定金额的注求和 + 金额未知的注数
 - `amount_all` / `amount_all_unknown`   全部命中口径（不筛选）：同上
 
-★ 口径 = 各注「单注奖金」之和（税前，不是实得；浮动奖取当期实际单注奖金）。
-★ 浮动奖级当期金额读不到时**不按 0 计入**（会让合计系统性偏低且看不出来），
-  而是单独计数由前端披露。
+★ 口径 = 各注「单注奖金」之和（税前，不是实得；浮动奖与受规则约束档取当期实测）。
+★ 当期金额读不到时**不按 0 计入**（会让合计系统性偏低且看不出来），
+  而是单独计数由前端披露。受规则约束档（七乐彩一~三等 / 快乐8 全部档）
+  由 `data.prize_table.prize_payout` 走唯一取值链，不再被当成「未中」。
 """
 
 from flask import Blueprint, jsonify, render_template, request
@@ -63,7 +64,10 @@ def api_hits():
     参数：
       lottery:    全部 | 双色球 | 大乐透 | 排列5 | 福彩3D | 排列3 | 七星彩（默认"全部"）
       limit:      最多返回条数（默认 100，0=不限；可选 5/10/20/50/100/200/500/0）
-      min_prize:  最小中奖等级（默认"全部"，可填 一等|二等|三等|四等|五等|六等）
+      min_prize:  最小中奖等级（默认"全部"，可填 一等|二等|三等|四等|五等|六等）。
+                  ★ 受规则约束档（七乐彩一~三等 / 快乐8 选十中五 等）按玩法命名，
+                    不参与这套「N 等」排序；被排除的注数在 grade_filter_inapplicable
+                    里单独给出，由前端披露「不适用」。
       type:       全部 | 预测 | 训练
       strategy:   策略名（默认"全部" ⇒ 逐位保持既有行为）。
                   按 normalize_strategy_name 归一时比对（ML(logistic)/统计训练(Wxx) → ML策略），
@@ -91,7 +95,7 @@ def api_hits():
     import calendar
 
     from data.feedback import load_feedback_history, normalize_strategy_name
-    from data.prize_table import prize_payout
+    from data.prize_table import norm_grade, prize_payout, regulated_nominal
     from data.schema import is_redblue
     from ev.batch import batch_fields, group_batches
 
@@ -114,6 +118,8 @@ def api_hits():
     #   乐透型  大乐透: 一等~九等（历史上 6/7/8/9 级四种，由规则表生成）
     #   七星彩          : 一等奖~六等奖
     #   数字型(3D/排列3/排列5): 直选 / 组选3 / 组选6 / 未中
+    #   受规则约束档(七乐彩/快乐8): 选十中五 等玩法名，不在这套编号内 ⇒  rank 99，
+    #     只用于「N 等奖及以上」筛选，排除数单独披露（见 grade_filter_inapplicable）。
     # 「X等」部分从 ev.profit.rules.grade_rank_names 取（单一真源，不手写副本）。
     from ev.profit.rules import grade_rank_names
 
@@ -199,6 +205,10 @@ def api_hits():
     amount_all_unknown = 0
     amount_sum = 0.0
     amount_sum_unknown = 0
+    # 「N 等奖及以上」筛选对受规则约束档不适用（它们按玩法命名，不按等级编号）。
+    # 被这条筛选排除的注数单独计数，交前端显式披露，避免静默漏计。
+    grade_na = 0
+    grade_na_lots = set()
     records = []
     # 总是遍历全部彩种：即使只看某一彩种，也要能给出「全部命中总数」这个稳定分母
     for name in LOTTERY_CONFIG:
@@ -249,6 +259,9 @@ def api_hits():
                 continue
             grp = rec_group.get(id(h))
             if min_rank and prize_rank.get(prize, 99) > min_rank:
+                if regulated_nominal(name, norm_grade(prize)) is not None:
+                    grade_na += 1
+                    grade_na_lots.add(name)
                 continue
             valid = h.get("valid_prediction", True)
             # 类型筛选：预测=真预测(开奖前生成)；训练=马后炮(开奖后回测)
@@ -360,6 +373,9 @@ def api_hits():
         "amount_sum_unknown": amount_sum_unknown,        # 当前筛选：金额未知的注数（未计入）
         "amount_all": round(amount_all, 2),              # 全部命中（不筛选）合计
         "amount_all_unknown": amount_all_unknown,        # 全部命中：金额未知的注数（未计入）
+        # 等级筛选「不适用」：受规则约束档不按 N 等体系划分，不能静默排除。
+        "grade_filter_inapplicable": grade_na,
+        "grade_filter_lotteries": sorted(grade_na_lots),
         "lottery": lottery,
         "strategy": strategy,
         "sort_by": sort_by,

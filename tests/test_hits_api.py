@@ -454,3 +454,54 @@ def test_html_pages_are_not_browser_cached(client):
     # 静态资源同样禁缓存（既有行为，防回归）
     r = client.get("/static/js/main.js")
     assert "no-store" in (r.headers.get("Cache-Control") or "").lower()
+
+
+# ------------------------------------------------------------
+# 8. 受规则约束档（2026-11-06 快乐8 实踩）
+# ------------------------------------------------------------
+
+def test_regulated_amount_reaches_hits_api(monkeypatch):
+    """端到端：快乐8 中奖注经真实 prize_payout 计入合计，不再显示 ¥0.00 / ¥ —。
+
+    与 client fixture 不同，这里**不**替换 prize_payout，只把取值链换成
+    可控的「当期实测」，否则测不到展示层缺分支这个根因。
+    """
+    import ev.profit.amounts as amounts
+    pt.clear_cache()
+    monkeypatch.setattr(amounts, "grade_amount",
+                        lambda lottery, issue, grade, **kw: (3.0, "实测"))
+    monkeypatch.setattr(fb, "load_feedback_history",
+                        lambda name, lookback=None: [_win("快乐8", "选十中五")]
+                        if name == "快乐8" else [])
+    monkeypatch.setattr(hits_route, "feedback_record_view",
+                        lambda name, h: {"zones": [], "total_hit": 0, "total_choose": 0})
+    app.config["TESTING"] = True
+    d = _get(app.test_client(), "?lottery=快乐8&limit=0")
+    assert d["total"] == 1
+    assert d["amount_sum"] == 3.0
+    assert d["amount_sum_unknown"] == 0
+    assert d["records"][0]["奖金"]["文本"] == "¥3"
+    assert d["records"][0]["奖金"]["来源"] == "当期实际单注奖金"
+    pt.clear_cache()
+
+
+def test_grade_filter_inapplicable_is_disclosed(client, monkeypatch):
+    """「N 等奖及以上」对快乐8 玩法档不适用 ⇒ 排除数必须显式给出，不能静默漏计。"""
+    monkeypatch.setattr(fb, "load_feedback_history",
+                        lambda name, lookback=None: [_win("快乐8", "选十中五")]
+                        if name == "快乐8" else [])
+    d = _get(client, "?lottery=快乐8&min_prize=一等&limit=0")
+    assert d["total"] == 0
+    assert d["universe"] == 1
+    assert d["grade_filter_inapplicable"] == 1
+    assert d["grade_filter_lotteries"] == ["快乐8"]
+
+
+def test_grade_filter_inapplicable_zero_without_filter(client):
+    """没有等级筛选时不得凭空报「不适用」；前端必须真渲染这个披露。"""
+    d = _get(client, "?limit=0")
+    assert d["grade_filter_inapplicable"] == 0
+    assert d["grade_filter_lotteries"] == []
+    js = client.get("/static/js/main.js").get_data(as_text=True)
+    assert "grade_filter_inapplicable" in js
+    assert "奖级不适用本次等级筛选" in js

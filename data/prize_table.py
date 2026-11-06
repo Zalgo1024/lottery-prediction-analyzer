@@ -17,6 +17,12 @@ data/prize_table.py —— 奖级 → 单注奖金 的权威映射（唯一来�
 ⚠️ 命名坑：feedback 里奖级有两套写法 —— 乐透型 "一等"/"五等"（_classify_prize）
    与七星彩 "一等奖"/"五等奖"（_qxc_prize）。本模块统一归一化为 "N等" 键，
    两套写法都能查。
+
+★ 第三类「受规则约束」档（regulated）：七乐彩一~三等、快乐8 全部 39 档。
+   它们既不是 fixed 也不是 floating，单注金额按期由官方公布。取值链交给
+   `ev.profit.amounts.grade_amount`（与判级/结算层同一真源）：
+   当期实测 → 名义参考（显式标注，且不得作为实测计入金额合计）。
+   展示层过去缺这个分支，中奖记录会落进「未中」兜底按 0 元计入。
 """
 from __future__ import annotations
 
@@ -152,6 +158,10 @@ _NUM2CN = {v: k for k, v in _CN.items()}
 # 内部缓存：彩种 → (加载时间戳, {期号(int): {"一等": 金额, "二等": 金额}})
 # 带 TTL：Flask worker 长期驻留，新一期开出并回填奖金后需能感知（避免永久陈旧）。
 _ACTUAL_CACHE: Dict[str, tuple] = {}
+# regulated 档的 (彩种, 期号, 归一奖级) → (时间戳, 返回结构)。
+# 命中历史页会对同一期同一档重复查上千次，逐次开只读库约 4ms/次；
+# 缓存只省 IO，不改取值链。返回时复制一份，避免调用方（gross_and_net）污染缓存。
+_REGULATED_CACHE: Dict[tuple, tuple] = {}
 _CACHE_TTL = 120.0  # 秒
 
 
@@ -170,6 +180,7 @@ norm_grade = _norm_grade
 def clear_cache():
     """清空当期实际奖金缓存（测试/数据刷新后调用）。"""
     _ACTUAL_CACHE.clear()
+    _REGULATED_CACHE.clear()
 
 
 def _load_actual_payouts(lottery: str) -> Dict[int, Dict[str, float]]:
@@ -241,11 +252,13 @@ def prize_payout(lottery: str, grade: str, issue: Any = None) -> Dict[str, Any]:
 
     返回：
       {
-        "金额": float | None,       # 单注金额（元）；浮动且无实际值时 None
-        "浮动": bool,               # 是否浮动奖级
-        "来源": str,                # 固定奖金 / 当期实际单注奖金 / 名义参考 / 未知奖级
+        "金额": float | None,       # 单注金额（元）；浮动/regulated 无当期实测时 None
+        "浮动": bool,               # 是否非固定金额（浮动或仅名义参考）
+        "来源": str,                # 固定奖金 / 当期实际单注奖金 / 名义参考 / 金额未知 / 未中
         "文本": str,                # 直接可展示的文案
         "备注": str,                # 悬浮提示用
+        "金额来源": str,            # regulated 档另附：实测 / 名义参考 / 未知（可选）
+        "名义金额": float,          # regulated 档仅有名义值时附参考值（不计入合计）
       }
     """
     g = _norm_grade(grade)
@@ -295,7 +308,39 @@ def prize_payout(lottery: str, grade: str, issue: Any = None) -> Dict[str, Any]:
         return {"金额": amt, "浮动": False, "来源": "固定奖金",
                 "文本": _fmt_amount(amt), "备注": f"{lottery} {grade} 固定奖金 {_fmt_amount(amt)}/注"}
 
-    # 2) 浮动奖级
+    # 2) 受规则约束档（regulated）：七乐彩一~三等 / 快乐8 全部 39 档
+    #    ★ 与判级、结算、EV 共用唯一取值链 grade_amount：当期实测优先，
+    #      读不到才回退名义值。名义值**不是实测**，只展示、不计入金额合计，
+    #      由调用方按「金额未知」单独计数并在界面披露。
+    if regulated_nominal(lottery, g) is not None:
+        key = (lottery, str(issue), g)
+        hit = _REGULATED_CACHE.get(key)
+        if hit and (time.time() - hit[0]) < _CACHE_TTL:
+            return dict(hit[1])
+        from ev.profit.amounts import SRC_NOMINAL, grade_amount
+
+        amt, src = grade_amount(lottery, issue, grade)
+        if amt is not None and src != SRC_NOMINAL:
+            out = {"金额": float(amt), "浮动": False, "来源": "当期实际单注奖金",
+                   "文本": _fmt_amount(float(amt)), "金额来源": src,
+                   "备注": (f"{lottery} 第{issue}期 {grade} 当期实际单注奖金"
+                            f"（{src}，已含分摊/封顶/限赔/派奖）")}
+        elif amt is not None:
+            out = {"金额": None, "浮动": True, "来源": "名义参考",
+                   "文本": f"名义参考 {_fmt_amount(float(amt))}（未计入合计）",
+                   "名义金额": float(amt), "金额来源": src,
+                   "备注": (f"{lottery} 第{issue}期 {grade} 无当期实测单注奖金；"
+                            f"仅显示规则名义值 {_fmt_amount(float(amt))}，"
+                            "不代表实际到手金额，未计入合计")}
+        else:
+            out = {"金额": None, "浮动": True, "来源": "金额未知",
+                   "文本": "金额未知", "金额来源": src,
+                   "备注": (f"{lottery} 第{issue}期 {grade}：{src}；"
+                            "金额未知，不计入合计也不按 0 计")}
+        _REGULATED_CACHE[key] = (time.time(), out)
+        return dict(out)
+
+    # 3) 浮动奖级
     float_ref = FLOATING_REF.get(lottery, {})
     if g in float_ref:
         actual = None
@@ -318,7 +363,7 @@ def prize_payout(lottery: str, grade: str, issue: Any = None) -> Dict[str, Any]:
                 "文本": "浮动（视奖池）",
                 "备注": f"{lottery} {grade} 为浮动奖级，本地无当期单注奖金数据"}
 
-    # 3) 未中 / 未知
+    # 4) 未中 / 未知
     return {"金额": 0.0, "浮动": False, "来源": "未中",
             "文本": "—", "备注": f"{lottery} {grade}：无奖金（未中奖或奖级未知）"}
 
@@ -329,7 +374,7 @@ def gross_and_net(lottery: str, grade: str, issue: Any = None) -> Dict[str, Any]
     语义：
       - 中奖（金额已知）：net = payout - cost
       - 未中：net = 0（命中历史页只回看"如果买了能赚多少"，未中不计入成本）
-      - 浮动且无当期实际值：net = None（金额未知，无法计算）
+      - 金额未知（浮动无当期数据 / regulated 仅有名义值）：net = None
     """
     info = prize_payout(lottery, grade, issue)
     amt = info.get("金额")

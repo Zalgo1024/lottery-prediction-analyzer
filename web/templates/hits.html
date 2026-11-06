@@ -27,7 +27,7 @@
     <option value="全部" selected>全部彩票</option>
     {% for lot in lotteries %}<option value="{{ lot }}">{{ lot }}</option>{% endfor %}
   </select>
-  <select id="hits-prize" style="padding:8px 15px;border:1px solid #ddd;border-radius:5px;font-size:14px">
+  <select id="hits-prize" style="padding:8px 15px;border:1px solid #ddd;border-radius:5px;font-size:14px" title="按「N 等奖及以上」筛选；七乐彩/快乐8 的受规则约束档按玩法命名、不按等级编号，对它们不适用，被排除的注数会在统计行单独披露">
     <option value="全部" selected>全部等级</option>
     <option value="一等">一等奖及以上</option>
     <option value="二等">二等奖及以上</option>
@@ -42,7 +42,7 @@
     <option value="组选3">组选3（数字型）</option>
     <option value="组选6">组选6（数字型）</option>
   </select>
-  <select id="hits-amount" style="padding:8px 15px;border:1px solid #ddd;border-radius:5px;font-size:14px" title="按「这一注能中多少钱」筛选；浮动奖级读不到当期奖金时不参与该筛选">
+  <select id="hits-amount" style="padding:8px 15px;border:1px solid #ddd;border-radius:5px;font-size:14px" title="按「这一注能中多少钱」筛选；浮动奖与受规则约束档读不到当期实测奖金时不参与该筛选，只单独计数">
     <option value="" selected>全部奖金</option>
     <option value="10">奖金 ≥ 10 元</option>
     <option value="30">奖金 ≥ 30 元</option>

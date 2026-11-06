@@ -173,3 +173,86 @@ def test_amount_formatting():
     assert prize_payout("双色球", "五等")["文本"] == "¥10"
     assert prize_payout("福彩3D", "直选")["文本"] == "¥1,040"
     assert prize_payout("排列5", "直选")["文本"] == "¥100,000"
+
+
+# ---------- 6. 受规则约束档（regulated：七乐彩一~三等 / 快乐8 全部档） ----------
+#
+# 2026-11-06 实踩：命中历史页 865 注快乐8 中奖记录全部显示「$ — / 合计 ¥0.00」，
+# 因为展示层缺这个分支，中奖注落进「未中」兜底按 0 元计入。
+# 这几例锁住「取值链 = 判级/结算层同一条 grade_amount」以及
+# 「名义值不是实测、金额未知不是 0」两条诚实纪律。
+
+def _patch_grade_amount(monkeypatch, amount, src):
+    """把唯一取值链换成可控夹具，避免测试依赖 market.db 当期数据。"""
+    import ev.profit.amounts as amounts
+    monkeypatch.setattr(amounts, "grade_amount",
+                        lambda lottery, issue, grade, **kw: (amount, src))
+    pt.clear_cache()
+
+
+@pytest.mark.parametrize("lottery,grade,amount", [
+    ("快乐8", "选十中五", 3.0),
+    ("快乐8", "选十中九", 8000.0),
+    ("七乐彩", "一等奖", 1_270_224.0),
+])
+def test_regulated_uses_actual_and_is_not_a_loss(monkeypatch, lottery, grade, amount):
+    """有当期实测 ⇒ 计入合计、来源标注实测，绝不落到「未中」。"""
+    _patch_grade_amount(monkeypatch, amount, "实测")
+    r = prize_payout(lottery, grade, 2026296)
+    assert r["金额"] == amount
+    assert r["来源"] == "当期实际单注奖金"
+    assert r["金额来源"] == "实测"
+    assert r["浮动"] is False
+    assert r["文本"] != "—"
+    assert "¥" in r["文本"]
+
+
+def test_regulated_nominal_is_displayed_but_not_counted(monkeypatch):
+    """只有名义值 ⇒ 展示可读数值，但金额 None（不混入实测合计）。"""
+    import ev.profit.amounts as amounts
+    _patch_grade_amount(monkeypatch, 3.0, amounts.SRC_NOMINAL)
+    r = prize_payout("快乐8", "选十中五", 2099001)
+    assert r["金额"] is None
+    assert r["来源"] == "名义参考"
+    assert r["名义金额"] == 3.0
+    assert "名义参考" in r["文本"] and "未计入合计" in r["文本"]
+    assert "不代表实际到手金额" in r["备注"]
+    assert gross_and_net("快乐8", "选十中五", 2099001)["净盈亏"] is None
+
+
+def test_regulated_unknown_amount_is_not_zero(monkeypatch):
+    """金额未知 ≠ 0 元；也不能伪装成「未中奖」。"""
+    _patch_grade_amount(monkeypatch, None, "未知（受规则约束奖级且无当期数据）")
+    r = prize_payout("快乐8", "选十中七", 2099002)
+    assert r["金额"] is None
+    assert r["来源"] == "金额未知"
+    assert r["文本"] == "金额未知"
+    assert r["来源"] != "未中"
+
+
+def test_regulated_cache_returns_a_copy(monkeypatch):
+    """缓存复用时不能把 gross_and_net 写入的「净盈亏」漏给下一次调用。"""
+    _patch_grade_amount(monkeypatch, 3.0, "实测")
+    gross_and_net("快乐8", "选十中五", 2026296)
+    assert "净盈亏" not in prize_payout("快乐8", "选十中五", 2026296)
+
+
+def test_regulated_grades_are_registered():
+    """快乐8 39 档 + 七乐彩一~三等都在 regulated 表内；四~七等仍是固定奖。"""
+    assert len(pt.REGULATED_NOMINAL["快乐8"]) == 39
+    for g in ("一等", "二等", "三等"):
+        assert pt.regulated_nominal("七乐彩", g) is not None
+    for g in ("四等", "五等", "六等", "七等"):
+        assert prize_payout("七乐彩", g)["来源"] == "固定奖金"
+
+
+def test_clear_cache_also_clears_regulated(monkeypatch):
+    """换夹具后必须能拿到新值，不能被 120s TTL 缓存钉住。"""
+    import ev.profit.amounts as amounts
+    monkeypatch.setattr(amounts, "grade_amount",
+                        lambda lottery, issue, grade, **kw: (3.0, "实测"))
+    assert prize_payout("快乐8", "选十中五", 2099003)["金额"] == 3.0
+    monkeypatch.setattr(amounts, "grade_amount",
+                        lambda lottery, issue, grade, **kw: (7.0, "实测"))
+    pt.clear_cache()
+    assert prize_payout("快乐8", "选十中五", 2099003)["金额"] == 7.0

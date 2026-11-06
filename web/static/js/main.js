@@ -3027,16 +3027,24 @@ function _renderHitsStat(universe, money) {
     const unknown = Number((filtered ? money.unknown : money.allUnknown) || 0);
     const big = v => `<strong style="color:#c62828;font-size:15px">${v}</strong>`;
     const unkTxt = unknown > 0
-        ? ` · <span style="color:#b9770e" title="浮动奖级（双色球/大乐透/七星彩一、二等）读不到当期实际单注奖金，这类注无法计入金额合计">另有 ${unknown} 注金额未知未计入</span>`
+        ? ` · <span style="color:#b9770e" title="浮动奖级（双色球/大乐透/七星彩一、二等）与受规则约束档（七乐彩一~三等/快乐8 全部档）读不到当期实测单注奖金时，这类注无法计入金额合计">另有 ${unknown} 注金额未知未计入</span>`
+        : '';
+    // 「N 等奖及以上」这套排序对快乐8/七乐彩的受规则约束档不适用：
+    // 它们按玩法命名（选十中五…），不按等级编号。被排除的注数必须显式披露，
+    // 不能让「筛出 N 注」被读成「该彩种只有 N 注较高奖级」。
+    const naCount = Number(money.gradeNA || 0);
+    const naLots = Array.isArray(money.gradeNALots) ? money.gradeNALots.join('、') : '';
+    const naTxt = naCount > 0
+        ? ` · <span style="color:#b9770e" title="受规则约束档不按「N 等」体系划分，等级筛选对它们不适用">另有 ${naCount} 注（${_escAttr(naLots)}）奖级不适用本次等级筛选</span>`
         : '';
     const scope = "全部彩种 · 全部奖级，含「开奖后回测·训练」";
     // 范围括注紧跟在「注数」后面（它解释的是那个不随筛选变的分母），
     // 金额一律放在最后 —— 否则「筛出 130 注…（全部彩种）」会被读成 130 注覆盖全部彩种。
     const head = `目前已中奖 ${big(u)} 注 <span style="opacity:.72">（${scope}）</span>`;
     el.innerHTML = filtered
-        ? `${head} · 筛出 ${matched} 注累计中奖金额 ${big(_fmtMoney(sum))}${unkTxt}` +
+        ? `${head} · 筛出 ${matched} 注累计中奖金额 ${big(_fmtMoney(sum))}${unkTxt}${naTxt}` +
           ` <span style="opacity:.72">（未筛选时累计 ${_fmtMoney(money.all)}）</span>`
-        : `${head} · 累计中奖金额 ${big(_fmtMoney(sum))}${unkTxt}`;
+        : `${head} · 累计中奖金额 ${big(_fmtMoney(sum))}${unkTxt}${naTxt}`;
 }
 
 // 工具条内的常驻数字：筛出 xx 注 / 共 xxxx 注（总数）
@@ -3500,6 +3508,8 @@ async function loadHits() {
             unknown: data.amount_sum_unknown,
             all: data.amount_all,
             allUnknown: data.amount_all_unknown,
+            gradeNA: data.grade_filter_inapplicable,
+            gradeNALots: data.grade_filter_lotteries,
         });
         _renderHitsCount(matched, universe);
         if (!data.records || !data.records.length) {
@@ -3539,7 +3549,7 @@ async function loadHits() {
             <span>筛出 <strong style="color:#c62828;font-size:15px">${matched}</strong> 注 / <strong>${universe}</strong> 注（总数）` +
             (trunc ? ` · 已显示前 <strong>${shown}</strong> 条` : ``) +
             (trainCount ? ` · 本页 <strong style="color:#e65100">${trainCount}</strong> 注为「开奖后回测·训练」` : ``) +
-            (unknownAmt ? `<br><span style="color:#e65100">另有 <strong>${unknownAmt}</strong> 注浮动奖级当期金额未知，未参与奖金筛选</span>` : ``) +
+            (unknownAmt ? `<br><span style="color:#e65100">另有 <strong>${unknownAmt}</strong> 注金额未知（浮动奖或受规则约束档无当期实测），未参与奖金筛选</span>` : ``) +
             `</span>
             <button class="btn btn-default btn-sm" onclick="_toggleAllHits(this)">全部展开</button>
         </div>`;
