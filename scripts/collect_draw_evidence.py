@@ -41,6 +41,54 @@ if str(ROOT) not in sys.path:
 from ev import draw_evidence as DE          # noqa: E402
 
 
+def _fetch_market(lottery: str) -> dict:
+    """七乐彩 / 快乐8：从 `market.db` **只读**取最新一期。
+
+    为什么不走 `_update_via_market()`：那条路径会 `run_update()` 抓取并**写
+    `market.db`**，是生产副作用。这里只读已经入库的数据 —— 若库里还没有该期，
+    就老实报「需生产抓取」，不为了凑一条证据去写库。
+
+    ★ `fetched_at` 是**抓取入库时刻**，不是「结果首次可被看到」的时刻。
+      用它作上界是**宽松**的（真实首次可见 ≤ fetched_at），所以不会误报
+      「声明值偏晚」；代价是灵敏度低。已在记录的 `探测方式` 字段里写明。
+    """
+    import re
+    from market.viewer import connect
+
+    code = {"七乐彩": "qlc", "快乐8": "kl8"}.get(lottery)
+    if not code:
+        raise RuntimeError(f"{lottery} 不在 market 通道内")
+    con = connect()                                    # URI mode=ro，协议层不可写
+    try:
+        row = con.execute(
+            "SELECT issue, draw_date, front, back, MAX(fetched_at) AS fetched_at "
+            "FROM draw WHERE lottery=? AND front IS NOT NULL AND front<>'' "
+            "GROUP BY issue ORDER BY MAX(draw_date) DESC, issue DESC LIMIT 1",
+            (code,)).fetchone()
+    finally:
+        con.close()
+    if row is None:
+        raise RuntimeError(
+            f"market.db 里没有 {lottery}（{code}）的有效开奖行 ⇒ 需生产抓取，"
+            "只读采集不触发写库，本轮不产生该彩种证据")
+
+    def nums(raw):
+        return [int(x) for x in re.findall(r"\d+", str(raw or ""))]
+
+    front, back = nums(row["front"]), nums(row["back"])
+    expect = {"七乐彩": (7, 1), "快乐8": (20, 0)}[lottery]
+    if len(front) != expect[0] or len(back) != expect[1]:
+        raise RuntimeError(
+            f"{lottery} 期 {row['issue']} 号码数不符：主 {len(front)}/{expect[0]}、"
+            f"副 {len(back)}/{expect[1]} ⇒ 拒绝写证据")
+    return {"期号": str(row["issue"]), "开奖日期": str(row["draw_date"] or ""),
+            "原始行": [str(row["issue"]), str(row["draw_date"] or "")]
+                      + [str(x) for x in front + back],
+            "来源": f"market.db:draw(lottery={code})",
+            "观测时刻": str(row["fetched_at"] or ""),
+            "探测方式": "market.db 已入库记录（fetched_at 为抓取入库时刻，非首次可见时刻）"}
+
+
 def _fetch_digital(lottery: str) -> dict:
     """数字型彩种（七星彩 / 排列5 / 福彩3D / 排列3）的**只读**抓取。
 
@@ -76,10 +124,7 @@ def _fetch_latest(lottery: str) -> dict:
     from data import fetcher as F
 
     if lottery in F.MARKET_SOURCE:
-        raise RuntimeError(
-            f"{lottery} 的数据来自 market 层（{F.MARKET_SOURCE[lottery]}），"
-            "其更新路径会写 market.db（生产副作用）⇒ 只读采集不实现，"
-            "本轮不产生该彩种证据")
+        return _fetch_market(lottery)
     if lottery not in F.CSV_FILES:
         raise RuntimeError(f"{lottery} 不在 500.com 彩种表内，无法只读采集")
     if lottery in getattr(F, "DIGITAL_LOTTERIES", ()):
@@ -165,9 +210,11 @@ def main(argv=None) -> int:
             "开奖日期": got["开奖日期"],
             "来源": got["来源"],
             "抓取时间": now,
-            # ★ 抓到的这一刻就是「结果首次可被观测」的时刻（本次运行首次看到该期）
-            "首次可观测时刻": now,
+            # ★ 网络抓取：抓到的这一刻就是「本次首次看到该期」；
+            #   market 通道：用库里的 fetched_at（更早、更保守）。
+            "首次可观测时刻": got.get("观测时刻") or now,
             "开奖号码": {"原始CSV行": got["原始行"]},
+            "探测方式": got.get("探测方式") or "网络抓取（本次运行首次看到该期）",
             "备注": "开奖号码原样保存抓取行，未做字段解释；字段含义按当期 CSV 表头解读。"
                     "首次可观测时刻 ≠ 摇奖时刻，只是开奖事件的上界。",
         }

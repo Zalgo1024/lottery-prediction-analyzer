@@ -371,17 +371,41 @@ def test_audit_and_gate_share_one_reason_source(tmp_path, monkeypatch):
     assert PS.gate_snapshot(_snap(), draw_time=DRAW_TIME)["合格"] is False
 
 
-def test_real_freeze_pool_all_replay_and_zero_eligible():
-    """★ 现场事实：现有冻结快照池全部是回放模拟，合格 0（缺席≠通过）。
+def test_real_freeze_pool_replay_is_never_eligible():
+    """★ 现场事实（2026-11-06 接线后更新）：快照池**已开始混入生产冻结快照**。
+
+    原断言是 `合格数 == 0` —— 那是「接线前 414 份全为回放模拟」的事实描述。
+    接线后生产链路真的写出了快照（2026-11-06 09:01 七星彩 / 大乐透各 1 份），
+    该断言失效。改成**更本质的护栏**，而不是「放宽到不报错」：
+
+      · 回放模拟快照**永远不得被判合格**（这才是防前视的那道门）；
+      · 标了生产性质的快照必须全部通过性质 / 批次时间校验；
+      · 回放快照必须仍在样本里 —— 否则这条护栏不再关于回放，属于
+        「样本没了」而不是「通过」（缺席≠通过）。
+      · 分母口径不变：合格数 + 不合格数 == 文件总数。
 
     显式传真实目录：conftest 已把模块级 FREEZE_DIR 重定向到 tmp（隔离生效），
     测试不许依赖被隔离的默认值去读真身。
     """
     a = PS.audit_freeze_dir(ROOT / "logs" / "order_freeze")
     assert a["文件总数"] > 0
-    assert a["合格数"] == 0
-    assert a["不合格数"] == a["文件总数"]
-    assert set(a["时间点性质分布"]) == {PS.REPLAY_NATURE}
+    rows = a["逐份"]
+    replay = [r for r in rows if r["时间点性质"] != PS.PRODUCTION_NATURE]
+    prod = [r for r in rows if r["时间点性质"] == PS.PRODUCTION_NATURE]
+    assert replay, "样本里已没有回放快照 ⇒ 本条护栏不再关于回放，需重新设计"
+    bad = [r["文件"] for r in replay if r["合格"]]
+    assert not bad, f"回放模拟快照被判成合格 ⇒ 前视口子被打开：{bad[:3]}"
+    bad_prod = [(r["文件"], r["原因"]) for r in prod if not r["合格"]]
+    assert not bad_prod, f"生产快照未通过性质/批次时间校验：{bad_prod[:3]}"
+    assert a["合格数"] + a["不合格数"] == a["文件总数"]
+    # 合格数必须**恰好**等于「标了生产性质且通过校验」的份数：
+    # 多一份都说明有别的东西被判合格了（例如回放被漏放行）。
+    assert a["合格数"] == len(prod), "合格数必须恰好等于生产性质快照数"
+    # 只允许两种已知性质；出现第三种说明有人新造了标签而没同步闸门白名单
+    # （那等于给「开奖后补写」留了一个自命名后门）。
+    unknown = set(a["时间点性质分布"]) - {PS.REPLAY_NATURE, PS.PRODUCTION_NATURE}
+    assert not unknown, f"出现未知的时间点性质：{unknown}"
+    assert PS.REPLAY_NATURE in a["时间点性质分布"], "回放标签必须仍出现在分布里"
 
 
 # ---------------------------------------------------------------- ⑥ 报告与接线
