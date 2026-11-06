@@ -2,7 +2,7 @@
 
 > **把「看起来有效」和「真的有效」分开。** 一套可复现的检验框架，用 8 个彩种、数万期公开开奖数据当压力测试场。
 
-![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB) ![Tests](https://img.shields.io/badge/pytest-2911%20passed-3B6D11) ![Lotteries](https://img.shields.io/badge/%E5%BD%A9%E7%A7%8D-8-854F0B) ![License](https://img.shields.io/badge/License-AGPL--3.0-blue)
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB) ![Tests](https://img.shields.io/badge/pytest-2922%20passed-3B6D11) ![Lotteries](https://img.shields.io/badge/%E5%BD%A9%E7%A7%8D-8-854F0B) ![License](https://img.shields.io/badge/License-AGPL--3.0-blue)
 
 ## 0. 30 秒读懂
 
@@ -110,7 +110,7 @@ python run.py                # 看门狗模式，访问 http://127.0.0.1:5000
 # 3. 或者只用 CLI
 python cli.py --help
 
-# 4. 跑测试套件（全量 2911 例）
+# 4. 跑测试套件（全量 2922 例）
 pytest -q                    # 约 15–20 分钟（慢点集中在真实 predict 全流程的契约测试）
 ```
 
@@ -200,6 +200,7 @@ python scripts/audit_records.py              # 命中记录审计（清单由注
 这些模块让检验有可核验的输入与账本，**本身不是结论**。
 
 **出号数量**（`data/ticket_size.py` + `config/ticket_size.json`）：固定 / 动态两模式，滑轨值即最终出号注数。生效值在 `dynamic`/`fixed`，`limits` 是可拖上限，`HARD_CAP` 是绝对天花板；文件缺失会触发 `sanitize()` 兜底把模式改成 fixed ⇒ 用 `health()` 判安全，不安全就停发。当前 6 个彩种上限 10000 注、福彩3D / 排列3 各 1000 注（直选空间只有 1000）。**具体数值以配置文件为准，不在文档里复述成固定值。**
+**重新出号**（单彩种按钮 / 统一按钮）会把卡片上用户此刻看到的值先落盘、再走 `resolve_groups`：此前请求只带彩种名，拖完滑块没点「保存」就直接重出会按磁盘旧值出号，成功后界面重绘又弹回旧值。落盘只写当前模式那一个字段、值相同不写盘，`groups` 仍为 `None`（注数真源与预算闸门不变），确认框会明说本次按多少注出号并保存。引擎层的单次封顶与 `HARD_CAP` 对齐，不再出现「界面能设 1w、引擎悄悄只出 2000」的第二道更小封顶。
 
 **预算闸门**（`ev/budget_gate.py` + `config/budget_aggregate.json`）：`月度总额` 与 `单期上限` 由 `load_limit()` 热读，改配置无需重启。额度是**系统出号的假设成本上限，不是用户真实投入**（用户实际通常只取清单前几注，主口径假设 n=3）；`单期上限` 的语义是**单彩种 · 单批**，没有跨彩种或跨批聚合，跨彩种合计由月度总额约束。记账幂等键含重出批号；真出号路径用原子预占（带 TTL）杜绝并发超支；额度用尽 ⇒ 注数夹 0 ⇒ 界面直接写「本期会停发」。口径与调整留痕见 `logs/budget_period_cap_audit.md`、`logs/budget_adjust_window.md`。
 
@@ -233,8 +234,8 @@ python scripts/collect_evidence_window.py --status  # 证据采集状态
 ## 11. 测试、维护与备份
 
 ```bash
-pytest -q              # 2911 passed（全量；含奖金表、写保护与分区归一化、批次契约、出号数量、消息推送、休市日历、机制缝隙四轨、影子接线与证据时间方向、预算并发预占、采集频率、文档维护护栏等）
-pytest tests/          # 2902 passed（仅 tests/ 目录；另有 9 例在 scripts/ 下，故用 pytest -q 跑全量）
+pytest -q              # 2922 passed（全量；含奖金表、写保护与分区归一化、批次契约、出号数量、消息推送、休市日历、机制缝隙四轨、影子接线与证据时间方向、预算并发预占、采集频率、文档维护护栏等）
+pytest tests/          # 2913 passed（仅 tests/ 目录；另有 9 例在 scripts/ 下，故用 pytest -q 跑全量）
 ```
 
 本机跑全量需 `PYTEST_DEBUG_TEMPROOT=E:/707_backup_p5_2200/pytest_tmp PYTHONUTF8=1`；`pytest.ini` 用 `--strict-markers` 注册 `realdata` / `statsmodels` / `winfont` 等标记，避免选错测试集却不报错。

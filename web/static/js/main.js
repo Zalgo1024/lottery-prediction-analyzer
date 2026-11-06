@@ -1138,6 +1138,20 @@ function tsCollectValues() {
     return out;
 }
 
+// 取**卡片上用户此刻看到的值**（不是 _tsState —— 那是上一次 GET 的快照）。
+// ★ 2026-11-07：重出按钮与滑块在同一张卡片上，用户拖完直接点重出时，
+//   后端若只读磁盘就会按旧值出号、随后重绘把界面打回旧值。读不到就返回 null，
+//   宁可让后端按配置生效值走，也不猜一个数。按属性比对，不用中文拼选择器。
+function _tsCardValue(lottery) {
+    let el = null;
+    document.querySelectorAll('#ts-rows input[data-role="num"][data-lottery]').forEach(x => {
+        if (x.getAttribute('data-lottery') === lottery) el = x;
+    });
+    if (!el) return null;
+    const v = parseInt(el.value, 10);
+    return isNaN(v) ? null : v;
+}
+
 // ===== 重新出号 =====
 // 用户需求（2026-11-02）：点了之后重新出一批号，旧号不删除、随时可查；
 // 新号在展示/推送/命中历史里优先，但旧号若中奖也要照常入账。
@@ -1154,8 +1168,13 @@ function tsCollectValues() {
 // 单个彩种的重出核心：不弹窗、不刷新页面，只返回结构化结果。
 // onProgress(text) 由调用方决定怎么显示（卡片按钮写 ts-msg，批量按钮带序号）。
 async function _tsRegenerateOne(lottery, onProgress) {
+    // ★ 把卡片当前值一起提交：后端先落盘再按「出号数量」出号，
+    //   这样「拖到 10000 → 直接点重出」不会再被旧配置打回 1000。
+    const cardN = _tsCardValue(lottery);
+    const body = { lottery };
+    if (cardN != null) body['出号数量'] = cardN;
     const meta = await api('/api/predict/regenerate', {
-        method: 'POST', body: JSON.stringify({ lottery })
+        method: 'POST', body: JSON.stringify(body)
     });
     if (meta && meta.ok === false) return { ok: false, reason: meta.error || '后端拒绝' };
     const rn = meta['重出批号'];
@@ -1183,11 +1202,14 @@ async function _tsRegenerateOne(lottery, onProgress) {
 }
 
 async function tsRegenerate(lottery) {
+    const cardN = _tsCardValue(lottery);
+    const nTxt = cardN != null ? (cardN + ' 注') : '当前生效值';
     const ok = confirm(
         '为「' + lottery + '」重新出一批号？\n\n' +
+        '· 本次按出号数量卡片上的 ' + nTxt + ' 出号，并把它保存为当前生效值\n' +
         '· 旧号码不会删除，开奖后仍照常结算（中了也会记进命中历史）\n' +
         '· 当前展示 / 推送 / 组数核对优先使用新号\n' +
-        '· 注数用「出号数量」的当前生效值');
+        '· 预算闸门照常生效（额度不足时实际注数可能被夹小或停发）');
     if (!ok) return;
 
     const btn = document.querySelector('[data-regenerate="' + lottery + '"]');
@@ -1241,14 +1263,16 @@ async function tsRegenerateAll() {
     const lots = _tsRegenTargets();
     if (!lots.length) { alert('没有可重新出号的彩种卡片，请刷新页面后重试。'); return; }
 
-    // 注数明细取接口读数，不从 DOM 猜；缺读数显式写「?」，绝不悄悄当 0。
+    // ★ 明细取卡片上用户此刻看到的值（不是上一次 GET 的快照）：这些值会随
+    //   每个彩种的重出请求一起落盘，用旧快照会把刚改过的注数报成旧值。
+    //   缺读数显式写「?」，绝不悄悄当 0。
     const byLot = {};
-    ((_tsState && _tsState.lotteries) || []).forEach(it => { byLot[it.lottery] = it['当前生效']; });
+    lots.forEach(l => { byLot[l] = _tsCardValue(l); });
     const detail = lots.map(l => l + ' ' + (byLot[l] != null ? byLot[l] : '?') + ' 注').join('、');
     const total = lots.reduce((s, l) => s + (Number(byLot[l]) || 0), 0);
     const ok = confirm(
         '为页面上全部 ' + lots.length + ' 个彩种各重新出一批号？\n\n' +
-        '· 注数取「出号数量」当前生效值：' + detail + '\n' +
+        '· 注数取「出号数量」卡片值并保存为当前生效值：' + detail + '\n' +
         '· 合计约 ' + total + ' 注，预算台账按批各记一笔\n' +
         '· 旧号码不删除，开奖后新旧两批都照常结算\n' +
         '· 逐个串行执行，某个彩种失败不中断其余彩种\n' +

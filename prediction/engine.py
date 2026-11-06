@@ -377,13 +377,18 @@ def _pad_to_groups(predicted_sets, groups, schema, *, lottery_name: str,
         rand += 1
 
     if from_pool or rand:
+        # ★ 2026-11-07：原文案「出号未达目标」在**补齐成功**时也照打，
+        #   用户把注数调到 10000 后日志里必然出现一句假的「未达目标 10000 组」。
+        #   补齐本身要如实披露（随机补齐不是策略优选），但「没达标」只许在真的
+        #   没达标时说 —— 否则告警会被读成「1w 注没出出来」。
         logger.warning(
-            f"{lottery_name}: 出号未达目标 {groups} 组（策略池/剪枝饱和），已补齐 "
-            f"{from_pool + rand} 组（回填剪枝票 {from_pool} + 均匀随机 {rand}）"
+            f"{lottery_name}: 策略池/剪枝饱和，本次补齐 {from_pool + rand} 组"
+            f"（回填剪枝票 {from_pool} + 均匀随机 {rand}）；"
+            f"最终 {len(out)}/{groups} 组"
         )
     if len(out) < groups:
         logger.error(
-            f"{lottery_name}: 号码空间不足，仅能产出 {len(out)}/{groups} 组"
+            f"{lottery_name}: 出号未达目标 {groups} 组，仅能产出 {len(out)} 组"
             f"（该彩种可用组合少于请求注数，请下调 groups）"
         )
     return out, {"回填剪枝票": from_pool, "随机补齐": rand, "截断": 0}
@@ -1673,6 +1678,11 @@ def predict(
     if groups is None:
         groups = PREDICT_DEFAULTS["groups"]
     if groups > PREDICT_DEFAULTS["max_groups"]:
+        # ★ 截断必须留痕：静默夹小正是「界面 10000 注、实际 2000 注」这类失真的温床。
+        logger.warning(
+            f"{lottery_name}: 请求 {groups} 注超过单次上限 "
+            f"{PREDICT_DEFAULTS['max_groups']} 注，已夹到该上限；"
+            f"注数真源仍是出号数量配置与预算闸门")
         groups = PREDICT_DEFAULTS["max_groups"]
 
     # ★ 2026-10-30（任务 2）：0 注 = 预算闸门的**停发**态，必须在这里就返回，
