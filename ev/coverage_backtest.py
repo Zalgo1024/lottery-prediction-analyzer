@@ -4,7 +4,7 @@
 目标（用户给定）：在固定每期注数 K 下，检验「覆盖分散选号」是否比「同池随机 /
 同池按分取 top-K」更常做到「每期至少一注达到指定奖级」。
 
-诚实边界（与项目一致，写死在注释与报告里）：
+诚实边界（与项目一致，明确落在注释与报告里）：
   - 各号码组合等可能 ⇒ 换选号**不提高**单注中奖概率 / 平均中奖次数；
   - 固定 K 下减少票间重叠**可能**提高「至少中一注」概率，但**同时改变**多注同中
     的可能性；是否有实际改善，**必须按彩种 + 奖金门槛回测**，不可假定；
@@ -112,8 +112,10 @@ def grade_ticket(lottery: str, ticket: Dict[str, Any], actual_rec: Any,
     grading = rule_issue if rule_issue is not None else issue
 
     if lottery in ("双色球", "大乐透"):
-        ph = set(ticket.get("红球", []))
-        bh = set(ticket.get("蓝球", []))
+        # 生产冻结快照把号码放在「号码」分区里，候选池另给顶层 红球/蓝球；两种都收。
+        nums = ticket.get("号码") if isinstance(ticket.get("号码"), dict) else {}
+        ph = set(ticket.get("红球") or nums.get("红球") or [])
+        bh = set(ticket.get("蓝球") or nums.get("蓝球") or [])
         ah = set((actual_rec.zone_numbers or {}).get("红球", []))
         ab = set((actual_rec.zone_numbers or {}).get("蓝球", []))
         rh = len(ph & ah)
@@ -128,6 +130,8 @@ def grade_ticket(lottery: str, ticket: Dict[str, Any], actual_rec: Any,
 
     if lottery == "七星彩":
         pred = ticket.get("号码") or []
+        if isinstance(pred, dict):          # 生产票面 {第N位:[d]} → 按位序拍平
+            pred = _flatten_zones(pred)
         actual = _flatten_zones(actual_rec.zone_numbers or {})
         zh = {}
         for i in range(min(7, len(pred), len(actual))):
@@ -139,17 +143,23 @@ def grade_ticket(lottery: str, ticket: Dict[str, Any], actual_rec: Any,
         return _settle_by_rules("七星彩", issue, g, cache, rule_issue=rule_issue,
                                 fallback=lambda: float(QXC_FLOATING_NOMINAL.get(tier, 0.0)))
 
-    # 数字型（排列5/3D/排列3）：走官方规则 _settle_pl（直选/组选/未中）。
+    # 数字型 / 七乐彩 / 快乐8：走官方规则 _settle_pl。
+    # 生产冻结快照给的是分区 dict（数字型 {第N位:[d]}、七乐彩/快乐8 {基本号:[...]}），
+    # 覆盖回测候选池给的是扁平数字列表；两者都交给 _settle_pl 认得的分区口径。
     pred = ticket.get("号码") or []
+    pred_zones = pred if isinstance(pred, dict) else _nums_to_zones(pred, lottery)
     fb = {
-        "预测号码": _nums_to_zones(pred, lottery),
+        "预测号码": pred_zones,
         "实际号码": actual_rec.zone_numbers or {},
         "期号": issue,
     }
     pl, _mode, level = _settle_pl(lottery, fb)
+    # 口径按 _settle_pl 实际走的那条路标注，不笼统写「规则表」：
+    # 七乐彩/快乐8 走名义EV、数字型未中也是名义EV，混写会让结算口径失真。
+    note = _mode or "规则表"
     if level is None:
-        return ("未中", 0.0, "规则表")
-    return (level, float(pl + 2.0), "规则表")   # _settle_pl 返回 模拟盈亏 = 实得 − 2
+        return ("未中", 0.0, note)
+    return (level, float(pl + 2.0), note)   # _settle_pl 返回 模拟盈亏 = 实得 − 2
 
 
 def _settle_by_rules(lottery: str, issue: Any, grade: str,

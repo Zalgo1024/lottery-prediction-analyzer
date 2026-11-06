@@ -7,6 +7,8 @@ test_gap_select / test_robust_tiers。
 """
 from types import SimpleNamespace
 
+import pytest
+
 from ev import coverage_backtest as cb
 
 
@@ -84,3 +86,59 @@ def test_compare_returns_three_arms():
         for m in ("coverage", "random", "top_score"):
             assert f"{m}_≥5元" in row
             assert f"{m}_净收益" in row
+
+
+# ---------------------------------------------------------------- 生产票面格式契约
+def _digit_zones(digits):
+    """生产出号快照的数字型票面：{第N位: [d]}。"""
+    return {f"第{i + 1}位": [d] for i, d in enumerate(digits)}
+
+
+# 2026-11-06 真实结算整批失败后的回归钉：生产冻结快照的「号码」是分区 dict，
+# 而判级层原先只认扁平数字列表 ⇒ 七星彩 KeyError: 0、数字型/七乐彩/快乐8
+# int('第1位') / int('基本号')。这里锁「8 类彩种的生产票面都能走完判级」。
+# ★ 只锁格式契约与指标完整性：合成开奖下算出的名义金额不是真实读数，不进断言。
+_PRODUCTION_TICKETS = [
+    ("双色球", {"号码": {"红球": [1, 2, 3, 4, 5, 6], "蓝球": [16]}},
+     {"红球": [1, 2, 3, 4, 5, 6], "蓝球": [16]}),
+    ("大乐透", {"号码": {"红球": [1, 2, 3, 4, 5], "蓝球": [1, 2]}},
+     {"红球": [1, 2, 3, 4, 5], "蓝球": [1, 2]}),
+    ("七星彩", {"号码": _digit_zones([7, 0, 0, 2, 7, 5, 0])},
+     _digit_zones([7, 0, 0, 2, 7, 5, 0])),
+    ("排列5", {"号码": _digit_zones([3, 2, 0, 5, 1])},
+     _digit_zones([3, 2, 0, 5, 1])),
+    ("排列3", {"号码": _digit_zones([3, 2, 0])}, _digit_zones([3, 2, 0])),
+    ("福彩3D", {"号码": _digit_zones([3, 2, 0])}, _digit_zones([3, 2, 0])),
+    ("七乐彩", {"号码": {"基本号": [1, 2, 3, 4, 5, 6, 7], "特别号": []}},
+     {"基本号": [1, 2, 3, 4, 5, 6, 7], "特别号": [8]}),
+    ("快乐8", {"号码": {"基本号": list(range(1, 11))}},
+     {"基本号": list(range(1, 21))}),
+]
+
+
+@pytest.mark.parametrize("lottery,ticket,zones", _PRODUCTION_TICKETS)
+def test_production_zone_tickets_are_gradable(lottery, ticket, zones):
+    """分区 dict 票面不许再让判级层抛异常；四类指标与结算口径必须齐全。"""
+    rec = SimpleNamespace(zone_numbers=zones)
+    out = cb.evaluate_period(lottery, [ticket], rec, "26127", {})
+    assert {"命中注数", "总实得", "≥5元", "≥10元", "结算口径"} <= set(out)
+    assert isinstance(out["总实得"], float)
+    assert out["结算口径"], "结算口径必须显式，缺席不能当成通过"
+
+
+def test_flat_digit_ticket_still_gradable():
+    """覆盖回测候选池给的是扁平数字列表，扩展输入契约后仍必须可用。"""
+    rec = SimpleNamespace(zone_numbers=_digit_zones([3, 2, 0, 5, 1]))
+    out = cb.evaluate_period("排列5", [{"号码": [3, 2, 0, 5, 1]}], rec, "26127", {})
+    assert out["命中注数"] == 1          # 直选五位全对，规则层给的确定性读数
+
+
+def test_note_follows_actual_settlement_path():
+    """口径标注跟着 _settle_pl 实走的路，不许把七乐彩的名义EV笼统记成规则表。"""
+    rec = SimpleNamespace(zone_numbers={"基本号": [1, 2, 3, 4, 5, 6, 7],
+                                        "特别号": [8]})
+    out = cb.evaluate_period(
+        "七乐彩",
+        [{"号码": {"基本号": [1, 2, 3, 4, 5, 6, 7], "特别号": []}}],
+        rec, "26127", {})
+    assert "规则表" not in out["结算口径"]

@@ -400,7 +400,8 @@ def shadow_status(*, verdict: Optional[Dict[str, Any]] = None,
         "独立评估批": {"登记期数": len(eval_reg), "结算期数": counted},
         "门槛": gate,
         "还需期数": (max(0, need - counted) if need is not None else None),
-        "接线状态": ("历史回放；未接生产出号冻结、未接未来开奖追加；"
+        "接线状态": ("本函数只读台账与冻结快照，不判断生产链路是否接线"
+                     "（接线状态由编排层与运行日志负责披露）；"
                      "生产生效注数会漂移，前缀读数须按届时的生产票序冻结数据重跑，"
                      "本离线模块不读取也不固定任何生产注数"),
         "说明": [NOT_OPEN_NOTE, STOP_RULE_NOTE, NO_VERDICT_NOTE,

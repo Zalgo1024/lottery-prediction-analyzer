@@ -2,7 +2,7 @@
 
 > **把「看起来有效」和「真的有效」分开。** 一套可复现的检验框架，用 8 个彩种、数万期公开开奖数据当压力测试场。
 
-![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB) ![Tests](https://img.shields.io/badge/pytest-2890%20passed-3B6D11) ![Lotteries](https://img.shields.io/badge/%E5%BD%A9%E7%A7%8D-8-854F0B) ![License](https://img.shields.io/badge/License-AGPL--3.0-blue)
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB) ![Tests](https://img.shields.io/badge/pytest-2900%20passed-3B6D11) ![Lotteries](https://img.shields.io/badge/%E5%BD%A9%E7%A7%8D-8-854F0B) ![License](https://img.shields.io/badge/License-AGPL--3.0-blue)
 
 ## 0. 30 秒读懂
 
@@ -94,6 +94,8 @@
 └── logs/                            # 专题报告与运行日志
 ```
 
+> 仓库只保留代码与判据类配置；`logs/` 下的运行日志、专题报告，以及 `config/` 下带运行时状态的文件都**不随仓库分发**（`logs/` 仅保留 `logs/logger.py`）。下文提到的 `logs/*.md` 都是本机运行产物，克隆后按对应脚本重算即可，不是仓库里可直接打开的文档。
+
 ## 5. 快速开始
 
 ```bash
@@ -108,7 +110,7 @@ python run.py                # 看门狗模式，访问 http://127.0.0.1:5000
 # 3. 或者只用 CLI
 python cli.py --help
 
-# 4. 跑测试套件（全量 2890 例）
+# 4. 跑测试套件（全量 2900 例）
 pytest -q                    # 约 15–20 分钟（慢点集中在真实 predict 全流程的契约测试）
 ```
 
@@ -176,17 +178,20 @@ python scripts/audit_records.py              # 命中记录审计（清单由注
 
 `tests/_import_guard.py` 用两档白名单锁住边界：研究模块只准出现在编排层，编排层只准被那两处生产入口调用；连注释里出现模块名也会被拦。`conftest._TARGETS` 同步隔离落盘路径，测试不会写进真身台账。
 
-**现场状态**（`python scripts/prefix_shadow_report.py` 可重算，报告在 `logs/prefix_shadow_status_report.md`）：
+**机制闭环已跑到结算**：2026-11-06 完成第一次真实开奖结算。此前自动流水线的结算整批失败——生产冻结快照的票面是分区 dict（`第N位` / `基本号`），而判级层 `grade_ticket()` 只认扁平数字列表，于是七星彩抛 `KeyError: 0`、数字型与七乐彩/快乐8 抛 `int('第1位')` / `int('基本号')`。修复方式是扩展判级层可接受的输入格式（不改判级语义），补 8 类彩种生产票面的回归测试，并让「结算口径」跟随 `_settle_pl` 实际走的那条路标注，不再笼统记成规则表。
 
-| 项 | 读数 |
+**现场状态**（唯一真源：`python scripts/prefix_shadow_report.py` → `logs/prefix_shadow_status_report.md`）：
+
+| 项 | 怎么读 |
 |---|---|
-| 冻结快照总数（分母） | 416 份，全部留在分母内 |
-| 具备登记资格的生产快照 | 2 份（七星彩 26127 / 大乐透 26127，各 551 注） |
-| 不合格 | 414 份（离线三臂回放，逐份写原因） |
-| 台账 | 登记 2 期 / 结算 0 期 / 独立评估批 0 期 |
-| 当前判决 | **未开判**，门槛 17,141 期；探索批只作描述，不能充当确认批 |
+| 快照分母 | 目录内文件总数；回放 / 不合格全部留在分母内并逐份写原因，不许筛掉后报数 |
+| 登记 / 结算 | 台账按「阶段」分别计数，两条记录各自只追加、不回改；结算必须引用已登记的票序哈希 |
+| 批次性质 | 默认探索批；`评估批起始 = 2026-12-01` 起才算独立评估批，缺规则文件绝不默认评估批 |
+| 当前判决 | **未开判**，门槛 17,141 期（真源 `prefix_curve.verdict_curve()` 的 n\*_保守）；探索批只作描述，不能充当确认批 |
 
-> **登记 2 期不是通过，0 期也不是通过。** 现在不做 BH、不写「检出」、不接生产选号。缺口在证据侧（未来真实开奖 + 独立评估批），不在统计侧。历史回放一律不具登记资格，不许拿它冒充开奖前的确认力。
+> 上表给的是**口径**，不是快照数字：服务每轮出号都会追加快照与登记，具体期数持续变化，请以重算报告为准。带时间戳的一次重算（2026-11-06 23:11）为 438 份快照 / 24 期登记 / 8 期结算 / 独立评估批 0 期，全部为探索批。
+>
+> **登记不等于通过，0 期也不等于通过。** 现在不做 BH、不写「检出」、不接生产选号。缺口在证据侧（未来真实开奖 + 独立评估批），不在统计侧。历史回放一律不具登记资格，不许拿它冒充开奖前的确认力。
 
 ## 9. 配套链路：出号、预算、推送
 
@@ -226,8 +231,8 @@ python scripts/collect_evidence_window.py --status  # 证据采集状态
 ## 11. 测试、维护与备份
 
 ```bash
-pytest -q              # 2890 passed（全量；含奖金表、写保护与分区归一化、批次契约、出号数量、消息推送、休市日历、机制缝隙四轨、影子接线与证据时间方向、预算并发预占、采集频率、文档维护护栏等）
-pytest tests/          # 2881 passed（仅 tests/ 目录；另有 9 例在 scripts/ 下，故用 pytest -q 跑全量）
+pytest -q              # 2900 passed（全量；含奖金表、写保护与分区归一化、批次契约、出号数量、消息推送、休市日历、机制缝隙四轨、影子接线与证据时间方向、预算并发预占、采集频率、文档维护护栏等）
+pytest tests/          # 2891 passed（仅 tests/ 目录；另有 9 例在 scripts/ 下，故用 pytest -q 跑全量）
 ```
 
 本机跑全量需 `PYTEST_DEBUG_TEMPROOT=E:/707_backup_p5_2200/pytest_tmp PYTHONUTF8=1`；`pytest.ini` 用 `--strict-markers` 注册 `realdata` / `statsmodels` / `winfont` 等标记，避免选错测试集却不报错。
@@ -247,7 +252,9 @@ python scripts/prune_logs.py            # 预览可清理旧日志（加 --apply
 
 ## 12. 深入阅读
 
-同一仓库里保留了按专题写的过程与判据文档：`logs/prefix_shadow_wiring.md`（接线）、`logs/prefix_shadow_b_plan.md`（方案 B 与采集频率）、`logs/prefix_shadow_status_report.md`（当前状态）、`logs/budget_period_cap_audit.md`（单期上限语义）、`logs/budget_adjust_window.md`、`logs/prefix_real_all_s5_report.md`（真实票序前缀读数）、`logs/prefix_curve_formal_ssq_K100_p360_s5_report.md`（离线判决）。
+本机 `logs/` 下按专题留有过程与判据文档（**不随仓库分发**，见 §4 说明）：`logs/prefix_shadow_wiring.md`（接线）、`logs/prefix_shadow_b_plan.md`（方案 B 与采集频率）、`logs/prefix_shadow_status_report.md`（当前状态）、`logs/budget_period_cap_audit.md`（单期上限语义）、`logs/budget_adjust_window.md`、`logs/prefix_real_all_s5_report.md`（真实票序前缀读数）、`logs/prefix_curve_formal_ssq_K100_p360_s5_report.md`（离线判决）。
+
+克隆仓库后可用脚本重算其中可再生的部分，例如 `python scripts/prefix_shadow_report.py` 会生成 `logs/prefix_shadow_status.json` 与 `logs/prefix_shadow_status_report.md`；历史过程记录不在版本控制内，需从本机备份取回。
 
 ## 许可证
 
