@@ -17,6 +17,7 @@
 - GET /api/audit/gap/<lottery>            ⑧ 机制缝隙测量状态卡（四轨裁决）
 - GET /api/audit/gap_global               ⑧ 六彩种缝隙测量汇总
 - GET /api/audit/robustness               ⑨ 策略鲁棒性（压力检验：优势在失真下是否存活）
+- GET /api/audit/overlap/<lottery>        ⑩ 臂间选号重合（两臂同池同注数，与零假设比）
 - GET /api/audit/glossary                 本页术语与卡片口径（文案单一真源）
 
 定位：只呈现已测量的结果与它们的适用边界，不输出任何"中奖承诺"。
@@ -296,6 +297,26 @@ def api_robustness():
     from web.health_digest import strategy_robustness
 
     return jsonify(strategy_robustness())
+
+
+@bp.route("/api/audit/overlap/<lottery>")
+@api_error_handler
+@validate_lottery
+def api_overlap(lottery):
+    """⑩ 臂间选号重合 + 零假设（**只读**，不参与判决）。
+
+    两臂（`existing_coverage` / `tier_coverage`）在同一候选池、同注数、同种子下各挑 k 注，
+    比较它们的重合张数，并与「两臂各自独立均匀抽取」的期望 k₁k₂/N 比。
+
+    ★ k 默认 200 而**不是**生产注数：`tier_coverage` 是贪心，1w 注在页面请求里等不起。
+      返回值里带 k / 池大小 / 种子 / 基准期，保证这次读数可复核。
+    ★ 两臂任一方产不出足量不重复票时返回 `适用=False` + 原因（数字型常见），
+      前端按「不适用」渲染，**不补 0、不算 z**。
+    """
+    from ev.overlap import arm_overlap
+
+    k = request.args.get("k", default=200, type=int) or 200
+    return jsonify(arm_overlap(lottery, k=max(20, min(int(k), 1000))))
 
 
 @bp.route("/api/audit/glossary")

@@ -248,6 +248,20 @@ def _expected_latest_date(lottery_name: str, now: Optional[datetime] = None) -> 
     return expected_latest_draw_date(lottery_name, now)
 
 
+def _freshness_state(exists: bool, error, lag) -> str:
+    """数据新鲜度三态（纯函数，便于测试）。
+
+    ★ `未知` 与 `实时` 必须分开：文件缺失/解析失败时，`lag` 会缺省成 0，
+      直接判「实时」等于把「读不到」画成「刚更新过」。
+    """
+    if not exists or error:
+        return "未知"
+    try:
+        return "缓存" if int(lag or 0) > 0 else "实时"
+    except (TypeError, ValueError):
+        return "未知"
+
+
 def get_data_status(lottery_name: str, now: Optional[datetime] = None) -> dict:
     """
     检查指定彩票的数据状态：
@@ -306,6 +320,15 @@ def get_data_status(lottery_name: str, now: Optional[datetime] = None) -> dict:
     if cleaned_path and cleaned_path.exists():
         result["cleaned_exists"] = True
 
+    # ---- 数据来源与新鲜度三态（2026-11-07）----
+    # ★ 为什么必须显式区分：本接口读的是**本地文件**，不是实时接口。若界面上只有
+    #   「数据滞后 0 天」，读者会把它读成「刚刚从官网取过」。三态分别是：
+    #     实时  = 开奖日后确实已更新到最新一期（滞后 0）
+    #     缓存  = 读的是本地文件、但最新期已落后于日历（滞后 > 0）
+    #     未知  = 文件缺失/解析失败（**不写成 0**）
+    result["来源"] = "本地文件（非实时接口）"
+    result["新鲜度"] = _freshness_state(result["csv_exists"], result.get("error"),
+                                        result.get("data_lag_days"))
     return result
 
 

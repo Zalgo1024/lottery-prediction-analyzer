@@ -1,17 +1,30 @@
 """路由：出号数量配置（固定 / 动态滑轨）
 
 用户可在看板「出号数量」卡里自由调整每次出号注数：
+  - GET  /gen                               → 独立「出号设置」页（静态页，见下）
   - GET  /api/settings/ticket-size          → 各彩种当前值/上限/默认 + 动态建议
   - POST /api/settings/ticket-size          → 保存 mode / fixed / dynamic
   - POST /api/settings/ticket-size/apply    → 动态模式：立刻按策略算一次并应用
   - GET  /api/settings/ticket-size/reason   → 最近一次动态调整理由
 """
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, render_template, request
 
 from web.utils import api_error_handler
 
 bp = Blueprint("settings", __name__)
+
+
+@bp.route("/gen")
+def gen_page():
+    """出号设置页（独立页，带侧栏/顶栏）。
+
+    ★ 内容仍是纯前端 + 只调既有接口（`web/templates/gen.html` + `web/static/js/gen.js`），
+      这里只负责把它挂进应用外壳与导航（`web/nav.py` 的 `/gen`）。
+    ★ 前端逻辑改 `static/js/gen.js` 不需要重启（`SEND_FILE_MAX_AGE_DEFAULT=0`）；
+      只有改本文件/模板结构才需要。
+    """
+    return render_template("gen.html")
 
 
 def _budget_snapshot():

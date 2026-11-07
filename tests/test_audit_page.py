@@ -32,7 +32,8 @@ WEB = ROOT / "web"
 CARD_IDS = (
     "hn-quality", "hn-ev", "hn-pl", "hn-distance",
     "hn-payout", "hn-trials", "hn-attribution", "hn-gap",
-    "hn-robustness",                       # ⑨ 策略鲁棒性（11-04 新增）
+    "hn-robustness",                    # ⑨ 策略鲁棒性（11-04 新增）
+    "hn-overlap",                       # ⑩ 臂间选号重合（11-07 新增）
 )
 # 旧页面名（改名后不许在 web/ 里再出现）
 OLD_PAGE_NAMES = ("数据体检看板",)
@@ -86,7 +87,7 @@ def test_glossary_api_contract(glossary):
     for key in ("术语", "卡片", "状态口径", "悬停提示", "口径说明", "诚实边界", "诚实声明"):
         assert key in glossary, "glossary 缺键 %s" % key
     assert glossary["悬停提示"], "「悬停提示」不能是空的（否则用户不知道要悬停 2 秒）"
-    assert len(glossary["卡片"]) == 9
+    assert len(glossary["卡片"]) == 10
     assert [c["id"] for c in glossary["卡片"]] == list(CARD_IDS)
 
 

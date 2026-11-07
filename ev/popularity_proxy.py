@@ -221,4 +221,18 @@ def proxy_note() -> Dict[str, Any]:
         "分位口径": QUANTILE_CALIBER,
         "支持范围": list(SUPPORTED),
         "walk_forward": {"最小训练期数": MIN_TRAIN, "块步长": STEP},
+        # ★ 2026-11-07：把「有没有候选选择 / 窗口有没有重叠」显式写出来。
+        #   本流程是**逐块拟合** β，没有「从 N 套里挑最好」这一步 ⇒ 候选数 = None。
+        #   若不写，读者会以为它和外部程序一样在挑参数。
+        "walk_forward口径": _wfo_disclose(),
     }
+
+
+def _wfo_disclose() -> Dict[str, Any]:
+    """`walk_forward_beta` 的窗口披露（纯函数 `ev.wfo.disclose` 的薄封装）。"""
+    from ev.wfo import disclose
+
+    return disclose(train_n=int(MIN_TRAIN), eval_n=int(STEP), candidates=None,
+                    overlap=False,
+                    note=("切点 c 只用 c 之前的数据拟合，评估期是 c..c+step-1 ⇒ "
+                          "结构上不重叠；β 是拟合值，不是从候选里挑出来的"))

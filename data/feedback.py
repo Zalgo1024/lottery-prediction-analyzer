@@ -507,8 +507,88 @@ def predict_target(lottery_name: str) -> Tuple[Optional[int], Optional[date]]:
     return issue, draw_day
 
 
-# —— P5：机制缝隙快照（出号当时「已知」的测量状态）——
-# 三个字段都挂在 pending 顶层、**不进**「预测号码」⇒ 不影响
+def settle_anchor(lottery_name: str, when=None, *, now: Optional[datetime] = None,
+                  max_advance: int = 5) -> Optional[Dict[str, Any]]:
+    """给定「出号/购买时刻」，判断这张票归属哪一期，并按三条判据给依据。
+
+    为什么要单独一个函数（2026-11-07）
+    --------------------------------
+    此前「这张票算哪一期」由两个独立口径拼出来：期号 = 本地最大期号 + 1；
+    开奖日 = 从本地最近开奖日往后数 draw_days。数据一滞后就会配出错对
+    （`predict_target` 的 docstring 记了 26103 / 9-8 那次）。而**截止时刻**
+    这一维根本没有进口径：21:30 出的号，如果本地还没更新当晚开奖，
+    max+1 算出来的仍是「已经开过的那一期」——开奖后才生成的票。
+
+    三条判据（缺一条就会把票记到错的期）：
+      ① **时间**：该期开奖日的 21:00（`DRAW_CUTOFF`）是分界，晚于它就算「赶不上」；
+      ② **日历**：顺延只能沿 `data/holiday.next_draw_date`（含开奖日与休市）；
+      ③ **锚点**：只认「目标期」本身；推不出来就返回 `None`（待开奖），
+         **绝不回落到最新一期** —— 回落等于拿别人的开奖号给自己结算。
+
+    返回 `{"目标期号", "目标开奖日": date, "依据": [...], "顺延期数": n}`；无数据时 None。
+    """
+    from datetime import time as _time
+
+    issue, draw_day = predict_target(lottery_name)
+    if issue is None or draw_day is None:
+        return None
+
+    cur = when or now or datetime.now()
+    if isinstance(cur, str):
+        try:
+            cur = datetime.fromisoformat(str(cur)[:19])
+        except ValueError:
+            return None
+    cutoff = _time.fromisoformat(DRAW_CUTOFF)
+
+    base_issue, base_day = issue, draw_day
+    reason = [f"本地最大期号 +1 = {issue}，推算开奖日 {draw_day}"]
+    advanced = 0
+    # ① 截止时刻 + ② 日历顺延：逐期往后走，直到该期截止时刻还没到
+    while advanced < max_advance and cur >= datetime.combine(draw_day, cutoff):
+        from data.holiday import next_draw_date
+        try:
+            draw_day = next_draw_date(lottery_name, draw_day + timedelta(days=1))
+        except Exception:                                    # noqa: BLE001
+            return None
+        issue, advanced = issue + 1, advanced + 1
+        reason.append(f"时刻 {cur:%Y-%m-%d %H:%M} 已过 {DRAW_CUTOFF} ⇒ 顺延到 {issue}"
+                      f"（{draw_day}）")
+    return {
+        "目标期号": issue,
+        "目标开奖日": draw_day,
+        "顺延期数": advanced,
+        "基准期号": base_issue,
+        "基准开奖日": base_day,
+        "依据": reason,
+        "口径": (f"截止时刻 {DRAW_CUTOFF}（该期开奖日）+ 开奖日历（含休市）+ "
+                 "只认目标期、不回落最新期"),
+    }
+
+
+def resolve_settlement_draw(lottery_name: str, pred: Dict[str, Any]):
+    """结算时给一条 pending 找到**它那一期**的开奖记录；找不到就返回 None。
+
+    三条查找顺序（与重构前逐字等价，只是抽出来可测）：
+      ① 按 `目标期号`（稳定主键）；
+      ② 按 `预测日期` **精确**匹配（老记录没有期号时才用得上）；
+      ③ 都找不到 ⇒ `None`（= 待开奖）。
+
+    ★ 第 ③ 步必须返回 None，不能「退而取最近一期」：本文件的 `_find_draw_by_date`
+      只做 `==` 精确比较，就是为了让「差一天」不会静默变成「用上一期开奖结算」。
+      这也是外部参考程序注释里那句「绝不把上一期错误兑奖」的同一条纪律。
+    """
+    hit = _find_draw_by_issue(lottery_name, pred.get("目标期号"))
+    if hit is not None:
+        return hit, "期号"
+    pred_date = pred.get("预测日期") or pred.get("目标开奖日") or ""
+    hit = _find_draw_by_date(lottery_name, pred_date)
+    if hit is not None:
+        return hit, "日期精确匹配"
+    return None, "未开奖（不回落）"
+
+
+# —— P5：机制缝隙快照（出号当时「已知」的测量状态）——# 三个字段都挂在 pending 顶层、**不进**「预测号码」⇒ 不影响
 # 「号码组数 == len(预测号码)」契约，也不受压缩影响。
 MECHANISM_SNAPSHOT_KEYS = ("缝隙快照", "机制γ", "机制倾斜")
 
@@ -1408,12 +1488,9 @@ def evaluate_pending_predictions(lottery_name: str) -> dict:
             still_pending_list.append(pred)
             continue
 
-        # 查找对应开奖：优先按期号主键，日期做 fallback
-        target_issue = pred.get("目标期号")
-        actual = _find_draw_by_issue(lottery_name, target_issue)
-        if actual is None:
-            pred_date = pred.get("预测日期", "")
-            actual = _find_draw_by_date(lottery_name, pred_date)
+        # 查找对应开奖：优先按期号主键，日期做 fallback；两者都没有 ⇒ 待开奖
+        # （`resolve_settlement_draw` 里写死了「不回落最新一期」，这里只取结果）
+        actual, _basis = resolve_settlement_draw(lottery_name, pred)
 
         if actual is None:
             # 还没开奖（或期号/日期都查不到），保留 pending

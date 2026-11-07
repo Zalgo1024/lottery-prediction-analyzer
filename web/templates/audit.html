@@ -90,8 +90,52 @@ async function loadAll() {
   await Promise.all([
     loadQuality(lot), loadEv(lot), loadPl(lot), loadDistance(lot),
     loadPayoutProfile(lot), loadTrials(lot), loadAttribution(lot), loadGap(lot),
-    loadRobustness(lot),
+    loadRobustness(lot), loadOverlap(lot),
   ]);
+}
+
+async function loadOverlap(lot) {
+  const el = document.getElementById("hn-overlap");
+  if (!el) return;
+  el.innerHTML = '<div class="alert alert-info">加载臂间重合…</div>';
+  try {
+    const r = await fetch(`/api/audit/overlap/${encodeURIComponent(lot)}`);
+    const d = await r.json();
+    if (d.error) {
+      el.innerHTML = `<div class="alert alert-warning">${esc(d.error)}</div>`;
+      EXPL.onCardRendered("overlap", el, d);
+      return;
+    }
+    if (!d["适用"]) {
+      // ★ 不适用就写不适用 + 原因；不画 0，也不给 z（1 张票重复 200 次会算出 z≈45）
+      el.innerHTML = `<div class="alert alert-info">本彩种不适用：${esc(d["原因"] || "未给出原因")}</div>`
+        + `<div class="audit-note-item" style="list-style:none">缺失的读数不等于 0；这里没有可比的零点。</div>`;
+      EXPL.onCardRendered("overlap", el, d);
+      return;
+    }
+    const z = d.z == null ? "—" : Number(d.z).toFixed(2);
+    const tone = d.z == null ? "muted" : (Math.abs(d.z) < 2 ? "ok" : "warn");
+    el.innerHTML = `
+      <div class="audit-note">基准期 ${esc(d["基准期号"] ?? "—")}　候选池 ${num(d["候选池"])} 张　各挑 ${num(d["注数K"])} 注　种子 ${esc(d["种子"])}</div>
+      <table class="audit-table" style="margin-top:8px">
+        <thead><tr><th>臂</th><th>去重票数</th><th>与另一臂重合</th><th>零假设期望</th><th>z</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>${esc((d["臂"] || [])[0]?.名称 || "A")} vs ${esc((d["臂"] || [])[1]?.名称 || "B")}</td>
+            <td>${num(d["臂A去重票数"])} / ${num(d["臂B去重票数"])}</td>
+            <td><strong>${num(d["重合票数"])}</strong>（${d["重合率_相对较大臂"] == null ? "—" : pct(d["重合率_相对较大臂"])}）</td>
+            <td>${num(d["零假设期望重合"])}　±${num(d["零假设标准差"], 2)}</td>
+            <td>${badge(z, tone)}</td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="audit-note-item" style="list-style:none;margin-top:8px"><strong>判读：</strong>${esc(d["判读"])}</div>
+      <div class="audit-note-item" style="list-style:none">${esc(d["口径"] || "")}</div>
+      <div class="audit-note-item" style="list-style:none">${esc(d["说明"] || "")}</div>`;
+    EXPL.onCardRendered("overlap", el, d);
+  } catch (e) {
+    el.innerHTML = `<div class="alert alert-warning">读取失败：${esc(e.message || e)}（不是「没有重合」，是读不到）</div>`;
+  }
 }
 
 async function loadQuality(lot) {

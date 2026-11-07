@@ -1,0 +1,143 @@
+{% extends "base.html" %}
+{% block head %}
+<style>
+  /* 全部选择器收在 .gen 下：本页样式不外溢到别的页面（base.html 的 body/nav 不动） */
+  .gen{max-width:1320px}
+  .gen .gh{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:6px}
+  .gen .gh .sub{color:var(--gray);font-size:13px;margin-top:2px}
+  .gen .acts{display:flex;gap:8px;flex-wrap:wrap}
+  .gen .btn2{border:1px solid var(--light);background:#fff;color:var(--dark);
+             padding:7px 13px;border-radius:8px;cursor:pointer;font-size:13px}
+  .gen .btn2:hover{border-color:var(--primary);color:#2a9d94}
+  .gen .btn2:disabled{opacity:.45;cursor:not-allowed}
+  .gen .btn2.primary{background:var(--primary);border-color:var(--primary);color:#fff}
+  .gen .btn2.primary:hover{color:#fff;opacity:.9}
+  .gen .btn2.sm{padding:4px 9px;font-size:12px;border-radius:6px}
+  .gen .banner{margin:14px 0;padding:12px 16px;border-radius:9px;border:1px solid var(--light);
+               background:#f1f5f9;color:#475569;font-size:13px}
+  .gen .banner.ok{background:#f0fdf4;border-color:#bbf7d0;color:#15803d}
+  .gen .banner.warn{background:#fffbeb;border-color:#fde68a;color:#78350f}
+  .gen .banner.bad{background:#fef2f2;border-color:#fecaca;color:#b91c1c}
+  .gen .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin:14px 0}
+  .gen .kpi{background:#fff;border:1px solid var(--light);border-radius:9px;padding:12px 14px}
+  .gen .kpi .k{color:var(--gray);font-size:12px;margin-bottom:4px}
+  .gen .kpi .v{font-size:20px;font-weight:700;color:var(--dark)}
+  .gen .kpi .n{color:var(--gray);font-size:11px;margin-top:3px}
+  .gen section{background:#fff;border:1px solid var(--light);border-radius:9px;padding:14px 16px;margin:14px 0}
+  .gen h2{font-size:15px;margin:0 0 10px;font-weight:700;color:var(--dark)}
+  .gen h2 .tag{font-size:11px;font-weight:400;color:var(--gray);margin-left:8px}
+  .gen table{width:100%;border-collapse:collapse;font-size:13px}
+  .gen th,.gen td{text-align:left;padding:7px 9px;border-bottom:1px solid #eef2f7;vertical-align:middle}
+  .gen th{color:var(--gray);font-weight:600;background:#fafbfc;white-space:nowrap}
+  .gen tbody tr:hover{background:#fcfdff}
+  .gen tr:last-child td{border-bottom:none}
+  .gen .num{text-align:right;font-variant-numeric:tabular-nums}
+  .gen .muted{color:var(--gray)}
+  .gen .pill{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;
+             background:#f1f5f9;color:var(--gray);margin-right:4px;white-space:nowrap}
+  .gen .pill.on{background:#f0fdf4;color:#15803d}
+  .gen .pill.off{background:#fef2f2;color:#b91c1c}
+  .gen .pill.warn{background:#fffbeb;color:#b45309}
+  .gen input[type=number]{width:88px;padding:5px 7px;border:1px solid var(--light);border-radius:6px;
+                          font-size:13px;text-align:right;font-variant-numeric:tabular-nums}
+  .gen input[type=number].dirty{border-color:var(--primary);background:#effcfb;font-weight:700}
+  .gen input[type=number]:disabled{background:#f8fafc;color:var(--gray)}
+  .gen .row-acts{white-space:nowrap}
+  .gen .row-acts .btn2{margin-right:4px}
+  .gen .det{background:#fbfcfe;border-top:1px dashed var(--light)}
+  .gen .det td{padding:12px 14px}
+  .gen .det h4{margin:10px 0 6px;font-size:13px;color:var(--dark)}
+  .gen .det h4:first-child{margin-top:0}
+  /* 批次号形如 福彩3D-2026297-一般-生产-20261106-221137-680：身份串允许断行，数字列不动 */
+  .gen .det table{table-layout:auto}
+  .gen .det td:first-child{max-width:300px;word-break:break-all;font-size:12px;color:var(--gray)}
+  .gen .det th{white-space:nowrap}
+  .gen .kv{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:6px 18px;
+           font-size:12px;color:var(--gray);margin-bottom:6px}
+  .gen .kv b{color:var(--dark);font-weight:600}
+  .gen .warnbox{background:#fffbeb;border-left:3px solid #f59e0b;padding:9px 12px;
+                border-radius:6px;margin:8px 0;color:#78350f;font-size:12px}
+  .gen .errbox{background:#fef2f2;border-left:3px solid #ef4444;padding:9px 12px;
+               border-radius:6px;margin:8px 0;color:#b91c1c;font-size:12px}
+  .gen .log{font-size:12px;color:var(--gray);max-height:190px;overflow:auto;
+            background:#fbfcfe;border:1px solid var(--light);border-radius:8px;padding:10px 12px}
+  .gen .log div{padding:2px 0;border-bottom:1px dotted #eef2f7}
+  .gen .log div:last-child{border-bottom:none}
+  .gen .log .t{color:#94a3b8;margin-right:8px}
+  .gen ol.cal{margin:6px 0 0;padding-left:20px;color:var(--gray);font-size:12px}
+  .gen ol.cal li{margin:3px 0}
+  .gen ol.cal b{color:var(--dark)}
+  .gen .foot{color:var(--gray);font-size:12px;margin-top:18px;text-align:center}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="gen">
+  <div class="gh">
+    <div>
+      <h2 style="margin-bottom:2px">出号设置</h2>
+      <div class="sub" id="sub">读取中…</div>
+    </div>
+    <div class="acts">
+      <button class="btn2" id="btn-refresh">刷新读数</button>
+      <button class="btn2" id="btn-apply">按策略调整<small class="muted">（动态模式）</small></button>
+      <button class="btn2 primary" id="btn-regen-all">全部重出</button>
+    </div>
+  </div>
+
+  <div class="banner" id="banner">正在读取设置…</div>
+
+  <div class="grid" id="kpis"></div>
+
+  <section>
+    <h2>各彩种出号设置 <span class="tag">注数 = 出号数量 = 最终注数（引擎强制）；改注数只改规模，不改单注概率</span></h2>
+    <table>
+      <thead>
+        <tr>
+          <th>彩种</th>
+          <th class="num">生效注数</th>
+          <th class="num">上限</th>
+          <th class="num">配置值<br><small class="muted">fixed 锚点</small></th>
+          <th class="num">动态值</th>
+          <th class="num">实际出号</th>
+          <th>目标期号</th>
+          <th>目标开奖日</th>
+          <th>一致性</th>
+          <th>最近生成</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <div class="warnbox" id="save-hint">
+      保存只写<b>当前模式</b>那一个字段（动态写 dynamic、固定写 fixed），不动另一个字段的意图锚点；
+      注数超过上限时按上限夹取并回传实际值。
+    </div>
+  </section>
+
+  <section>
+    <h2>操作记录 <span class="tag">每次出号的目标期号 / 重出批号 / 单期上限口径都记在这里</span></h2>
+    <div class="log" id="log"><div class="muted">暂无操作（本页不会自动出号）</div></div>
+  </section>
+
+  <section>
+    <h2>口径说明 <span class="tag">这些不是提示文案，是判据</span></h2>
+    <ol class="cal">
+      <li><b>单期上限</b>的语义是<b>单彩种 · 单批</b>：<code>clamp()</code> 的 n_cap = 单期上限 ÷ 单价，逐彩种、逐批各自取；
+          跨彩种 / 跨批的总量由<b>月度总额</b>约束，不由这一行约束。</li>
+      <li><b>重出</b>不删除旧号：旧批保留、开奖后照常结算；新批带「重出批号」与旧批分开。
+          重出<b>不受同期累计约束</b>（这是用户主动再加一套票，不是自动路径加注），但同期累计会出现在批次明细里。</li>
+      <li><b>一致性 ≠ 沉默</b>：有 pending 但组数对不上 ⇒ 标「不一致」并给差额；还没有下一期 pending ⇒ 标「无预测」（开奖后的正常空窗，不是错误）；
+          生效注数 0 ⇒ 标「停发（预算包络）」，此时重出会得到 0 注，属既定行为。</li>
+      <li><b>截断要披露</b>：出号时若因上限/额度被截断，批次明细里的「补齐统计 · 截断」列会大于 0；它是 0 才表示没被截断。</li>
+      <li><b>读不到就写「—」</b>：接口失败、字段缺失、批次未加载都显示破折号，不显示 0 —— 0 是一个真实读数。</li>
+    </ol>
+  </section>
+
+  <div class="foot">读数来自既有接口 + 三个既有写接口（保存注数 / 重出 / 按策略调整）。改 <code>static/js/gen.js</code> 不需要重启；改本模板或路由需要重启。</div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/gen.js?v={{ asset_ver('js/gen.js') }}"></script>
+{% endblock %}

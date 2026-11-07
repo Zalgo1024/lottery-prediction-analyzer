@@ -201,6 +201,77 @@ def check_period_cap():
                 "真实问题": [], "对照告警": [], "披露": []}
 
 
+def check_ticket_shape():
+    """第 8 项：票面口径（注数 = 组数；每组票面必须合法）。**只读**。
+
+    为什么单独一项（2026-11-07）：项目里「声明组数 / 目标注数 / 实际注数 /
+    `len(预测号码)`」是四个各自写入的数字，从来没有一处校验它们相等；票面本身
+    （每区几个号、是否越界、不可重复区有没有重复）也没有整批校验过。
+    这两类失真的共同点是**不报错**：页面上注数看着正常，开奖后才发现号码少了一批、
+    或多出一个分区。判据集中在 `prediction/tickets.py`（注数公式只在那里写一次）。
+
+    只报「有下一期生产批」的彩种；没有 pending 是开奖后的正常空窗，不算问题。
+    """
+    from prediction.tickets import batch_check
+    from data.feedback import _next_issue, latest_production_pending, load_pending
+
+    rows, problems, notes = [], [], []
+    for lot in LOTTERY_CONFIG:
+        try:
+            issue = _next_issue(lot)
+            p = latest_production_pending(load_pending(lot), target_issue=issue)
+        except Exception as e:                                # noqa: BLE001
+            rows.append({"彩种": lot, "状态": "读取失败",
+                         "说明": f"{type(e).__name__}: {e}"})
+            continue
+        if p is None:
+            rows.append({"彩种": lot, "目标期号": issue, "状态": "无预测",
+                         "说明": "下一期还没有 pending（开奖后的正常空窗，非错误）"})
+            continue
+
+        groups = p.get("预测号码") or []
+        declared = p.get("号码组数")
+        # 快乐8 的玩法维度暂未写进 pending（生产走默认玩法「选十」）⇒ play=None 即默认
+        play = p.get("玩法") or p.get("kl8Play") or None
+        try:
+            rep = batch_check(lot, groups, declared=declared, play=play)
+        except Exception as e:                                # noqa: BLE001
+            rows.append({"彩种": lot, "目标期号": issue, "状态": "检查失败",
+                         "说明": f"{type(e).__name__}: {e}"})
+            continue
+
+        n = len(groups)
+        # 四个数字必须相等：声明组数 / 实际组数 / 目标注数 / 实际注数
+        for key in ("目标注数", "实际注数"):
+            v = p.get(key)
+            if v is None:
+                continue
+            try:
+                if int(v) != n:
+                    rep["问题"].append(f"{key} {int(v)} ≠ 实际组数 {n}")
+            except (TypeError, ValueError):
+                rep["问题"].append(f"{key} 不是整数：{v!r}")
+
+        ok = not rep["问题"]
+        rows.append({
+            "彩种": lot, "目标期号": issue, "批次号": p.get("批次号"),
+            "声明组数": declared, "实际组数": n,
+            "目标注数": p.get("目标注数"), "实际注数": p.get("实际注数"),
+            "非法组数": rep["非法组数"],
+            "状态": "合法" if ok else "不合口径",
+            "问题": rep["问题"],
+        })
+        if not ok:
+            problems.append(f"{lot}（期 {issue}）：" + "；".join(rep["问题"])[:160])
+
+    checked = [r for r in rows if r.get("状态") in ("合法", "不合口径")]
+    if not checked:
+        notes.append("本期没有任何可校验的生产批（全部无预测或读取失败）")
+    return {"适用": True, "彩种": rows, "真实问题": problems,
+            "已校验批次数": len(checked),
+            "披露": notes}
+
+
 def _quarantined(tag: str, hist: list, pend: list) -> bool:
     """判断某条审计问题是否落在「已隔离记录」上。
 
@@ -266,6 +337,7 @@ def main(push: bool = True):
     pipeline = check_pipeline_freshness()
     guard = check_write_guard()
     period_cap = check_period_cap()
+    tickets = check_ticket_shape()
 
     real_problems = (
         [(p["彩种"], "|".join(p["问题"])) for p in pending if p["问题"]]
@@ -276,6 +348,7 @@ def main(push: bool = True):
            for p in pipeline if p.get("落后")]
         + ([("系统", guard["说明"])] if not guard["可用"] else [])
         + [("预算", s) for s in (period_cap.get("真实问题") or [])]
+        + [("票面", s) for s in (tickets.get("真实问题") or [])]
     )
 
     stamp = f"{today:%Y%m%d}"
@@ -283,6 +356,7 @@ def main(push: bool = True):
         json.dumps({"日期": str(today), "完整性": integrity, "记录审计": record_issues,
                     "pending": pending, "关键字段": fields, "流水线": pipeline,
                     "写保护": guard, "单期上限口径": period_cap,
+                    "票面口径": tickets,
                     "真实问题": real_problems},
                    ensure_ascii=False, indent=2, default=str), encoding="utf-8")
 
@@ -366,6 +440,31 @@ def main(push: bool = True):
             L.append(f"- ⚠ {w}")
     for note in (pc.get("披露") or []):
         L.append(f"> {note}")
+
+    L.append("## 8. 票面口径（注数 = 组数；票面合法）")
+    tk = tickets
+    if not tk.get("适用"):
+        L.append(f"- **不适用**：{tk.get('原因') or '未给出原因'}（缺席≠通过）")
+    else:
+        L.append(f"- 已校验 {tk.get('已校验批次数', 0)} 个彩种的下一期生产批；"
+                 "判据 = 声明组数 / 实际组数 / 目标注数 / 实际注数 四者相等，"
+                 "且每组票面的分区名、号码数、取值范围、可重复性都符合 schema。")
+        for r in (tk.get("彩种") or []):
+            if r.get("状态") == "合法":
+                L.append(f"  - {r['彩种']} 期{r.get('目标期号')}：{r.get('实际组数')} 组 × "
+                         f"{r.get('实际注数')} 注，票面全部合法")
+            elif r.get("状态") == "无预测":
+                L.append(f"  - {r['彩种']}：无预测（开奖后的正常空窗，非错误）")
+            elif r.get("状态") == "不合口径":
+                L.append(f"  - ⚠ {r['彩种']} 期{r.get('目标期号')}：" +
+                         "；".join(r.get("问题") or []))
+            else:
+                L.append(f"  - ⚠ {r['彩种']}：{r.get('状态')} — {r.get('说明')}")
+        for note in (tk.get("披露") or []):
+            L.append(f"> {note}")
+        L.append("> 注数公式只在 `prediction/tickets.py` 写一次：乐透型复式 C(池,应选)、"
+                 "胆拖 C(拖,应选-胆)、位置型取各位置池大小之积（不是 C(池,k)）。")
+
     if real_problems:
         L.append("")
         L.append("## ⚠️ 真实待处理问题")

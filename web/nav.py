@@ -78,6 +78,8 @@ NAV_GROUPS = [
             _item("/train", "训练", "训练工作台", "train"),
             _item("/rolling", "持续训练", "持续训练中心", "rolling"),
             _item("/predict", "预测", "号码预测", "predict"),
+            _item("/gen", "出号设置", "出号设置", "predict",
+                  note="逐彩种：生效注数 / 上限 / fixed 锚点 / 动态值 / 实际出号 / 目标期号 / 批次与重出批号 / 预算包络；可改注数、单彩种或串行全部重出"),
             _item("/compare", "对比", "对比分析", "compare"),
             _item("/robustness", "鲁棒性", "鲁棒性检验", "robustness"),
         ],
