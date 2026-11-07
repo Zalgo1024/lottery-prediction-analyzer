@@ -371,6 +371,49 @@ def test_audit_and_gate_share_one_reason_source(tmp_path, monkeypatch):
     assert PS.gate_snapshot(_snap(), draw_time=DRAW_TIME)["合格"] is False
 
 
+def test_audit_never_accepts_replay_snapshot(tmp_path):
+    """★ 护栏本体（不依赖现场样本）：回放快照**永远**不合格，生产快照必须合格。
+
+    为什么单列一条：原来的判据只写在「读真实留证目录」的用例里，而那个目录不入库
+    ⇒ CI 上文件数为 0，护栏实际**从未在任何干净环境执行过**（2026-11-07 红）。
+    这里用两份合成快照把「性质闸门」钉在纯函数上：任何环境都能跑，也不依赖
+    本机有没有生产留证。
+
+    刻意让回放那份的**批次时间可解析**（PROD_TIME）：这样它唯一的不合格理由
+    只能是「时间点性质不是生产冻结」。若把占位串一起塞进来，就分不清是性质拦住的
+    还是时间解析拦住的 —— 两条判据必须各自可单独证伪。
+    """
+    replay = _snap(issue="26127", n_nature=PS.REPLAY_NATURE)   # 批次时间仍可解析
+    prod = _snap(issue="26128", n_nature=PS.PRODUCTION_NATURE)
+    # ★ 用子目录而不是 tmp_path 根：根 conftest 的 autouse 夹具会把
+    #   `ticket_size.json` 种在 tmp_path 下（`_seed_ticket_size_store()`），
+    #   而 audit_freeze_dir 按 `*.json` 扫描 ⇒ 直接在根上会多算一份，
+    #   把「分母 = 文件总数」这条断言变成环境噪音。
+    d = tmp_path / "freeze"
+    d.mkdir()
+    OF.save_snapshot(replay, path=d / "a_replay.json")
+    OF.save_snapshot(prod, path=d / "b_prod.json")
+
+    a = PS.audit_freeze_dir(d)
+    assert a["文件总数"] == 2                       # 分母 = 文件总数
+    rows = {r["文件"]: r for r in a["逐份"]}
+
+    assert rows["a_replay.json"]["合格"] is False, "回放模拟快照被判合格 ⇒ 前视口子被打开"
+    # ★ 不能用「原因里有没有『批次时间』子串」来区分两道闸：回放性质的字面量
+    #   本身就是「回放模拟（非生产批次时间）」，子串判断会把自己绊倒。
+    #   改成数条数 + 看前缀：这一份只该被性质一条拦下。
+    reasons = rows["a_replay.json"]["原因"]
+    assert len(reasons) == 1, f"回放快照应只被一条判据拦下，实际 {len(reasons)} 条：{reasons}"
+    assert reasons[0].startswith("时间点性质为"), \
+        f"回放被拦下的理由必须点名「时间点性质」：{reasons}"
+
+    assert rows["b_prod.json"]["合格"] is True, \
+        f"生产性质 + 批次时间可解析却被判不合格：{rows['b_prod.json']['原因']}"
+    assert a["合格数"] == 1
+    assert a["合格数"] + a["不合格数"] == a["文件总数"]
+    assert a["时间点性质分布"] == {PS.REPLAY_NATURE: 1, PS.PRODUCTION_NATURE: 1}
+
+
 def test_real_freeze_pool_replay_is_never_eligible():
     """★ 现场事实（2026-11-06 接线后更新）：快照池**已开始混入生产冻结快照**。
 
@@ -386,8 +429,20 @@ def test_real_freeze_pool_replay_is_never_eligible():
 
     显式传真实目录：conftest 已把模块级 FREEZE_DIR 重定向到 tmp（隔离生效），
     测试不许依赖被隔离的默认值去读真身。
+
+    ★ 2026-11-07（CI 复现）：`logs/order_freeze/` 是**本机生产留证产物**，不入库
+      （`.gitignore` 只放行 `logs/logger.py`）。CI / 全新克隆里该目录根本不存在 ⇒
+      `文件总数 == 0` ⇒ 这一条不是「回放被放行」，而是**没有样本**。原断言却在
+      这里失败，等于让「护栏是否存在」取决于一台机器上恰好有没有生产留证。
+      处理：判据本体改由合成样本钉住（见下一条，任何环境都跑），本条降为
+      **现场事实核对**，无样本时显式 skip 并点名缺什么（缺席≠通过）。
     """
-    a = PS.audit_freeze_dir(ROOT / "logs" / "order_freeze")
+    d = ROOT / "logs" / "order_freeze"
+    if not d.is_dir():
+        pytest.skip("logs/order_freeze 不在仓库内（生产留证产物，gitignored）"
+                    " ⇒ CI/全新克隆无现场样本；判据本体见 "
+                    "test_audit_never_accepts_replay_snapshot（合成样本，任何环境都跑）")
+    a = PS.audit_freeze_dir(d)
     assert a["文件总数"] > 0
     rows = a["逐份"]
     replay = [r for r in rows if r["时间点性质"] != PS.PRODUCTION_NATURE]

@@ -11,7 +11,7 @@
   5. 测试只写 tmp 目录，绝不碰生产 feedback 目录。
 """
 import sys
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import pytest
@@ -166,7 +166,39 @@ def _safe_gen_time():
                                   microsecond=0).isoformat()
 
 
-def test_record_pending_keeps_target_count(tmp_fb):
+class _FrozenDate(date):
+    """把 `data.feedback` 眼里的「今天」钉死（只替换 today()）。"""
+
+    _fixed = None
+
+    @classmethod
+    def today(cls):
+        return cls._fixed
+
+
+def _freeze_today_at_target_draw(monkeypatch, lottery="双色球"):
+    """★ 2026-11-07（CI 复现）：把「今天」钉在目标开奖日，解除墙钟依赖。
+
+    这两例验的是「入账不按比例削注」，但它撞上了马后炮闸门的**隐含前提**：
+    闸门用 `date.today()` 判定目标期是否已过。CI 用的是**提交时那一份 CSV**，
+    一旦停更，`_next_issue()` 的目标开奖日就落在这之前 ⇒ 闸门静默拒绝
+    （`record_pending_prediction` 的返回值被用例忽略）⇒ pend 为空 ⇒
+    `assert len(pend) == 1` 变成「今天离数据有多远」的读数，而不是判据。
+    实锤：CI 上数据停在 26127（推算开奖日 2026-11-05），跑在 11-07 ⇒ 被拒。
+
+    钉法：目标开奖日当天 09:00 出号（未过 20:00）——与本例想验的语义一致
+    （「开奖前出号，照常入账且不削注」），且与真实日期无关，任何环境都可复现。
+    """
+    target = fb._next_issue(lottery)
+    draw = fb._target_draw_date(lottery, target) if target is not None else None
+    if target is None or draw is None:
+        pytest.skip(f"本地数据不足，无法推算 {lottery} 目标开奖日（CI/全新克隆）")
+    _FrozenDate._fixed = draw
+    monkeypatch.setattr(fb, "date", _FrozenDate)
+    return target
+
+
+def test_record_pending_keeps_target_count(tmp_fb, monkeypatch):
     """★ 2026-10-11「出号数量 = 最终注数」：生产入账不再按比例削减。
 
     历史行为：keep_ratio=0.4 使看板滑轨设 176 实际只入账 64 注，与看板文案
@@ -177,7 +209,9 @@ def test_record_pending_keeps_target_count(tmp_fb):
     # 目标期号取「真正的下一期」而不是硬编码——硬编码会在开奖后变成已开奖期号，
     # 被马后炮闸门拒绝（2026-09-21 实锤：硬编码 26109 在 09-20 开奖后即失效；
     # 此前它能通过是因为开奖日历把 09-20 误判休市、把推算开奖日推到 09-22）。
-    rec = {"目标期号": fb._next_issue("双色球"), "来源": "predict", "档位": "一般",
+    # ★ 仅「取下一期」还不够：闸门还要拿它跟今天比，故把今天钉在它的开奖日。
+    rec = {"目标期号": _freeze_today_at_target_draw(monkeypatch),
+           "来源": "predict", "档位": "一般",
            "目标注数": 20, "生成时间": _safe_gen_time(),
            "预测号码": tickets}
     fb.record_pending_prediction("双色球", rec)
@@ -189,10 +223,11 @@ def test_record_pending_keeps_target_count(tmp_fb):
     assert stored["号码组数"] == 20
 
 
-def test_record_pending_selects_when_target_below_candidates(tmp_fb):
+def test_record_pending_selects_when_target_below_candidates(tmp_fb, monkeypatch):
     """目标注数 < 候选数 → 精选到目标（压缩能力保留，KPI 随身）。"""
     tickets = _mk_pool(n=20)
-    rec = {"目标期号": fb._next_issue("双色球"), "来源": "predict", "档位": "一般",
+    rec = {"目标期号": _freeze_today_at_target_draw(monkeypatch),
+           "来源": "predict", "档位": "一般",
            "目标注数": 6, "生成时间": _safe_gen_time(),
            "预测号码": tickets}
     fb.record_pending_prediction("双色球", rec)

@@ -3,7 +3,7 @@
 > **把「看起来有效」和「真的有效」分开。** 一套可复现的检验框架：8 个彩种、38,347 期公开开奖数据当压力测试场，
 > 用 3,073 例测试和 10 张只读指标卡，把「结论凭什么成立」写成可执行判据。
 
-![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB) ![Tests](https://img.shields.io/badge/pytest-3073%20passed-3B6D11) ![Lotteries](https://img.shields.io/badge/%E5%BD%A9%E7%A7%8D-8-854F0B) ![License](https://img.shields.io/badge/License-AGPL--3.0-blue)
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB) ![Tests](https://img.shields.io/badge/pytest-3074%20passed-3B6D11) ![Lotteries](https://img.shields.io/badge/%E5%BD%A9%E7%A7%8D-8-854F0B) ![License](https://img.shields.io/badge/License-AGPL--3.0-blue)
 
 ## 0. 30 秒读懂
 
@@ -123,7 +123,7 @@ python run.py                # 看门狗模式，访问 http://127.0.0.1:5000
 # 3. 或者只用 CLI
 python cli.py --help
 
-# 4. 跑测试套件（全量 3073 例）
+# 4. 跑测试套件（全量 3074 例）
 pytest -q                    # 约 15–20 分钟（慢点集中在真实 predict 全流程的契约测试）
 ```
 
@@ -273,8 +273,8 @@ python scripts/collect_evidence_window.py --status  # 证据采集状态
 ## 11. 测试、维护与备份
 
 ```bash
-pytest -q              # 3073 passed（全量；含奖金表、写保护与分区归一化、批次契约、出号数量、消息推送、休市日历、机制缝隙四轨、影子接线与证据时间方向、预算并发预占、采集频率、文档维护护栏等）
-pytest tests/          # 3064 passed（仅 tests/ 目录；另有 9 例在 scripts/ 下，故用 pytest -q 跑全量）
+pytest -q              # 3074 passed（全量；含奖金表、写保护与分区归一化、批次契约、出号数量、消息推送、休市日历、机制缝隙四轨、影子接线与证据时间方向、预算并发预占、采集频率、文档维护护栏等）
+pytest tests/          # 3065 passed（仅 tests/ 目录；另有 9 例在 scripts/ 下，故用 pytest -q 跑全量）
 ```
 
 本机跑全量需 `PYTEST_DEBUG_TEMPROOT=E:/707_backup_p5_2200/pytest_tmp PYTHONUTF8=1`；`pytest.ini` 用 `--strict-markers` 注册 `realdata` / `statsmodels` / `winfont` 等标记，避免选错测试集却不报错。
